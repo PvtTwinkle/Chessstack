@@ -1265,7 +1265,12 @@
 		currentLineIdx++;
 
 		if (currentLineIdx >= allLines.length) {
-			// All lines done — finalize session.
+			// All lines done — finalize session. lineComplete must be reset here,
+			// otherwise the template's if/else chain (which checks lineComplete
+			// before phase === 'complete') keeps re-rendering the same
+			// "Line complete" interstitial forever, making the Next Line button
+			// appear to do nothing on the last line of the queue.
+			lineComplete = false;
 			if (sessionId !== null) {
 				try {
 					const finalRes = await fetch(`/api/drill/session/${sessionId}`, {
@@ -1495,13 +1500,6 @@
 					</button>
 				</div>
 			</div>
-		{/if}
-
-		<!-- Drill-all shortcut (only in normal due-cards mode) -->
-		{#if data.drillMode !== 'all' && phase !== 'complete'}
-			<a href="/drill?mode=all{drillType === 'line' ? '&type=line' : ''}" class="drill-all-link"
-				>Drill all {drillType === 'line' ? 'lines' : 'cards'}</a
-			>
 		{/if}
 
 		<!-- Progress bar -->
@@ -2029,25 +2027,6 @@
 		border-radius: var(--radius-sm);
 		font-size: 0.82rem;
 		font-weight: 600;
-		color: var(--color-accent, #3b82f6);
-	}
-
-	.drill-all-link {
-		display: block;
-		text-align: center;
-		padding: var(--space-2) var(--space-3);
-		font-size: 0.8rem;
-		color: var(--color-text-secondary);
-		text-decoration: none;
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-sm);
-		transition:
-			border-color var(--dur-fast) var(--ease-snap),
-			color var(--dur-fast) var(--ease-snap);
-	}
-
-	.drill-all-link:hover {
-		border-color: var(--color-accent, rgba(59, 130, 246, 0.4));
 		color: var(--color-accent, #3b82f6);
 	}
 
