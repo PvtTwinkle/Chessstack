@@ -114,7 +114,7 @@ export const PATCH: RequestHandler = async ({ locals, request }) => {
 
 	// Gap finder minimum games (sample-size floor, within the rating window):
 	// must be one of the preset values.
-	const VALID_GAP_MIN_GAMES = [10, 100, 1000, 10000];
+	const VALID_GAP_MIN_GAMES = [10, 100, 1000, 10000, 100000];
 	if (typeof body.gapMinGames === 'number' && VALID_GAP_MIN_GAMES.includes(body.gapMinGames)) {
 		updates.gapMinGames = body.gapMinGames;
 	}

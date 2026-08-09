@@ -20,6 +20,30 @@
 		await invalidateAll();
 	}
 
+	// ── Gap Finder depth section filter ─────────────────────────────────
+	// Same three buckets and thresholds as Drill Mode's card-mode section
+	// filter (Foundations 1–5, Mainlines 6–15, Deep 16+), read from the
+	// FEN's own fullmove-number field so both surfaces agree on what
+	// counts as "foundations" without sharing code across the two pages.
+	// Popularity-descending sort otherwise buries shallow, unpopular-only-
+	// because-untested gaps under deep, well-covered mainline branches —
+	// this lets the user clear Foundations before moving on.
+	type GapSection = 'all' | 'foundations' | 'mainlines' | 'deep';
+	let selectedGapSection = $state<GapSection>('all');
+
+	function getGapSection(fen: string): Exclude<GapSection, 'all'> {
+		const move = parseInt(fen.split(' ')[5], 10) || 1;
+		if (move <= 5) return 'foundations';
+		if (move <= 15) return 'mainlines';
+		return 'deep';
+	}
+
+	const displayedGaps = $derived(
+		selectedGapSection === 'all'
+			? data.gaps
+			: data.gaps.filter((g) => getGapSection(g.toFen) === selectedGapSection)
+	);
+
 	// ── Health prompt (actionable hint for the weakest factor) ─────────
 	let healthPrompt = $derived.by(() => {
 		if (data.totalCards === 0 || data.healthScore >= 80) return null;
@@ -398,9 +422,10 @@
 			{#if data.gaps.length > 0}
 				<div class="widget widget-wide">
 					<div class="widget-label">
-						<span class="gap-badge">{data.gaps.length}</span>
-						Gap{data.gaps.length === 1 ? '' : 's'} Found
+						<span class="gap-badge">{displayedGaps.length}</span>
+						Gap{displayedGaps.length === 1 ? '' : 's'} Found
 						<select class="gap-threshold" value={gapMinGames} onchange={updateGapThreshold}>
+							<option value={100000}>100,000+ games</option>
 							<option value={10000}>10,000+ games</option>
 							<option value={1000}>1,000+ games</option>
 							<option value={100}>100+ games</option>
@@ -408,30 +433,71 @@
 						</select>
 					</div>
 					<p class="gap-rating-note">Popularity based on Lichess games in the {data.gapRatingLabel} range.</p>
-					<ul class="gap-list">
-						{#each data.gaps.slice(0, 5) as gap (gap.toFen)}
-							<li class="gap-item">
-								<div class="gap-info">
-									<span class="gap-line">{formatLine(gap.line)}</span>
-									{#if gap.popularityPct !== undefined && gap.gamesPlayed !== undefined}
-										<span class="gap-popularity"
-											>Played {gap.popularityPct.toFixed(0)}% of the time ({gap.gamesPlayed.toLocaleString()}
-											games)</span
-										>
-									{/if}
-								</div>
-								<a href="{base}/build?line={encodeURIComponent(gap.line)}" class="gap-link">
-									Build
-								</a>
-							</li>
-						{/each}
-					</ul>
+					<div class="gap-section-tabs">
+						<button
+							class="gap-section-tab"
+							class:active={selectedGapSection === 'all'}
+							onclick={() => (selectedGapSection = 'all')}
+						>
+							All <span class="tab-count">{data.gaps.length}</span>
+						</button>
+						<button
+							class="gap-section-tab"
+							class:active={selectedGapSection === 'foundations'}
+							onclick={() => (selectedGapSection = 'foundations')}
+						>
+							Foundations (1–5) <span class="tab-count"
+								>{data.gaps.filter((g) => getGapSection(g.toFen) === 'foundations').length}</span
+							>
+						</button>
+						<button
+							class="gap-section-tab"
+							class:active={selectedGapSection === 'mainlines'}
+							onclick={() => (selectedGapSection = 'mainlines')}
+						>
+							Mainlines (6–15) <span class="tab-count"
+								>{data.gaps.filter((g) => getGapSection(g.toFen) === 'mainlines').length}</span
+							>
+						</button>
+						<button
+							class="gap-section-tab"
+							class:active={selectedGapSection === 'deep'}
+							onclick={() => (selectedGapSection = 'deep')}
+						>
+							Deep Lines (16+) <span class="tab-count"
+								>{data.gaps.filter((g) => getGapSection(g.toFen) === 'deep').length}</span
+							>
+						</button>
+					</div>
+					{#if displayedGaps.length === 0}
+						<p class="widget-empty">No gaps in this section</p>
+					{:else}
+						<ul class="gap-list">
+							{#each displayedGaps.slice(0, 5) as gap (gap.toFen)}
+								<li class="gap-item">
+									<div class="gap-info">
+										<span class="gap-line">{formatLine(gap.line)}</span>
+										{#if gap.popularityPct !== undefined && gap.gamesPlayed !== undefined}
+											<span class="gap-popularity"
+												>Played {gap.popularityPct.toFixed(0)}% of the time ({gap.gamesPlayed.toLocaleString()}
+												games)</span
+											>
+										{/if}
+									</div>
+									<a href="{base}/build?line={encodeURIComponent(gap.line)}" class="gap-link">
+										Build
+									</a>
+								</li>
+							{/each}
+						</ul>
+					{/if}
 				</div>
 			{:else}
 				<div class="widget widget-wide gap-covered">
 					<div class="widget-label">
 						Gap Finder
 						<select class="gap-threshold" value={gapMinGames} onchange={updateGapThreshold}>
+							<option value={100000}>100,000+ games</option>
 							<option value={10000}>10,000+ games</option>
 							<option value={1000}>1,000+ games</option>
 							<option value={100}>100+ games</option>
@@ -713,6 +779,43 @@
 		margin: 2px 0 var(--space-2);
 		font-size: 11px;
 		color: var(--color-text-secondary);
+	}
+
+	.gap-section-tabs {
+		display: flex;
+		gap: 0.35rem;
+		margin-bottom: var(--space-2);
+	}
+
+	.gap-section-tab {
+		flex: 1;
+		padding: 0.35rem 0.25rem;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--color-border);
+		background: var(--color-surface);
+		color: var(--color-text-secondary);
+		font-size: 0.7rem;
+		font-family: var(--font-body);
+		font-weight: 600;
+		cursor: pointer;
+		transition: all var(--dur-fast) var(--ease-snap);
+		text-align: center;
+	}
+
+	.gap-section-tab:hover {
+		border-color: var(--color-accent);
+		color: var(--color-text-primary);
+	}
+
+	.gap-section-tab.active {
+		background: rgba(91, 127, 164, 0.15);
+		border-color: var(--color-accent);
+		color: var(--color-accent);
+	}
+
+	.gap-section-tab .tab-count {
+		opacity: 0.7;
+		font-weight: 400;
 	}
 
 	.gap-badge {
