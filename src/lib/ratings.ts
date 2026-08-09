@@ -25,3 +25,36 @@ export function bracketForRating(elo: number): number | null {
 	// 1001–1200 → 1, 1201–1400 → 2, 1401–1600 → 3, etc.
 	return Math.min(7, Math.floor((elo - 1001) / 200) + 1);
 }
+
+// Gap Finder rating window — how many brackets below/above the trainer rating's
+// own bracket to include when aggregating Lichess player popularity data.
+// Asymmetric on purpose: online pairing skews toward opponents at or above your
+// own rating almost as often as below it, and -1/+2 gives more headroom on the
+// upper side where a single bracket alone tends to be sparser at deeper plies.
+const GAP_BRACKET_WINDOW_BELOW = 1;
+const GAP_BRACKET_WINDOW_ABOVE = 2;
+
+/**
+ * Returns the rating-bracket window used by the Gap Finder for a given
+ * trainer rating: the bracket IDs to aggregate, and a human-readable label
+ * of the resulting ELO range for display next to the gap list.
+ *
+ * Falls back to DEFAULT_BRACKET_ID (and its own ±1/+2 window) when
+ * trainerRating is null (trainer mode not yet set up) or >= 2400 (outside
+ * the Players tab's bracket range entirely, since bracket 7 tops out at 2400).
+ */
+export function gapRatingWindow(trainerRating: number | null): {
+	brackets: number[];
+	label: string;
+} {
+	const rawCenter = trainerRating !== null ? bracketForRating(trainerRating) : null;
+	const center = rawCenter ?? DEFAULT_BRACKET_ID;
+
+	const minId = Math.max(0, center - GAP_BRACKET_WINDOW_BELOW);
+	const maxId = Math.min(7, center + GAP_BRACKET_WINDOW_ABOVE);
+	const brackets = Array.from({ length: maxId - minId + 1 }, (_, i) => minId + i);
+
+	const label = `${RATING_BRACKETS[minId].min}–${RATING_BRACKETS[maxId].max}`;
+
+	return { brackets, label };
+}

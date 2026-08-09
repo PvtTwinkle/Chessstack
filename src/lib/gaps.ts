@@ -1,34 +1,40 @@
 // Gap Finder — shared logic for detecting uncovered positions.
 //
-// A "gap" is an opponent-turn position in the user's repertoire where
-// a book move exists but the user has no prepared response to it.
-// For example, if the user plays 1.e4 and the book has 1...c5, 1...e5,
-// and 1...e6 as responses, but the user only has lines after 1...e5,
-// then 1...c5 and 1...e6 are gaps.
+// A "gap" is an opponent-turn position in the user's repertoire where a
+// move popular among Lichess players near the user's own rating exists but
+// the user has no prepared response to it. For example, if the user plays
+// 1.e4 and players in their rating window reply with 1...c5, 1...e5, and
+// 1...e6, but the user only has lines after 1...e5, then 1...c5 and
+// 1...e6 are gaps. `bookMoveSan` / `bookMoves` below keep their original
+// names for API stability, but the candidate moves come from the players
+// database (lichess_moves), not an opening book.
 
 import { fenKey, STARTING_FEN } from '$lib/fen';
-import { bookMove, chessmontMoves } from '$lib/db/schema';
-import { and, inArray, gte, desc } from 'drizzle-orm';
+import { lichessMoves } from '$lib/db/schema';
+import { and, inArray } from 'drizzle-orm';
 import { getEffectiveStartFens } from '$lib/repertoire';
+import { gapRatingWindow } from '$lib/ratings';
 import type { db } from '$lib/db';
 export { fenKey, STARTING_FEN };
 
-/** A single gap: a book/masters move the user hasn't prepared a response to. */
+/** A single gap: a player-DB move the user hasn't prepared a response to. */
 export interface Gap {
-	fromFen: string; // opponent-turn position where the book move starts
-	bookMoveSan: string; // the book move with no user response
-	toFen: string; // position after that book move (user needs a move here)
+	fromFen: string; // opponent-turn position where the move starts
+	bookMoveSan: string; // the candidate move with no user response
+	toFen: string; // position after that move (user needs a move here)
 	line: string; // comma-separated SAN list for ?line= deep link to Build Mode
 	depth: number; // number of half-moves to reach toFen (for ranking)
-	gamesPlayed?: number; // masters DB game count (undefined for book-only gaps)
+	gamesPlayed?: number; // games played within the rating window (undefined only if moves.length === 0)
+	popularityPct?: number; // % of games at this position where this move was played
 }
 
-/** Minimal move shape — works with userMove, bookMove, and chessmontMoves row types. */
+/** Minimal move shape — works with userMove and the aggregated lichessMoves rows. */
 interface MoveRow {
 	fromFen: string;
 	toFen: string;
 	san: string;
 	gamesPlayed?: number;
+	popularityPct?: number;
 }
 
 /**
@@ -146,15 +152,19 @@ export function computeGaps(
 			toFen: bm.toFen,
 			line,
 			depth: pathToFrom.length + 1,
-			gamesPlayed: bm.gamesPlayed
+			gamesPlayed: bm.gamesPlayed,
+			popularityPct: bm.popularityPct
 		});
 	}
 
-	// Sort masters gaps first (by games played descending), then book-only gaps by depth.
+	// Sort by popularity (descending) first, falling back to depth for any
+	// gap that somehow lacks a popularity figure.
 	gaps.sort((a, b) => {
-		if (a.gamesPlayed && b.gamesPlayed) return b.gamesPlayed - a.gamesPlayed;
-		if (a.gamesPlayed) return -1;
-		if (b.gamesPlayed) return 1;
+		if (a.popularityPct !== undefined && b.popularityPct !== undefined) {
+			return b.popularityPct - a.popularityPct;
+		}
+		if (a.popularityPct !== undefined) return -1;
+		if (b.popularityPct !== undefined) return 1;
 		return a.depth - b.depth;
 	});
 
@@ -171,70 +181,144 @@ export function formatLine(line: string): string {
 }
 
 /**
- * Loads gap data for a repertoire by querying the masters DB and book table,
- * then running computeGaps. This is the shared pipeline used by both the
- * dashboard page and the /api/gaps endpoint.
+ * Walks the full user move tree from the starting position and returns the
+ * normalized (4-field) FEN key of every position reached — both user-turn
+ * and opponent-turn, including leaf positions with no children yet.
  *
- * @param database     Drizzle db instance
- * @param moves        All userMove rows for the repertoire
- * @param repColor     "WHITE" or "BLACK"
- * @param startFen     Custom start FEN or null for default
- * @param minGames     Minimum master game count for gap inclusion
+ * This is deliberately broader than "positions that already have a move
+ * starting from them": a leaf just created by answering a gap (i.e. the
+ * opponent-turn position right after the user's new reply) has no children
+ * yet, but it must still be in scope so the next Gap Finder run can query
+ * candidate moves for it. Restricting the scope to existing fromFens (the
+ * previous approach) silently excluded exactly these freshly-reached
+ * positions, so gaps only ever surfaced one ply at a time.
+ */
+function reachablePositionKeys(moves: MoveRow[]): Set<string> {
+	const adj = new Map<string, MoveRow[]>();
+	for (const m of moves) {
+		const key = fenKey(m.fromFen);
+		let list = adj.get(key);
+		if (!list) {
+			list = [];
+			adj.set(key, list);
+		}
+		list.push(m);
+	}
+
+	const rootKey = fenKey(STARTING_FEN);
+	const visited = new Set<string>([rootKey]);
+	const queue: string[] = [rootKey];
+	while (queue.length > 0) {
+		const current = queue.shift()!;
+		const children = adj.get(current);
+		if (!children) continue;
+		for (const child of children) {
+			const childKey = fenKey(child.toFen);
+			if (visited.has(childKey)) continue;
+			visited.add(childKey);
+			queue.push(childKey);
+		}
+	}
+	return visited;
+}
+
+/**
+ * Loads gap data for a repertoire by querying the Lichess player-games
+ * database (lichess_moves) over a rating window centered on the user's
+ * trainer rating, then running computeGaps. This is the shared pipeline
+ * used by both the dashboard page and the /api/gaps endpoint.
+ *
+ * Popularity is computed per opponent-turn position: for each candidate
+ * move, gamesPlayed is its own count within the rating window, and
+ * popularityPct is that count divided by the total games played from that
+ * position within the same window. A move must clear both a minimum game
+ * count (minGames — a sample-size floor, since a move can hit 100% of a
+ * two-game sample) and a minimum popularity percentage (minPopularityPct)
+ * to be reported as a gap.
+ *
+ * There is no book-table fallback. A position with no qualifying player
+ * data in the rating window simply produces no gap there — the intent is
+ * to flag what real opponents near your rating actually play, not
+ * unweighted opening theory a 1300 is unlikely to face.
+ *
+ * @param database          Drizzle db instance
+ * @param moves             All userMove rows for the repertoire
+ * @param repColor          "WHITE" or "BLACK"
+ * @param startFen          Custom start FEN or null for default
+ * @param minGames          Minimum games played (within the rating window) for gap inclusion
+ * @param minPopularityPct  Minimum % of games at the position for gap inclusion
+ * @param trainerRating     User's trainer-mode ELO rating, or null if not set yet
  */
 export async function loadGapData(
 	database: typeof db,
 	moves: MoveRow[],
 	repColor: 'WHITE' | 'BLACK',
 	startFen: string | null,
-	minGames: number
+	minGames: number,
+	minPopularityPct: number,
+	trainerRating: number | null
 ): Promise<Gap[]> {
 	if (moves.length === 0) return [];
 
 	const opponentTurnChar = repColor === 'WHITE' ? 'b' : 'w';
-	const opponentFens = [
-		...new Set(
-			moves.filter((m) => m.fromFen.split(' ')[1] === opponentTurnChar).map((m) => m.fromFen)
-		)
-	];
+	const reachableKeys = reachablePositionKeys(moves);
+	const opponentFenKeys = [...reachableKeys].filter(
+		(key) => key.split(' ')[1] === opponentTurnChar
+	);
 
-	// Normalize to 4-field FEN keys for the masters table lookup.
-	const opponentFenKeys = [...new Set(opponentFens.map(fenKey))];
+	const { brackets } = gapRatingWindow(trainerRating);
 
-	// Query masters database first — only moves played >= minGames times.
-	const mastersMoves =
+	const rawMoves =
 		opponentFenKeys.length > 0
 			? await database
 					.select()
-					.from(chessmontMoves)
+					.from(lichessMoves)
 					.where(
 						and(
-							inArray(chessmontMoves.positionFen, opponentFenKeys),
-							gte(chessmontMoves.gamesPlayed, minGames)
+							inArray(lichessMoves.positionFen, opponentFenKeys),
+							inArray(lichessMoves.ratingBracket, brackets)
 						)
 					)
-					.orderBy(desc(chessmontMoves.gamesPlayed))
 			: [];
 
-	// Track which positions have masters data so we can fall back to book for the rest.
-	const mastersPositions = new Set(mastersMoves.map((m) => m.positionFen));
+	// Aggregate across the bracket window: sum games played per (position,
+	// move) so a move that appears in more than one bracket in the window
+	// is counted once, then compute each position's total for the
+	// percentage denominator.
+	const byPositionAndMove = new Map<
+		string,
+		{ fromFen: string; toFen: string; san: string; gamesPlayed: number }
+	>();
+	const totalByPosition = new Map<string, number>();
 
-	// Fall back to book moves for positions without masters data.
-	const bookFallbackFens = opponentFens.filter((f) => !mastersPositions.has(fenKey(f)));
-	const relevantBookMoves =
-		bookFallbackFens.length > 0
-			? await database.select().from(bookMove).where(inArray(bookMove.fromFen, bookFallbackFens))
-			: [];
+	for (const row of rawMoves) {
+		const moveKey = `${row.positionFen}\u0000${row.moveSan}`;
+		const existing = byPositionAndMove.get(moveKey);
+		if (existing) {
+			existing.gamesPlayed += row.gamesPlayed;
+		} else {
+			byPositionAndMove.set(moveKey, {
+				fromFen: row.positionFen,
+				toFen: row.resultingFen,
+				san: row.moveSan,
+				gamesPlayed: row.gamesPlayed
+			});
+		}
+		totalByPosition.set(
+			row.positionFen,
+			(totalByPosition.get(row.positionFen) ?? 0) + row.gamesPlayed
+		);
+	}
 
-	// Map masters rows to the MoveRow shape expected by computeGaps.
-	const mastersAsMoveRows = mastersMoves.map((m) => ({
-		fromFen: m.positionFen,
-		toFen: m.resultingFen,
-		san: m.moveSan,
-		gamesPlayed: m.gamesPlayed
-	}));
-
-	const allOpponentMoves = [...mastersAsMoveRows, ...relevantBookMoves];
+	const candidateMoves: MoveRow[] = [];
+	for (const move of byPositionAndMove.values()) {
+		const total = totalByPosition.get(move.fromFen) ?? 0;
+		const popularityPct = total > 0 ? (move.gamesPlayed / total) * 100 : 0;
+		if (move.gamesPlayed < minGames) continue;
+		if (popularityPct < minPopularityPct) continue;
+		candidateMoves.push({ ...move, popularityPct });
+	}
 
 	const startFens = getEffectiveStartFens(startFen, moves, repColor);
-	return computeGaps(moves, allOpponentMoves, repColor, startFens);
+	return computeGaps(moves, candidateMoves, repColor, startFens);
 }

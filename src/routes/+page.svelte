@@ -407,14 +407,16 @@
 							<option value={10}>10+ games</option>
 						</select>
 					</div>
+					<p class="gap-rating-note">Popularity based on Lichess games in the {data.gapRatingLabel} range.</p>
 					<ul class="gap-list">
 						{#each data.gaps.slice(0, 5) as gap (gap.toFen)}
 							<li class="gap-item">
 								<div class="gap-info">
 									<span class="gap-line">{formatLine(gap.line)}</span>
-									{#if gap.gamesPlayed}
+									{#if gap.popularityPct !== undefined && gap.gamesPlayed !== undefined}
 										<span class="gap-popularity"
-											>Played {gap.gamesPlayed.toLocaleString()} times in master games</span
+											>Played {gap.popularityPct.toFixed(0)}% of the time ({gap.gamesPlayed.toLocaleString()}
+											games)</span
 										>
 									{/if}
 								</div>
@@ -436,6 +438,7 @@
 							<option value={10}>10+ games</option>
 						</select>
 					</div>
+					<p class="gap-rating-note">Popularity based on Lichess games in the {data.gapRatingLabel} range.</p>
 					<p>No gaps — repertoire fully covered</p>
 				</div>
 			{/if}
@@ -704,6 +707,12 @@
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-sm);
 		cursor: pointer;
+	}
+
+	.gap-rating-note {
+		margin: 2px 0 var(--space-2);
+		font-size: 11px;
+		color: var(--color-text-secondary);
 	}
 
 	.gap-badge {
