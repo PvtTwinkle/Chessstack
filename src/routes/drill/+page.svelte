@@ -31,6 +31,7 @@
 	import { untrack } from 'svelte';
 	import { onMount } from 'svelte';
 	import { invalidateAll } from '$app/navigation';
+	import { page } from '$app/state';
 	import { Chess } from 'chess.js';
 	import type { PageData } from './$types';
 	import type { DrawShape } from '@lichess-org/chessground/draw';
@@ -44,6 +45,7 @@
 		playIncorrect
 	} from '$lib/sounds';
 	import { tutorialStep } from '$lib/stores/tutorial';
+	import { getEffectiveStartFens, buildInScopeFens } from '$lib/repertoire';
 
 	// Shape of a move row from the server (user_move table).
 	interface RepertoireMove {
@@ -208,7 +210,10 @@
 
 	// ── Line-mode state ──────────────────────────────────────────────────────
 	// 'card' = normal single-position drilling, 'line' = full root-to-leaf lines.
-	let drillType = $state<'card' | 'line'>('card');
+	// Restored from ?type=line so the "Drill all lines" link (which does a full
+	// page navigation to apply ?mode=all) lands back on the same tab instead
+	// of silently reverting to card mode.
+	let drillType = $state<'card' | 'line'>(page.url.searchParams.get('type') === 'line' ? 'line' : 'card');
 
 	// All enumerated root-to-leaf lines, sorted weakest-first.
 	let allLines = $state<LineStep[][]>([]);
@@ -435,6 +440,17 @@
 			: allDueCards.filter((c) => getSection(c.fromFen) === selectedSection)
 	);
 
+	// Number of lines that will actually be drilled if line mode is started
+	// right now (due-filtered unless drillMode is 'all') — computed eagerly so
+	// the start screen shows the real count instead of the due-card count.
+	const dueLineCount = $derived.by(() => {
+		if (drillType !== 'line') return 0;
+		const raw = enumerateLines(allMoves, data.repertoire.color as 'WHITE' | 'BLACK');
+		const scoped =
+			data.drillMode === 'all' ? raw : raw.filter((line) => lineHasDueStep(line, allDueCards));
+		return scoped.length;
+	});
+
 	// The card being drilled right now.
 	const currentCard = $derived(filteredCards[currentCardIdx] ?? null);
 
@@ -607,6 +623,14 @@
 	// Enumerate all root-to-leaf lines through the repertoire's move tree.
 	// A "leaf" is any position with no outgoing edges. Each line is an ordered
 	// list of LineSteps from the starting position to the leaf.
+	//
+	// Lead-in moves (before the repertoire's effective start position — see
+	// getEffectiveStartFens) are still walked and auto-played for context,
+	// but are never marked isUserMove, even when they fall on the user's own
+	// turn. This mirrors card mode and the Gap Finder, which both exclude
+	// lead-in positions from what's actively drilled — the "Set Start"
+	// button in Build Mode promises exactly that ("moves before it won't be
+	// drilled"), which line mode did not previously honor.
 	function enumerateLines(moves: RepertoireMove[], color: 'WHITE' | 'BLACK'): LineStep[][] {
 		const adj = new SvelteMap<string, RepertoireMove[]>();
 		for (const m of moves) {
@@ -615,6 +639,9 @@
 			if (list) list.push(m);
 			else adj.set(key, [m]);
 		}
+
+		const startFens = getEffectiveStartFens(data.repertoire.startFen ?? null, moves, color);
+		const inScope = buildInScopeFens(startFens, moves);
 
 		const lines: LineStep[][] = [];
 		const MAX_LINES = 500;
@@ -645,7 +672,7 @@
 					fromFen: child.fromFen,
 					toFen: child.toFen,
 					san: child.san,
-					isUserMove: isUserTurn(child.fromFen)
+					isUserMove: isUserTurn(child.fromFen) && inScope.has(fenKey(child.fromFen))
 				});
 				dfs(child.toFen, path, visited);
 				path.pop();
@@ -680,6 +707,18 @@
 			}
 		}
 		return score;
+	}
+
+	// Whether a line contains at least one step matching a currently-due card.
+	// Used to scope line mode to "due" the same way card mode already is —
+	// enumerateLines produces every line in the tree regardless of due
+	// status, sortLinesByWeakness only orders them, so without this filter
+	// "due" line-mode sessions silently drilled (and auto-graded) the whole
+	// repertoire, duplicating what the existing "Drill all cards" link
+	// (?mode=all) is for.
+	function lineHasDueStep(line: LineStep[], dueCards: DueCard[]): boolean {
+		const dueSet = new Set(dueCards.map((c) => fenKey(c.fromFen) + ':' + c.san));
+		return line.some((s) => s.isUserMove && dueSet.has(fenKey(s.fromFen) + ':' + s.san));
 	}
 
 	// Sort lines by score descending, breaking ties randomly.
@@ -1036,11 +1075,14 @@
 		if (rating >= 3) correctCount++;
 	}
 
-	// Initialize line mode: enumerate lines, sort, and start the first line.
+	// Initialize line mode: enumerate lines, filter to due unless in "all"
+	// mode, sort, and start the first line.
 	function initLineMode(): void {
 		const color = data.repertoire.color as 'WHITE' | 'BLACK';
 		const raw = enumerateLines(allMoves, color);
-		allLines = sortLinesByWeakness(raw, allDueCards);
+		const scoped =
+			data.drillMode === 'all' ? raw : raw.filter((line) => lineHasDueStep(line, allDueCards));
+		allLines = sortLinesByWeakness(scoped, allDueCards);
 		currentLineIdx = 0;
 		lineComplete = false;
 		totalReviewed = 0;
@@ -1455,9 +1497,11 @@
 			</div>
 		{/if}
 
-		<!-- Drill-all shortcut (only in normal due-cards mode, card drill type) -->
-		{#if drillType === 'card' && data.drillMode !== 'all' && phase !== 'complete'}
-			<a href="/drill?mode=all" class="drill-all-link">Drill all cards</a>
+		<!-- Drill-all shortcut (only in normal due-cards mode) -->
+		{#if data.drillMode !== 'all' && phase !== 'complete'}
+			<a href="/drill?mode=all{drillType === 'line' ? '&type=line' : ''}" class="drill-all-link"
+				>Drill all {drillType === 'line' ? 'lines' : 'cards'}</a
+			>
 		{/if}
 
 		<!-- Progress bar -->
@@ -1493,7 +1537,7 @@
 
 		{#if !started}
 			<!-- Start screen — shown before the user begins drilling -->
-			{#if (drillType === 'card' && allDueCards.length === 0) || (drillType === 'line' && allDueCards.length === 0)}
+			{#if (drillType === 'card' && allDueCards.length === 0) || (drillType === 'line' && dueLineCount === 0)}
 				<div class="empty-state">
 					<div class="empty-icon">✓</div>
 					<p class="empty-title">All caught up!</p>
@@ -1501,12 +1545,14 @@
 						No cards due right now. Come back later or build more repertoire.
 					</p>
 					<a href="/build" class="btn btn--primary">Build Mode</a>
-					<a href="/drill?mode=all" class="btn btn--secondary">Drill all cards</a>
+					<a href="/drill?mode=all{drillType === 'line' ? '&type=line' : ''}" class="btn btn--secondary"
+						>Drill all {drillType === 'line' ? 'lines' : 'cards'}</a
+					>
 				</div>
 			{:else}
 				<div class="start-screen">
 					<div class="start-count">
-						{drillType === 'card' ? filteredCards.length : allDueCards.length}
+						{drillType === 'card' ? filteredCards.length : dueLineCount}
 					</div>
 					<div class="start-label">{drillType === 'card' ? 'cards' : 'lines'} to drill</div>
 
@@ -1529,7 +1575,8 @@
 
 					<button
 						class="btn btn--primary start-btn"
-						disabled={drillType === 'card' && filteredCards.length === 0}
+						disabled={(drillType === 'card' && filteredCards.length === 0) ||
+							(drillType === 'line' && dueLineCount === 0)}
 						onclick={startDrilling}
 					>
 						Start Drilling <kbd>Space</kbd>
