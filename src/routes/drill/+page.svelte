@@ -443,13 +443,18 @@
 	// Number of lines that will actually be drilled if line mode is started
 	// right now (due-filtered unless drillMode is 'all') — computed eagerly so
 	// the start screen shows the real count instead of the due-card count.
-	const dueLineCount = $derived.by(() => {
-		if (drillType !== 'line') return 0;
+	// totalLineCount is the unfiltered count, used to tell apart "repertoire
+	// has no lines at all yet" from "every line is already reviewed" — the
+	// "No lines to drill" empty state below used to conflate the two.
+	const lineCounts = $derived.by(() => {
+		if (drillType !== 'line') return { total: 0, due: 0 };
 		const raw = enumerateLines(allMoves, data.repertoire.color as 'WHITE' | 'BLACK');
 		const scoped =
 			data.drillMode === 'all' ? raw : raw.filter((line) => lineHasDueStep(line, allDueCards));
-		return scoped.length;
+		return { total: raw.length, due: scoped.length };
 	});
+	const dueLineCount = $derived(lineCounts.due);
+	const totalLineCount = $derived(lineCounts.total);
 
 	// The card being drilled right now.
 	const currentCard = $derived(filteredCards[currentCardIdx] ?? null);
@@ -1602,13 +1607,24 @@
 					Next Line <kbd>Space</kbd>
 				</button>
 			</div>
-		{:else if drillType === 'line' && allLines.length === 0 && phase !== 'playing'}
-			<!-- Line mode but no lines to drill -->
+		{:else if drillType === 'line' && allLines.length === 0 && phase !== 'playing' && totalLineCount === 0}
+			<!-- Line mode, repertoire truly has no complete lines yet -->
 			<div class="empty-state">
 				<div class="empty-icon">✓</div>
 				<p class="empty-title">No lines to drill</p>
 				<p class="empty-hint">Your repertoire has no complete lines yet. Build more moves first.</p>
 				<a href="/build" class="btn btn--primary">Build Mode</a>
+			</div>
+		{:else if drillType === 'line' && allLines.length === 0 && phase !== 'playing'}
+			<!-- Line mode, repertoire has lines but none are currently due — same
+			     messaging as the pre-start empty state, reached here because
+			     "Drill again" re-runs initLineMode() without a full page reload. -->
+			<div class="empty-state">
+				<div class="empty-icon">✓</div>
+				<p class="empty-title">All caught up!</p>
+				<p class="empty-hint">No cards due right now. Come back later or build more repertoire.</p>
+				<a href="/build" class="btn btn--primary">Build Mode</a>
+				<a href="/drill?mode=all&type=line" class="btn btn--secondary">Drill all lines</a>
 			</div>
 		{:else if drillType === 'card' && allDueCards.length === 0}
 			<!-- No cards due -->
