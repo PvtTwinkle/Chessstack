@@ -1340,6 +1340,13 @@
 		phase = 'idle'; // hide the complete screen immediately while data loads
 		sessionId = null;
 		nextDueAt = null;
+		// Reset to the start screen rather than auto-resuming a session: the
+		// data reload below may find nothing left due, and letting the start
+		// screen (with its own "All caught up!" / due-count branches) handle
+		// that is simpler than re-deriving the same distinction further down
+		// in the started-session branches, which exist for switchDrillType's
+		// sake but shouldn't also have to cover this path.
+		started = false;
 		invalidateAll();
 	}
 
