@@ -9,6 +9,7 @@ import { db } from '$lib/db';
 import { repertoire, userMove, userSettings } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { loadGapData } from '$lib/gaps';
+import { gapRatingWindow } from '$lib/ratings';
 
 export const GET: RequestHandler = async ({ locals, url }) => {
 	if (!locals.user) throw error(401, 'Not authenticated');
@@ -33,9 +34,14 @@ export const GET: RequestHandler = async ({ locals, url }) => {
 		.from(userMove)
 		.where(and(eq(userMove.repertoireId, repertoireId), eq(userMove.userId, locals.user.id)));
 
-	// Read the user's gap threshold setting (default 1000).
+	// Read the user's gap threshold settings and trainer rating (used to pick
+	// the Lichess rating-bracket window).
 	const [userSettingsRow] = await db
-		.select({ gapMinGames: userSettings.gapMinGames })
+		.select({
+			gapMinGames: userSettings.gapMinGames,
+			gapMinPopularityPct: userSettings.gapMinPopularityPct,
+			trainerRating: userSettings.trainerRating
+		})
 		.from(userSettings)
 		.where(eq(userSettings.userId, locals.user.id));
 
@@ -44,8 +50,12 @@ export const GET: RequestHandler = async ({ locals, url }) => {
 		moves,
 		rep.color as 'WHITE' | 'BLACK',
 		rep.startFen ?? null,
-		userSettingsRow?.gapMinGames ?? 10000
+		userSettingsRow?.gapMinGames ?? 10000,
+		userSettingsRow?.gapMinPopularityPct ?? 5,
+		userSettingsRow?.trainerRating ?? null
 	);
 
-	return json({ count: gaps.length, gaps });
+	const { label: gapRatingLabel } = gapRatingWindow(userSettingsRow?.trainerRating ?? null);
+
+	return json({ count: gaps.length, gaps, gapRatingLabel });
 };
