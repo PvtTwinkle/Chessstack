@@ -1613,6 +1613,12 @@
 				<button class="btn btn--primary next-btn" onclick={advanceToNextLine}>
 					Next Line <kbd>Space</kbd>
 				</button>
+				<a
+					href="/build?line={encodeURIComponent(currentLine.map((s) => s.san).join(','))}"
+					class="btn btn--secondary"
+				>
+					Build from this line
+				</a>
 			</div>
 		{:else if drillType === 'line' && allLines.length === 0 && phase !== 'playing' && totalLineCount === 0}
 			<!-- Line mode, repertoire truly has no complete lines yet -->
