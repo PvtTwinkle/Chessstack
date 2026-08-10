@@ -645,8 +645,16 @@
 			else adj.set(key, [m]);
 		}
 
-		const startFens = getEffectiveStartFens(data.repertoire.startFen ?? null, moves, color);
-		const inScope = buildInScopeFens(startFens, moves);
+		// The lead-in exclusion below only makes sense for a custom start
+		// position (Build Mode's "Set Start"). When startFen is null,
+		// getEffectiveStartFens defines scope as starting *after* the user's
+		// own first move (a convention meant for SR-card/gap scoping, where
+		// the first move itself is never quizzed) — reusing that here would
+		// wrongly auto-play the user's actual first move in every line.
+		const customStartFen = data.repertoire.startFen ?? null;
+		const inScope = customStartFen
+			? buildInScopeFens(getEffectiveStartFens(customStartFen, moves, color), moves)
+			: null;
 
 		const lines: LineStep[][] = [];
 		const MAX_LINES = 500;
@@ -677,7 +685,8 @@
 					fromFen: child.fromFen,
 					toFen: child.toFen,
 					san: child.san,
-					isUserMove: isUserTurn(child.fromFen) && inScope.has(fenKey(child.fromFen))
+					isUserMove:
+						isUserTurn(child.fromFen) && (inScope === null || inScope.has(fenKey(child.fromFen)))
 				});
 				dfs(child.toFen, path, visited);
 				path.pop();
