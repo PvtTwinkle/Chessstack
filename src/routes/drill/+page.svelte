@@ -584,14 +584,48 @@
 
 	type DrillSection = 'foundations' | 'mainlines' | 'deep';
 
-	// Extract the full-move number from a FEN string (6th field, 1-indexed).
-	function getMoveNumber(fen: string): number {
-		return parseInt(fen.split(' ')[5], 10) || 1;
-	}
+	// Pre-existing bug, not introduced by this branch: userMove.fromFen/toFen
+	// are always stored as 4-field normalized FENs (see api/moves/+server.ts,
+	// "strip halfmove clock and fullmove counter so transpositions always
+	// match") — there's no move-counter field to read on any card, ever. The
+	// old getMoveNumber(fen) below silently fell back to 1 for every card, so
+	// the Foundations/Mainlines/Deep filter and start-screen breakdown always
+	// bucketed everything into Foundations regardless of true depth. Same
+	// root cause as the Gap Finder's depth-section bug fixed separately.
+	// Fixed the same way: a real ply count via BFS from STARTING_FEN through
+	// the full move tree, converted to a standard fullmove number.
+	const plyDepthByFenKey = $derived.by(() => {
+		const adj = new Map<string, RepertoireMove[]>();
+		for (const m of allMoves) {
+			const key = fenKey(m.fromFen);
+			const list = adj.get(key);
+			if (list) list.push(m);
+			else adj.set(key, [m]);
+		}
 
-	// Map a FEN to one of the three depth sections.
+		const rootKey = fenKey(STARTING_FEN);
+		const depths = new Map<string, number>([[rootKey, 0]]);
+		const queue: string[] = [rootKey];
+		while (queue.length > 0) {
+			const current = queue.shift()!;
+			const currentDepth = depths.get(current)!;
+			const children = adj.get(current);
+			if (!children) continue;
+			for (const child of children) {
+				const childKey = fenKey(child.toFen);
+				if (depths.has(childKey)) continue;
+				depths.set(childKey, currentDepth + 1);
+				queue.push(childKey);
+			}
+		}
+		return depths;
+	});
+
+	// Map a FEN to one of the three depth sections, using the ply count from
+	// plyDepthByFenKey rather than a move-counter field the FEN doesn't have.
 	function getSection(fen: string): DrillSection {
-		const move = getMoveNumber(fen);
+		const depth = plyDepthByFenKey.get(fenKey(fen)) ?? 0;
+		const move = Math.floor(depth / 2) + 1;
 		if (move <= 5) return 'foundations';
 		if (move <= 15) return 'mainlines';
 		return 'deep';
