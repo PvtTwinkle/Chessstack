@@ -1,9 +1,11 @@
 <script lang="ts">
 	import type { PageData } from './$types';
 	import OnboardingWelcome from '$lib/components/OnboardingWelcome.svelte';
+	import OpeningName from '$lib/components/OpeningName.svelte';
 	import { formatLine } from '$lib/gaps';
 	import { base } from '$app/paths';
 	import { invalidateAll } from '$app/navigation';
+	import { Chess } from 'chess.js';
 
 	let { data }: { data: PageData } = $props();
 
@@ -42,6 +44,27 @@
 		if (move <= 5) return 'foundations';
 		if (move <= 15) return 'mainlines';
 		return 'deep';
+	}
+
+	// Replays a gap's SAN line (comma-separated, from the true game start —
+	// gap.line already includes the missing move itself) to reconstruct the
+	// full FEN history OpeningName needs. Cheap since only the 5 displayed
+	// gaps are replayed, not the whole list.
+	function fenHistoryForLine(line: string): { currentFen: string; fenHistory: string[] } {
+		const chess = new Chess();
+		const fens: string[] = [chess.fen()];
+		for (const san of line.split(',')) {
+			if (!san) continue;
+			try {
+				chess.move(san);
+				fens.push(chess.fen());
+			} catch {
+				break; // malformed/ambiguous SAN — stop rather than throw
+			}
+		}
+		const currentFen = fens[fens.length - 1];
+		const fenHistory = fens.slice(0, -1).reverse();
+		return { currentFen, fenHistory };
 	}
 
 	const displayedGaps = $derived(
@@ -480,9 +503,11 @@
 					{:else}
 						<ul class="gap-list">
 							{#each displayedGaps.slice(0, 5) as gap (gap.toFen)}
+								{@const { currentFen, fenHistory } = fenHistoryForLine(gap.line)}
 								<li class="gap-item">
 									<div class="gap-info">
 										<span class="gap-line">{formatLine(gap.line)}</span>
+										<OpeningName {currentFen} {fenHistory} />
 										{#if gap.popularityPct !== undefined && gap.gamesPlayed !== undefined}
 											<span class="gap-popularity"
 												>Played {gap.popularityPct.toFixed(0)}% of the time ({gap.gamesPlayed.toLocaleString()}
