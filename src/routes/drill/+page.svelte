@@ -26,6 +26,7 @@
 	import ChessBoard from '$lib/components/ChessBoard.svelte';
 	import ResizableBoard from '$lib/components/ResizableBoard.svelte';
 	import OpeningName from '$lib/components/OpeningName.svelte';
+	import NoteText from '$lib/components/NoteText.svelte';
 	import { fenKey, STARTING_FEN } from '$lib/fen';
 	import { SvelteMap } from 'svelte/reactivity';
 	import { untrack } from 'svelte';
@@ -128,6 +129,12 @@
 	// Which depth section to drill: 'all' = no filter.
 	let selectedSection = $state<'all' | DrillSection>('all');
 
+	// Line mode notes are hidden by default: showing a move's rationale
+	// before/while playing through a line risks turning active recall into
+	// recognition (the whole point of drilling), unlike card mode where the
+	// note only ever appears after that single move is already resolved.
+	let showLineNotes = $state(false);
+
 	// Index into filteredCards — which card we're currently drilling.
 	let currentCardIdx = $state(0);
 
@@ -226,6 +233,10 @@
 
 	// Index into currentLine — the next step the user must play (always a user-move step).
 	let lineStepIdx = $state(0);
+	// Set when a line-mode move with a note resolves correctly and
+	// showLineNotes is on — pauses the auto-advance so the note is actually
+	// readable, rather than flashing past it during the normal 400ms beat.
+	let pendingLineNoteStep = $state<LineStep | null>(null);
 
 	// Stats for the current line.
 	let lineCorrect = $state(0);
@@ -334,6 +345,13 @@
 			if (drillType === 'line' && lineComplete && (e.key === ' ' || e.key === 'Enter')) {
 				e.preventDefault();
 				advanceToNextLine();
+				return;
+			}
+
+			// Line mode: Space/Enter dismisses a paused note and resumes play.
+			if (drillType === 'line' && pendingLineNoteStep && (e.key === ' ' || e.key === 'Enter')) {
+				e.preventDefault();
+				dismissLineNote();
 				return;
 			}
 
@@ -504,6 +522,14 @@
 		}
 		return map;
 	});
+
+	// Build a /build?line= link landing just BEFORE a given move (its
+	// fromFen), which is where Build's annotation editor (✎ button) for that
+	// move actually lives — the move shows as an existing child of the
+	// position you land on, not of the position it leads to.
+	function editNoteHref(sansBeforeMove: string[]): string {
+		return `/build?line=${encodeURIComponent(sansBeforeMove.join(','))}`;
+	}
 
 	// Note for the current position (opponent's last move annotation).
 	const currentPositionNote = $derived(
@@ -1230,6 +1256,12 @@
 		autoPlayTimer = setTimeout(step, playbackSpeed);
 	}
 
+	// Dismiss a paused line-mode note and resume auto-play.
+	function dismissLineNote(): void {
+		pendingLineNoteStep = null;
+		continueLineAfterUserMove();
+	}
+
 	// After the user plays a correct move in line mode, continue auto-playing
 	// opponent moves until the next user move or end of line.
 	function continueLineAfterUserMove(): void {
@@ -1260,6 +1292,14 @@
 
 		lineCorrect++;
 		autoGradeStep(step, 3); // Rating.Good
+
+		// If this move has a note and the user has notes turned on, pause
+		// here instead of auto-continuing — a 400ms flash isn't enough time
+		// to read anything, let alone a multi-paragraph note.
+		if (showLineNotes && step && noteByMove.has(fenKey(step.fromFen) + ':' + step.san)) {
+			pendingLineNoteStep = step;
+			return;
+		}
 
 		// Short pause then continue the line.
 		setTimeout(() => continueLineAfterUserMove(), 400);
@@ -1557,6 +1597,14 @@
 			</div>
 		{/if}
 
+		<!-- Line-mode notes toggle — off by default, see showLineNotes declaration -->
+		{#if started && drillType === 'line' && phase !== 'complete'}
+			<label class="line-notes-toggle">
+				<input type="checkbox" bind:checked={showLineNotes} />
+				Show move notes
+			</label>
+		{/if}
+
 		<!-- Progress bar -->
 		{#if started && drillType === 'card' && phase !== 'complete' && filteredCards.length > 0}
 			<div class="progress-section">
@@ -1583,6 +1631,22 @@
 						Move {Math.min(lineStepIdx + 1, lineTotal)} of {lineTotal} in this line
 					</div>
 				{/if}
+			</div>
+		{/if}
+
+		{#if pendingLineNoteStep}
+			<div class="note-box line-note-pause">
+				<div class="note-label">NOTE — {pendingLineNoteStep.san}</div>
+				<NoteText text={noteByMove.get(fenKey(pendingLineNoteStep.fromFen) + ':' + pendingLineNoteStep.san) ?? ''} />
+				<div class="line-note-actions">
+					<a
+						href={editNoteHref(currentLine.slice(0, lineStepIdx).map((s) => s.san))}
+						class="note-edit-link">Edit</a
+					>
+					<button class="btn btn--primary btn--small" onclick={dismissLineNote}>
+						Continue <kbd>Space</kbd>
+					</button>
+				</div>
 			</div>
 		{/if}
 
@@ -1817,7 +1881,10 @@
 			{#if drillType === 'card' && currentPositionNote}
 				<div class="note-box">
 					<div class="note-label">NOTE</div>
-					<div class="note-text">{currentPositionNote}</div>
+					<NoteText text={currentPositionNote} />
+					<div class="note-edit-row">
+						<a href={editNoteHref(path.slice(0, -1))} class="note-edit-link">Edit</a>
+					</div>
 				</div>
 			{/if}
 		{:else if phase === 'correct'}
@@ -1845,7 +1912,10 @@
 			{#if currentMoveNote}
 				<div class="note-box">
 					<div class="note-label">NOTE</div>
-					<div class="note-text">{currentMoveNote}</div>
+					<NoteText text={currentMoveNote} />
+					<div class="note-edit-row">
+						<a href={editNoteHref(path)} class="note-edit-link">Edit</a>
+					</div>
 				</div>
 			{/if}
 
@@ -1926,7 +1996,10 @@
 			{#if currentMoveNote}
 				<div class="note-box">
 					<div class="note-label">NOTE</div>
-					<div class="note-text">{currentMoveNote}</div>
+					<NoteText text={currentMoveNote} />
+					<div class="note-edit-row">
+						<a href={editNoteHref(path)} class="note-edit-link">Edit</a>
+					</div>
 				</div>
 			{/if}
 
@@ -2613,12 +2686,53 @@
 		text-transform: uppercase;
 	}
 
-	.note-text {
+	/* NoteText's own wrapper, styled from here to match the old .note-text look */
+	.note-box :global(.note-text-content) {
 		font-size: 0.8rem;
 		color: var(--color-text-secondary);
 		line-height: 1.45;
-		font-style: italic;
-		white-space: pre-wrap;
+	}
+
+	.note-edit-row {
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	.note-edit-link {
+		font-size: 0.7rem;
+		font-weight: 600;
+		color: var(--color-accent);
+		text-decoration: none;
+	}
+
+	.note-edit-link:hover {
+		text-decoration: underline;
+	}
+
+	.line-notes-toggle {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: 0.75rem;
+		color: var(--color-text-secondary);
+		cursor: pointer;
+		margin-bottom: var(--space-2);
+	}
+
+	.line-note-pause {
+		margin-bottom: var(--space-2);
+	}
+
+	.line-note-actions {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-top: 0.25rem;
+	}
+
+	.btn--small {
+		padding: 0.3rem 0.7rem;
+		font-size: 0.75rem;
 	}
 
 	/* ── Next + Undo buttons ─────────────────────────────────────────────────── */
