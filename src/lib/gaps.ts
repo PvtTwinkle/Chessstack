@@ -24,7 +24,7 @@ export interface Gap {
 	toFen: string; // position after that move (user needs a move here)
 	line: string; // comma-separated SAN list for ?line= deep link to Build Mode
 	depth: number; // number of half-moves to reach toFen (for ranking)
-	gamesPlayed?: number; // games played within the rating window (undefined only if moves.length === 0)
+	gamesPlayed?: number; // games played within the rating window (optional field type; always populated in practice, since every candidate comes from the players DB query)
 	popularityPct?: number; // % of games at this position where this move was played
 }
 
@@ -54,7 +54,13 @@ export function computeGaps(
 	color: 'WHITE' | 'BLACK',
 	startFens?: string[]
 ): Gap[] {
-	if (moves.length === 0) return [];
+	// Deliberately no `moves.length === 0` early return: for an empty BLACK
+	// repertoire, the very starting position (White to move) is itself a
+	// legitimate opponent-turn position that should be checked for gaps
+	// (e.g. flagging that 1.e4 has no prepared response yet). getEffectiveStartFens
+	// already returns [STARTING_FEN] for an empty repertoire, and every loop
+	// below degrades safely to its base case with an empty `moves` array —
+	// removing this guard was the actual fix, not a substitute for one.
 
 	// Build the user-turn "covered" set — positions where the user has a move.
 	// A position is covered if any userMove starts from it on the user's turn.
@@ -258,8 +264,10 @@ export async function loadGapData(
 	minPopularityPct: number,
 	trainerRating: number | null
 ): Promise<Gap[]> {
-	if (moves.length === 0) return [];
-
+	// No moves.length === 0 guard here either — see the same note in
+	// computeGaps. reachablePositionKeys([]) still correctly returns
+	// {STARTING_FEN}, so an empty BLACK repertoire still gets checked
+	// against the players DB for White's first move.
 	const opponentTurnChar = repColor === 'WHITE' ? 'b' : 'w';
 	const reachableKeys = reachablePositionKeys(moves);
 	const opponentFenKeys = [...reachableKeys].filter(
