@@ -1,14 +1,17 @@
 <script lang="ts">
 	import type { PageData } from './$types';
 	import OnboardingWelcome from '$lib/components/OnboardingWelcome.svelte';
+	import OpeningName from '$lib/components/OpeningName.svelte';
 	import { formatLine } from '$lib/gaps';
 	import { base } from '$app/paths';
 	import { invalidateAll } from '$app/navigation';
+	import { Chess } from 'chess.js';
 
 	let { data }: { data: PageData } = $props();
 
 	// ── Gap Finder threshold ────────────────────────────────────────────
 	let gapMinGames = $derived.by(() => data.settings?.gapMinGames ?? 10000);
+	let gapMinPopularityPct = $derived.by(() => data.settings?.gapMinPopularityPct ?? 5);
 
 	async function updateGapThreshold(e: Event) {
 		const value = Number((e.target as HTMLSelectElement).value);
@@ -19,6 +22,67 @@
 		});
 		await invalidateAll();
 	}
+
+	async function updateGapMinPopularity(e: Event) {
+		const value = Number((e.target as HTMLSelectElement).value);
+		await fetch(`${base}/api/settings`, {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ gapMinPopularityPct: value })
+		});
+		await invalidateAll();
+	}
+
+	// ── Gap Finder depth section filter ─────────────────────────────────
+	// Same three buckets and thresholds as Drill Mode's card-mode section
+	// filter (Foundations 1–5, Mainlines 6–15, Deep 16+), read from the
+	// FEN's own fullmove-number field so both surfaces agree on what
+	// counts as "foundations" without sharing code across the two pages.
+	// Popularity-descending sort otherwise buries shallow, unpopular-only-
+	// because-untested gaps under deep, well-covered mainline branches —
+	// this lets the user clear Foundations before moving on.
+	type GapSection = 'all' | 'foundations' | 'mainlines' | 'deep';
+	let selectedGapSection = $state<GapSection>('all');
+
+	function getGapSection(depth: number): Exclude<GapSection, 'all'> {
+		// gap.depth is the ply count (half-moves) from the true game start,
+		// via a BFS that always roots at STARTING_FEN (see gaps.ts) — reliable
+		// regardless of the repertoire's effective start scope. Converting to
+		// a standard fullmove number: gap.toFen itself can't be used here, its
+		// FEN comes from lichess_moves, which the import script normalizes to
+		// 4 fields with no move-counter (see scripts/lichess-import.py).
+		const move = Math.floor(depth / 2) + 1;
+		if (move <= 5) return 'foundations';
+		if (move <= 15) return 'mainlines';
+		return 'deep';
+	}
+
+	// Replays a gap's SAN line (comma-separated, from the true game start —
+	// gap.line already includes the missing move itself) to reconstruct the
+	// full FEN history OpeningName needs. Cheap since only the 5 displayed
+	// gaps are replayed, not the whole list.
+	function fenHistoryForLine(line: string): { currentFen: string; fenHistory: string[] } {
+		const chess = new Chess();
+		const fens: string[] = [chess.fen()];
+		for (const san of line.split(',')) {
+			if (!san) continue;
+			try {
+				chess.move(san);
+				fens.push(chess.fen());
+			} catch {
+				break; // malformed/ambiguous SAN — stop rather than throw
+			}
+		}
+		const currentFen = fens[fens.length - 1];
+		const fenHistory = fens.slice(0, -1).reverse();
+		return { currentFen, fenHistory };
+	}
+
+	const displayedGaps = $derived(
+		selectedGapSection === 'all'
+			? data.gaps
+			: data.gaps.filter((g) => getGapSection(g.depth) === selectedGapSection)
+	);
 
 	// ── Health prompt (actionable hint for the weakest factor) ─────────
 	let healthPrompt = $derived.by(() => {
@@ -398,44 +462,113 @@
 			{#if data.gaps.length > 0}
 				<div class="widget widget-wide">
 					<div class="widget-label">
-						<span class="gap-badge">{data.gaps.length}</span>
-						Gap{data.gaps.length === 1 ? '' : 's'} Found
+						<span class="gap-badge">{displayedGaps.length}</span>
+						Gap{displayedGaps.length === 1 ? '' : 's'} Found
 						<select class="gap-threshold" value={gapMinGames} onchange={updateGapThreshold}>
+							<option value={100000}>100,000+ games</option>
 							<option value={10000}>10,000+ games</option>
 							<option value={1000}>1,000+ games</option>
 							<option value={100}>100+ games</option>
 							<option value={10}>10+ games</option>
 						</select>
+						<select
+							class="gap-threshold"
+							value={gapMinPopularityPct}
+							onchange={updateGapMinPopularity}
+						>
+							<option value={20}>20%+ popularity</option>
+							<option value={10}>10%+ popularity</option>
+							<option value={5}>5%+ popularity</option>
+							<option value={2}>2%+ popularity</option>
+							<option value={1}>1%+ popularity</option>
+						</select>
 					</div>
-					<ul class="gap-list">
-						{#each data.gaps.slice(0, 5) as gap (gap.toFen)}
-							<li class="gap-item">
-								<div class="gap-info">
-									<span class="gap-line">{formatLine(gap.line)}</span>
-									{#if gap.gamesPlayed}
-										<span class="gap-popularity"
-											>Played {gap.gamesPlayed.toLocaleString()} times in master games</span
-										>
-									{/if}
-								</div>
-								<a href="{base}/build?line={encodeURIComponent(gap.line)}" class="gap-link">
-									Build
-								</a>
-							</li>
-						{/each}
-					</ul>
+					<p class="gap-rating-note">Popularity based on Lichess games in the {data.gapRatingLabel} range.</p>
+					<div class="gap-section-tabs">
+						<button
+							class="gap-section-tab"
+							class:active={selectedGapSection === 'all'}
+							onclick={() => (selectedGapSection = 'all')}
+						>
+							All <span class="tab-count">{data.gaps.length}</span>
+						</button>
+						<button
+							class="gap-section-tab"
+							class:active={selectedGapSection === 'foundations'}
+							onclick={() => (selectedGapSection = 'foundations')}
+						>
+							Foundations (1–5) <span class="tab-count"
+								>{data.gaps.filter((g) => getGapSection(g.depth) === 'foundations').length}</span
+							>
+						</button>
+						<button
+							class="gap-section-tab"
+							class:active={selectedGapSection === 'mainlines'}
+							onclick={() => (selectedGapSection = 'mainlines')}
+						>
+							Mainlines (6–15) <span class="tab-count"
+								>{data.gaps.filter((g) => getGapSection(g.depth) === 'mainlines').length}</span
+							>
+						</button>
+						<button
+							class="gap-section-tab"
+							class:active={selectedGapSection === 'deep'}
+							onclick={() => (selectedGapSection = 'deep')}
+						>
+							Deep Lines (16+) <span class="tab-count"
+								>{data.gaps.filter((g) => getGapSection(g.depth) === 'deep').length}</span
+							>
+						</button>
+					</div>
+					{#if displayedGaps.length === 0}
+						<p class="widget-empty">No gaps in this section</p>
+					{:else}
+						<ul class="gap-list">
+							{#each displayedGaps.slice(0, 5) as gap (gap.toFen)}
+								{@const { currentFen, fenHistory } = fenHistoryForLine(gap.line)}
+								<li class="gap-item">
+									<div class="gap-info">
+										<span class="gap-line">{formatLine(gap.line)}</span>
+										<OpeningName {currentFen} {fenHistory} />
+										{#if gap.popularityPct !== undefined && gap.gamesPlayed !== undefined}
+											<span class="gap-popularity"
+												>Played {gap.popularityPct.toFixed(0)}% of the time ({gap.gamesPlayed.toLocaleString()}
+												games)</span
+											>
+										{/if}
+									</div>
+									<a href="{base}/build?line={encodeURIComponent(gap.line)}" class="gap-link">
+										Build
+									</a>
+								</li>
+							{/each}
+						</ul>
+					{/if}
 				</div>
 			{:else}
 				<div class="widget widget-wide gap-covered">
 					<div class="widget-label">
 						Gap Finder
 						<select class="gap-threshold" value={gapMinGames} onchange={updateGapThreshold}>
+							<option value={100000}>100,000+ games</option>
 							<option value={10000}>10,000+ games</option>
 							<option value={1000}>1,000+ games</option>
 							<option value={100}>100+ games</option>
 							<option value={10}>10+ games</option>
 						</select>
+						<select
+							class="gap-threshold"
+							value={gapMinPopularityPct}
+							onchange={updateGapMinPopularity}
+						>
+							<option value={20}>20%+ popularity</option>
+							<option value={10}>10%+ popularity</option>
+							<option value={5}>5%+ popularity</option>
+							<option value={2}>2%+ popularity</option>
+							<option value={1}>1%+ popularity</option>
+						</select>
 					</div>
+					<p class="gap-rating-note">Popularity based on Lichess games in the {data.gapRatingLabel} range.</p>
 					<p>No gaps — repertoire fully covered</p>
 				</div>
 			{/if}
@@ -704,6 +837,49 @@
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-sm);
 		cursor: pointer;
+	}
+
+	.gap-rating-note {
+		margin: 2px 0 var(--space-2);
+		font-size: 11px;
+		color: var(--color-text-secondary);
+	}
+
+	.gap-section-tabs {
+		display: flex;
+		gap: 0.35rem;
+		margin-bottom: var(--space-2);
+	}
+
+	.gap-section-tab {
+		flex: 1;
+		padding: 0.35rem 0.25rem;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--color-border);
+		background: var(--color-surface);
+		color: var(--color-text-secondary);
+		font-size: 0.7rem;
+		font-family: var(--font-body);
+		font-weight: 600;
+		cursor: pointer;
+		transition: all var(--dur-fast) var(--ease-snap);
+		text-align: center;
+	}
+
+	.gap-section-tab:hover {
+		border-color: var(--color-accent);
+		color: var(--color-text-primary);
+	}
+
+	.gap-section-tab.active {
+		background: rgba(91, 127, 164, 0.15);
+		border-color: var(--color-accent);
+		color: var(--color-accent);
+	}
+
+	.gap-section-tab .tab-count {
+		opacity: 0.7;
+		font-weight: 400;
 	}
 
 	.gap-badge {

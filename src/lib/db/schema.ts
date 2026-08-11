@@ -235,7 +235,8 @@ export const userSettings = pgTable('user_settings', {
 	tempoSeconds: integer('tempo_seconds').notNull().default(10), // seconds per move (3–30)
 	playbackSpeed: integer('playback_speed').notNull().default(500), // auto-play delay in ms (200–1000)
 	appTheme: text('app_theme').notNull().default('dark'), // 'dark' | 'light'
-	gapMinGames: integer('gap_min_games').notNull().default(10000), // min master games for gap finder (10|100|1000|10000)
+	gapMinGames: integer('gap_min_games').notNull().default(10000), // min games (within the rating window) for gap finder (10|100|1000|10000)
+	gapMinPopularityPct: integer('gap_min_popularity_pct').notNull().default(5), // min % of games at the position for gap finder (1|2|5|10|20)
 	boardSize: integer('board_size').notNull().default(0), // 0 = auto (fill container), >0 = pixel width (320–800)
 	playersRatingBracket: integer('players_rating_bracket').notNull().default(3), // 0–7 bracket ID for Players tab (3 = 1401–1600)
 	starsPlayerSlug: text('stars_player_slug'), // last-selected player slug for Stars tab (null = first available)
