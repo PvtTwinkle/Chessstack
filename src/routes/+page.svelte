@@ -11,6 +11,7 @@
 
 	// ── Gap Finder threshold ────────────────────────────────────────────
 	let gapMinGames = $derived.by(() => data.settings?.gapMinGames ?? 10000);
+	let gapMinPopularityPct = $derived.by(() => data.settings?.gapMinPopularityPct ?? 5);
 
 	async function updateGapThreshold(e: Event) {
 		const value = Number((e.target as HTMLSelectElement).value);
@@ -18,6 +19,16 @@
 			method: 'PATCH',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ gapMinGames: value })
+		});
+		await invalidateAll();
+	}
+
+	async function updateGapMinPopularity(e: Event) {
+		const value = Number((e.target as HTMLSelectElement).value);
+		await fetch(`${base}/api/settings`, {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ gapMinPopularityPct: value })
 		});
 		await invalidateAll();
 	}
@@ -460,6 +471,17 @@
 							<option value={100}>100+ games</option>
 							<option value={10}>10+ games</option>
 						</select>
+						<select
+							class="gap-threshold"
+							value={gapMinPopularityPct}
+							onchange={updateGapMinPopularity}
+						>
+							<option value={20}>20%+ popularity</option>
+							<option value={10}>10%+ popularity</option>
+							<option value={5}>5%+ popularity</option>
+							<option value={2}>2%+ popularity</option>
+							<option value={1}>1%+ popularity</option>
+						</select>
 					</div>
 					<p class="gap-rating-note">Popularity based on Lichess games in the {data.gapRatingLabel} range.</p>
 					<div class="gap-section-tabs">
@@ -533,6 +555,17 @@
 							<option value={1000}>1,000+ games</option>
 							<option value={100}>100+ games</option>
 							<option value={10}>10+ games</option>
+						</select>
+						<select
+							class="gap-threshold"
+							value={gapMinPopularityPct}
+							onchange={updateGapMinPopularity}
+						>
+							<option value={20}>20%+ popularity</option>
+							<option value={10}>10%+ popularity</option>
+							<option value={5}>5%+ popularity</option>
+							<option value={2}>2%+ popularity</option>
+							<option value={1}>1%+ popularity</option>
 						</select>
 					</div>
 					<p class="gap-rating-note">Popularity based on Lichess games in the {data.gapRatingLabel} range.</p>
