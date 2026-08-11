@@ -20,6 +20,7 @@ import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { lookupEco } from '$lib/eco';
+import { fenKey } from '$lib/fen';
 
 export const POST: RequestHandler = async ({ request, locals }) => {
 	if (!locals.user) throw error(401, 'Not authenticated');
@@ -55,7 +56,15 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 
 	// Cap at 50 FENs — a typical opening is 15–20 moves deep, so this is
 	// generous while preventing abuse of the IN clause.
-	const result = await lookupEco(db, fenList.slice(0, 50));
+	//
+	// eco_opening.fen is stored 4-field normalized (see migration
+	// 0011_normalize_fen_4field.sql), but every client that calls this
+	// endpoint (OpeningName.svelte) sends chess.js's native 6-field FENs.
+	// Without normalizing here, the exact-match lookup in eco.ts can never
+	// succeed for anything, on any page — this was silently broken app-wide,
+	// not specific to any one feature.
+	const normalizedFens = fenList.map(fenKey);
+	const result = await lookupEco(db, normalizedFens.slice(0, 50));
 
 	return json(result);
 };
