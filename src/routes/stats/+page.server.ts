@@ -39,10 +39,15 @@ export interface ForecastDay {
 	youngLearning: number;
 }
 
-export interface RetentionStats {
+export interface RetentionBucket {
 	totalReviews: number;
-	successCount: number; // rating !== Again
-	observedRetention: number | null; // successCount / totalReviews, null if totalReviews === 0
+	successCount: number;
+	observedRetention: number | null; // null if totalReviews === 0
+}
+
+export interface RetentionStats {
+	youngLearning: RetentionBucket;
+	mature: RetentionBucket;
 	targetRetention: number;
 	since: number | null; // unix seconds of the earliest review_log row counted, or null
 }
@@ -52,6 +57,7 @@ export interface OpeningStat {
 	code: string | null;
 	totalCards: number;
 	totalLapses: number;
+	totalReviews: number;
 	lapseRate: number; // totalLapses / totalCards
 }
 
@@ -63,9 +69,8 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 		deckComposition: { new_: 0, youngLearning: 0, mature: 0, total: 0 } as DeckComposition,
 		forecast: [] as ForecastDay[],
 		retention: {
-			totalReviews: 0,
-			successCount: 0,
-			observedRetention: null,
+			youngLearning: { totalReviews: 0, successCount: 0, observedRetention: null },
+			mature: { totalReviews: 0, successCount: 0, observedRetention: null },
 			targetRetention: 0.9,
 			since: null
 		} as RetentionStats,
@@ -159,23 +164,46 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 
 	// ── True Retention (from review_log — only exists from deployment date
 	//    of the fsrs-review-log branch onward, nothing retroactive) ───────
+	// Split by Young+Learning vs Mature, classified using the card's state
+	// AT THE TIME OF THAT REVIEW (state_before/scheduled_days_before), not
+	// its state today — a card reviewed while young six weeks ago should
+	// count toward "young" retention even if it has since matured.
+	// Mixing both buckets into one number hides which one actually needs
+	// attention: poor young retention usually means learning steps are too
+	// aggressive, poor mature retention usually means requestRetention or
+	// the FSRS weights themselves are miscalibrated.
 	const fsrsConfig = await loadFsrsConfig(userId);
 	const cardIds = scopedCards.map((c) => c.id);
 	const logRows = await db
-		.select({ rating: reviewLog.rating, reviewedAt: reviewLog.reviewedAt })
+		.select({
+			rating: reviewLog.rating,
+			reviewedAt: reviewLog.reviewedAt,
+			stateBefore: reviewLog.stateBefore,
+			scheduledDaysBefore: reviewLog.scheduledDaysBefore
+		})
 		.from(reviewLog)
 		.where(and(eq(reviewLog.userId, userId), inArray(reviewLog.cardId, cardIds)));
 
-	let successCount = 0;
+	const youngLearning: RetentionBucket = { totalReviews: 0, successCount: 0, observedRetention: null };
+	const mature: RetentionBucket = { totalReviews: 0, successCount: 0, observedRetention: null };
 	let earliestReview: Date | null = null;
 	for (const row of logRows) {
-		if (row.rating !== Rating.Again) successCount++;
+		const wasMature =
+			row.stateBefore === State.Review &&
+			(row.scheduledDaysBefore ?? 0) > MATURE_THRESHOLD_DAYS;
+		const bucket = wasMature ? mature : youngLearning;
+		bucket.totalReviews++;
+		if (row.rating !== Rating.Again) bucket.successCount++;
 		if (!earliestReview || row.reviewedAt < earliestReview) earliestReview = row.reviewedAt;
 	}
+	youngLearning.observedRetention =
+		youngLearning.totalReviews > 0 ? youngLearning.successCount / youngLearning.totalReviews : null;
+	mature.observedRetention =
+		mature.totalReviews > 0 ? mature.successCount / mature.totalReviews : null;
+
 	const retention: RetentionStats = {
-		totalReviews: logRows.length,
-		successCount,
-		observedRetention: logRows.length > 0 ? successCount / logRows.length : null,
+		youngLearning,
+		mature,
 		targetRetention: fsrsConfig.requestRetention ?? 0.9,
 		since: earliestReview ? Math.floor(earliestReview.getTime() / 1000) : null
 	};
@@ -186,17 +214,21 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 		moves,
 		scopedCards.map((c) => c.fromFen)
 	);
-	const byOpening = new Map<string, { name: string | null; code: string | null; cards: number; lapses: number }>();
+	const byOpening = new Map<
+		string,
+		{ name: string | null; code: string | null; cards: number; lapses: number; reviews: number }
+	>();
 	for (const c of scopedCards) {
 		const match = ecoByFen.get(c.fromFen) ?? null;
 		const key = match ? `${match.code} ${match.name}` : 'unclassified';
 		let entry = byOpening.get(key);
 		if (!entry) {
-			entry = { name: match?.name ?? null, code: match?.code ?? null, cards: 0, lapses: 0 };
+			entry = { name: match?.name ?? null, code: match?.code ?? null, cards: 0, lapses: 0, reviews: 0 };
 			byOpening.set(key, entry);
 		}
 		entry.cards++;
 		entry.lapses += c.lapses ?? 0;
+		entry.reviews += c.reps ?? 0; // reps = total reviews for this card (all ratings, not just successes)
 	}
 	const openingStats: OpeningStat[] = Array.from(byOpening.values())
 		.filter((e) => e.lapses > 0) // only openings actually causing trouble are interesting here
@@ -205,6 +237,7 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 			code: e.code,
 			totalCards: e.cards,
 			totalLapses: e.lapses,
+			totalReviews: e.reviews,
 			lapseRate: e.lapses / e.cards
 		}))
 		.sort((a, b) => b.totalLapses - a.totalLapses)

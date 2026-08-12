@@ -40,13 +40,13 @@
 
 	// ── True retention ──────────────────────────────────────────────────
 	const retention = $derived(data.retention);
-	const retentionDiffClass = $derived.by(() => {
-		if (retention.observedRetention === null) return '';
-		const diff = retention.observedRetention - retention.targetRetention;
+	function retentionDiffClass(observed: number | null, target: number): string {
+		if (observed === null) return '';
+		const diff = observed - target;
 		if (diff >= -0.03) return 'ret-good'; // within 3pts of target or above
 		if (diff >= -0.1) return 'ret-warn';
 		return 'ret-bad';
-	});
+	}
 </script>
 
 <div class="page-wrapper">
@@ -119,26 +119,67 @@
 			<!-- True Retention -->
 			<div class="widget widget-wide">
 				<div class="widget-label">True Retention</div>
-				{#if retention.totalReviews === 0}
+				{#if retention.youngLearning.totalReviews === 0 && retention.mature.totalReviews === 0}
 					<p class="widget-empty">
 						No graded reviews logged yet. This starts accumulating from your first drill session
 						after this feature was deployed — nothing before that can be reconstructed.
 					</p>
 				{:else}
-					<div class="retention-row">
-						<span class="retention-value {retentionDiffClass}"
-							>{Math.round((retention.observedRetention ?? 0) * 100)}%</span
-						>
-						<span class="retention-target">target {Math.round(retention.targetRetention * 100)}%</span>
+					<div class="retention-buckets">
+						<div class="retention-bucket">
+							<div class="retention-bucket-label">Young + Learning</div>
+							{#if retention.youngLearning.totalReviews === 0}
+								<p class="widget-empty">No reviews yet in this bucket.</p>
+							{:else}
+								<div class="retention-row">
+									<span
+										class="retention-value {retentionDiffClass(
+											retention.youngLearning.observedRetention,
+											retention.targetRetention
+										)}">{Math.round((retention.youngLearning.observedRetention ?? 0) * 100)}%</span
+									>
+									<span class="retention-target"
+										>target {Math.round(retention.targetRetention * 100)}%</span
+									>
+								</div>
+								<p class="widget-note">
+									{retention.youngLearning.successCount} of {retention.youngLearning.totalReviews} graded
+									Good/Easy
+								</p>
+							{/if}
+						</div>
+						<div class="retention-bucket">
+							<div class="retention-bucket-label">Mature</div>
+							{#if retention.mature.totalReviews === 0}
+								<p class="widget-empty">No reviews yet in this bucket.</p>
+							{:else}
+								<div class="retention-row">
+									<span
+										class="retention-value {retentionDiffClass(
+											retention.mature.observedRetention,
+											retention.targetRetention
+										)}">{Math.round((retention.mature.observedRetention ?? 0) * 100)}%</span
+									>
+									<span class="retention-target"
+										>target {Math.round(retention.targetRetention * 100)}%</span
+									>
+								</div>
+								<p class="widget-note">
+									{retention.mature.successCount} of {retention.mature.totalReviews} graded Good/Easy
+								</p>
+							{/if}
+						</div>
 					</div>
 					<p class="widget-note">
-						{retention.successCount} of {retention.totalReviews} reviews graded Good/Easy
+						Split by the card's state at the time of each review, not its state today. Low
+						Young+Learning retention usually points to learning steps being too aggressive; low
+						Mature retention usually points to the target retention or FSRS weights being out of
+						calibration.
 						{#if retention.since}
-							since {new Date(retention.since * 1000).toLocaleDateString()}
+							Tracking since {new Date(retention.since * 1000).toLocaleDateString()}.
 						{/if}
-						.
-						{#if retention.totalReviews < 100}
-							Still an early sample — this becomes more reliable as more reviews accumulate.
+						{#if retention.youngLearning.totalReviews + retention.mature.totalReviews < 100}
+							Still an early sample overall — this becomes more reliable as more reviews accumulate.
 						{/if}
 					</p>
 				{/if}
@@ -161,7 +202,7 @@
 									>{o.totalLapses} lapse{o.totalLapses === 1 ? '' : 's'} across {o.totalCards} card{o.totalCards ===
 									1
 										? ''
-										: 's'}</span
+										: 's'} ({o.totalReviews} review{o.totalReviews === 1 ? '' : 's'})</span
 								>
 							</li>
 						{/each}
@@ -310,6 +351,24 @@
 	}
 
 	/* ── True Retention ──────────────────────────────────────────────── */
+
+	.retention-buckets {
+		display: flex;
+		gap: var(--space-5);
+		flex-wrap: wrap;
+	}
+
+	.retention-bucket {
+		flex: 1;
+		min-width: 160px;
+	}
+
+	.retention-bucket-label {
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--color-text-secondary);
+		margin-bottom: var(--space-1);
+	}
 
 	.retention-row {
 		display: flex;
