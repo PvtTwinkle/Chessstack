@@ -32,6 +32,7 @@
 		{ href: `${base}/puzzles`, label: 'Puzzles' },
 		{ href: `${base}/review`, label: 'Review' },
 		{ href: `${base}/prep`, label: 'Prep' },
+		{ href: `${base}/stats`, label: 'Stats' },
 		{ href: `${base}/settings`, label: 'Settings' },
 		...(data.user?.role === 'admin' ? [{ href: `${base}/admin`, label: 'Admin' }] : [])
 	]);
