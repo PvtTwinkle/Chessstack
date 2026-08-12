@@ -17,6 +17,7 @@ import { eq, and, gt, gte, desc, count } from 'drizzle-orm';
 import { fenKey, loadGapData } from '$lib/gaps';
 import type { Gap } from '$lib/gaps';
 import { getEffectiveStartFens, buildInScopeFens } from '$lib/repertoire';
+import { gapRatingWindow } from '$lib/ratings';
 
 /** Shape of a trouble-spot card returned to the page. */
 export interface TroubleSpot {
@@ -39,6 +40,7 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 	const emptyStats = {
 		repertoires,
 		gaps: [] as Gap[],
+		gapRatingLabel: gapRatingWindow(settings?.trainerRating ?? null).label,
 		dueCount: 0,
 		masteredCount: 0,
 		totalCards: 0,
@@ -68,13 +70,16 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 		.from(userMove)
 		.where(and(eq(userMove.repertoireId, activeRepertoireId), eq(userMove.userId, userId)));
 
-	// ── Gap Finder (masters-first, book fallback) ─────────────────────
+	// ── Gap Finder (players DB, rating window centered on trainerRating) ────
+	const gapRatingLabel = gapRatingWindow(settings?.trainerRating ?? null).label;
 	const gaps = await loadGapData(
 		db,
 		moves,
 		activeRep.color as 'WHITE' | 'BLACK',
 		activeRep.startFen ?? null,
-		settings?.gapMinGames ?? 10000
+		settings?.gapMinGames ?? 10000,
+		settings?.gapMinPopularityPct ?? 5,
+		settings?.trainerRating ?? null
 	);
 
 	// ── SR cards for active repertoire ──────────────────────────────────
@@ -238,6 +243,7 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 	return {
 		repertoires,
 		gaps,
+		gapRatingLabel,
 		dueCount,
 		masteredCount,
 		totalCards,

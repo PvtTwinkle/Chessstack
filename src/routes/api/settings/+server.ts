@@ -112,10 +112,20 @@ export const PATCH: RequestHandler = async ({ locals, request }) => {
 		updates.appTheme = body.appTheme;
 	}
 
-	// Gap finder minimum master games: must be one of the preset values.
-	const VALID_GAP_MIN_GAMES = [10, 100, 1000, 10000];
+	// Gap finder minimum games (sample-size floor, within the rating window):
+	// must be one of the preset values.
+	const VALID_GAP_MIN_GAMES = [10, 100, 1000, 10000, 100000];
 	if (typeof body.gapMinGames === 'number' && VALID_GAP_MIN_GAMES.includes(body.gapMinGames)) {
 		updates.gapMinGames = body.gapMinGames;
+	}
+
+	// Gap finder minimum popularity: % of games at the position, must be a preset value.
+	const VALID_GAP_MIN_POPULARITY_PCT = [1, 2, 5, 10, 20];
+	if (
+		typeof body.gapMinPopularityPct === 'number' &&
+		VALID_GAP_MIN_POPULARITY_PCT.includes(body.gapMinPopularityPct)
+	) {
+		updates.gapMinPopularityPct = body.gapMinPopularityPct;
 	}
 
 	// Players tab rating bracket: integer 0–7.

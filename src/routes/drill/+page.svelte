@@ -26,11 +26,13 @@
 	import ChessBoard from '$lib/components/ChessBoard.svelte';
 	import ResizableBoard from '$lib/components/ResizableBoard.svelte';
 	import OpeningName from '$lib/components/OpeningName.svelte';
+	import NoteText from '$lib/components/NoteText.svelte';
 	import { fenKey, STARTING_FEN } from '$lib/fen';
 	import { SvelteMap } from 'svelte/reactivity';
 	import { untrack } from 'svelte';
 	import { onMount } from 'svelte';
 	import { invalidateAll } from '$app/navigation';
+	import { page } from '$app/state';
 	import { Chess } from 'chess.js';
 	import type { PageData } from './$types';
 	import type { DrawShape } from '@lichess-org/chessground/draw';
@@ -44,6 +46,7 @@
 		playIncorrect
 	} from '$lib/sounds';
 	import { tutorialStep } from '$lib/stores/tutorial';
+	import { getEffectiveStartFens, buildInScopeFens } from '$lib/repertoire';
 
 	// Shape of a move row from the server (user_move table).
 	interface RepertoireMove {
@@ -125,6 +128,12 @@
 
 	// Which depth section to drill: 'all' = no filter.
 	let selectedSection = $state<'all' | DrillSection>('all');
+
+	// Line mode notes are hidden by default: showing a move's rationale
+	// before/while playing through a line risks turning active recall into
+	// recognition (the whole point of drilling), unlike card mode where the
+	// note only ever appears after that single move is already resolved.
+	let showLineNotes = $state(false);
 
 	// Index into filteredCards — which card we're currently drilling.
 	let currentCardIdx = $state(0);
@@ -208,7 +217,10 @@
 
 	// ── Line-mode state ──────────────────────────────────────────────────────
 	// 'card' = normal single-position drilling, 'line' = full root-to-leaf lines.
-	let drillType = $state<'card' | 'line'>('card');
+	// Restored from ?type=line so the "Drill all lines" link (which does a full
+	// page navigation to apply ?mode=all) lands back on the same tab instead
+	// of silently reverting to card mode.
+	let drillType = $state<'card' | 'line'>(page.url.searchParams.get('type') === 'line' ? 'line' : 'card');
 
 	// All enumerated root-to-leaf lines, sorted weakest-first.
 	let allLines = $state<LineStep[][]>([]);
@@ -221,6 +233,10 @@
 
 	// Index into currentLine — the next step the user must play (always a user-move step).
 	let lineStepIdx = $state(0);
+	// Set when a line-mode move with a note resolves correctly and
+	// showLineNotes is on — pauses the auto-advance so the note is actually
+	// readable, rather than flashing past it during the normal 400ms beat.
+	let pendingLineNoteStep = $state<LineStep | null>(null);
 
 	// Stats for the current line.
 	let lineCorrect = $state(0);
@@ -332,6 +348,13 @@
 				return;
 			}
 
+			// Line mode: Space/Enter dismisses a paused note and resumes play.
+			if (drillType === 'line' && pendingLineNoteStep && (e.key === ' ' || e.key === 'Enter')) {
+				e.preventDefault();
+				dismissLineNote();
+				return;
+			}
+
 			// "Next" shortcut: Space or Enter when the Next button is visible.
 			// Visible when: awaitingNext (graded correct), or incorrect, or hint-used correct.
 			const nextVisible =
@@ -435,6 +458,22 @@
 			: allDueCards.filter((c) => getSection(c.fromFen) === selectedSection)
 	);
 
+	// Number of lines that will actually be drilled if line mode is started
+	// right now (due-filtered unless drillMode is 'all') — computed eagerly so
+	// the start screen shows the real count instead of the due-card count.
+	// totalLineCount is the unfiltered count, used to tell apart "repertoire
+	// has no lines at all yet" from "every line is already reviewed" — the
+	// "No lines to drill" empty state below used to conflate the two.
+	const lineCounts = $derived.by(() => {
+		if (drillType !== 'line') return { total: 0, due: 0 };
+		const raw = enumerateLines(allMoves, data.repertoire.color as 'WHITE' | 'BLACK');
+		const scoped =
+			data.drillMode === 'all' ? raw : raw.filter((line) => lineHasDueStep(line, allDueCards));
+		return { total: raw.length, due: scoped.length };
+	});
+	const dueLineCount = $derived(lineCounts.due);
+	const totalLineCount = $derived(lineCounts.total);
+
 	// The card being drilled right now.
 	const currentCard = $derived(filteredCards[currentCardIdx] ?? null);
 
@@ -483,6 +522,14 @@
 		}
 		return map;
 	});
+
+	// Build a /build?line= link landing just BEFORE a given move (its
+	// fromFen), which is where Build's annotation editor (✎ button) for that
+	// move actually lives — the move shows as an existing child of the
+	// position you land on, not of the position it leads to.
+	function editNoteHref(sansBeforeMove: string[]): string {
+		return `/build?line=${encodeURIComponent(sansBeforeMove.join(','))}`;
+	}
 
 	// Note for the current position (opponent's last move annotation).
 	const currentPositionNote = $derived(
@@ -563,14 +610,48 @@
 
 	type DrillSection = 'foundations' | 'mainlines' | 'deep';
 
-	// Extract the full-move number from a FEN string (6th field, 1-indexed).
-	function getMoveNumber(fen: string): number {
-		return parseInt(fen.split(' ')[5], 10) || 1;
-	}
+	// Pre-existing bug, not introduced by this branch: userMove.fromFen/toFen
+	// are always stored as 4-field normalized FENs (see api/moves/+server.ts,
+	// "strip halfmove clock and fullmove counter so transpositions always
+	// match") — there's no move-counter field to read on any card, ever. The
+	// old getMoveNumber(fen) below silently fell back to 1 for every card, so
+	// the Foundations/Mainlines/Deep filter and start-screen breakdown always
+	// bucketed everything into Foundations regardless of true depth. Same
+	// root cause as the Gap Finder's depth-section bug fixed separately.
+	// Fixed the same way: a real ply count via BFS from STARTING_FEN through
+	// the full move tree, converted to a standard fullmove number.
+	const plyDepthByFenKey = $derived.by(() => {
+		const adj = new Map<string, RepertoireMove[]>();
+		for (const m of allMoves) {
+			const key = fenKey(m.fromFen);
+			const list = adj.get(key);
+			if (list) list.push(m);
+			else adj.set(key, [m]);
+		}
 
-	// Map a FEN to one of the three depth sections.
+		const rootKey = fenKey(STARTING_FEN);
+		const depths = new Map<string, number>([[rootKey, 0]]);
+		const queue: string[] = [rootKey];
+		while (queue.length > 0) {
+			const current = queue.shift()!;
+			const currentDepth = depths.get(current)!;
+			const children = adj.get(current);
+			if (!children) continue;
+			for (const child of children) {
+				const childKey = fenKey(child.toFen);
+				if (depths.has(childKey)) continue;
+				depths.set(childKey, currentDepth + 1);
+				queue.push(childKey);
+			}
+		}
+		return depths;
+	});
+
+	// Map a FEN to one of the three depth sections, using the ply count from
+	// plyDepthByFenKey rather than a move-counter field the FEN doesn't have.
 	function getSection(fen: string): DrillSection {
-		const move = getMoveNumber(fen);
+		const depth = plyDepthByFenKey.get(fenKey(fen)) ?? 0;
+		const move = Math.floor(depth / 2) + 1;
 		if (move <= 5) return 'foundations';
 		if (move <= 15) return 'mainlines';
 		return 'deep';
@@ -607,6 +688,14 @@
 	// Enumerate all root-to-leaf lines through the repertoire's move tree.
 	// A "leaf" is any position with no outgoing edges. Each line is an ordered
 	// list of LineSteps from the starting position to the leaf.
+	//
+	// Lead-in moves (before the repertoire's effective start position — see
+	// getEffectiveStartFens) are still walked and auto-played for context,
+	// but are never marked isUserMove, even when they fall on the user's own
+	// turn. This mirrors card mode and the Gap Finder, which both exclude
+	// lead-in positions from what's actively drilled — the "Set Start"
+	// button in Build Mode promises exactly that ("moves before it won't be
+	// drilled"), which line mode did not previously honor.
 	function enumerateLines(moves: RepertoireMove[], color: 'WHITE' | 'BLACK'): LineStep[][] {
 		const adj = new SvelteMap<string, RepertoireMove[]>();
 		for (const m of moves) {
@@ -615,6 +704,17 @@
 			if (list) list.push(m);
 			else adj.set(key, [m]);
 		}
+
+		// The lead-in exclusion below only makes sense for a custom start
+		// position (Build Mode's "Set Start"). When startFen is null,
+		// getEffectiveStartFens defines scope as starting *after* the user's
+		// own first move (a convention meant for SR-card/gap scoping, where
+		// the first move itself is never quizzed) — reusing that here would
+		// wrongly auto-play the user's actual first move in every line.
+		const customStartFen = data.repertoire.startFen ?? null;
+		const inScope = customStartFen
+			? buildInScopeFens(getEffectiveStartFens(customStartFen, moves, color), moves)
+			: null;
 
 		const lines: LineStep[][] = [];
 		const MAX_LINES = 500;
@@ -645,7 +745,8 @@
 					fromFen: child.fromFen,
 					toFen: child.toFen,
 					san: child.san,
-					isUserMove: isUserTurn(child.fromFen)
+					isUserMove:
+						isUserTurn(child.fromFen) && (inScope === null || inScope.has(fenKey(child.fromFen)))
 				});
 				dfs(child.toFen, path, visited);
 				path.pop();
@@ -680,6 +781,18 @@
 			}
 		}
 		return score;
+	}
+
+	// Whether a line contains at least one step matching a currently-due card.
+	// Used to scope line mode to "due" the same way card mode already is —
+	// enumerateLines produces every line in the tree regardless of due
+	// status, sortLinesByWeakness only orders them, so without this filter
+	// "due" line-mode sessions silently drilled (and auto-graded) the whole
+	// repertoire, duplicating what the existing "Drill all cards" link
+	// (?mode=all) is for.
+	function lineHasDueStep(line: LineStep[], dueCards: DueCard[]): boolean {
+		const dueSet = new Set(dueCards.map((c) => fenKey(c.fromFen) + ':' + c.san));
+		return line.some((s) => s.isUserMove && dueSet.has(fenKey(s.fromFen) + ':' + s.san));
 	}
 
 	// Sort lines by score descending, breaking ties randomly.
@@ -1036,11 +1149,14 @@
 		if (rating >= 3) correctCount++;
 	}
 
-	// Initialize line mode: enumerate lines, sort, and start the first line.
+	// Initialize line mode: enumerate lines, filter to due unless in "all"
+	// mode, sort, and start the first line.
 	function initLineMode(): void {
 		const color = data.repertoire.color as 'WHITE' | 'BLACK';
 		const raw = enumerateLines(allMoves, color);
-		allLines = sortLinesByWeakness(raw, allDueCards);
+		const scoped =
+			data.drillMode === 'all' ? raw : raw.filter((line) => lineHasDueStep(line, allDueCards));
+		allLines = sortLinesByWeakness(scoped, allDueCards);
 		currentLineIdx = 0;
 		lineComplete = false;
 		totalReviewed = 0;
@@ -1140,6 +1256,12 @@
 		autoPlayTimer = setTimeout(step, playbackSpeed);
 	}
 
+	// Dismiss a paused line-mode note and resume auto-play.
+	function dismissLineNote(): void {
+		pendingLineNoteStep = null;
+		continueLineAfterUserMove();
+	}
+
 	// After the user plays a correct move in line mode, continue auto-playing
 	// opponent moves until the next user move or end of line.
 	function continueLineAfterUserMove(): void {
@@ -1170,6 +1292,14 @@
 
 		lineCorrect++;
 		autoGradeStep(step, 3); // Rating.Good
+
+		// If this move has a note and the user has notes turned on, pause
+		// here instead of auto-continuing — a 400ms flash isn't enough time
+		// to read anything, let alone a multi-paragraph note.
+		if (showLineNotes && step && noteByMove.has(fenKey(step.fromFen) + ':' + step.san)) {
+			pendingLineNoteStep = step;
+			return;
+		}
 
 		// Short pause then continue the line.
 		setTimeout(() => continueLineAfterUserMove(), 400);
@@ -1223,7 +1353,12 @@
 		currentLineIdx++;
 
 		if (currentLineIdx >= allLines.length) {
-			// All lines done — finalize session.
+			// All lines done — finalize session. lineComplete must be reset here,
+			// otherwise the template's if/else chain (which checks lineComplete
+			// before phase === 'complete') keeps re-rendering the same
+			// "Line complete" interstitial forever, making the Next Line button
+			// appear to do nothing on the last line of the queue.
+			lineComplete = false;
 			if (sessionId !== null) {
 				try {
 					const finalRes = await fetch(`/api/drill/session/${sessionId}`, {
@@ -1288,6 +1423,13 @@
 		phase = 'idle'; // hide the complete screen immediately while data loads
 		sessionId = null;
 		nextDueAt = null;
+		// Reset to the start screen rather than auto-resuming a session: the
+		// data reload below may find nothing left due, and letting the start
+		// screen (with its own "All caught up!" / due-count branches) handle
+		// that is simpler than re-deriving the same distinction further down
+		// in the started-session branches, which exist for switchDrillType's
+		// sake but shouldn't also have to cover this path.
+		started = false;
 		invalidateAll();
 	}
 
@@ -1455,9 +1597,12 @@
 			</div>
 		{/if}
 
-		<!-- Drill-all shortcut (only in normal due-cards mode, card drill type) -->
-		{#if drillType === 'card' && data.drillMode !== 'all' && phase !== 'complete'}
-			<a href="/drill?mode=all" class="drill-all-link">Drill all cards</a>
+		<!-- Line-mode notes toggle — off by default, see showLineNotes declaration -->
+		{#if started && drillType === 'line' && phase !== 'complete'}
+			<label class="line-notes-toggle">
+				<input type="checkbox" bind:checked={showLineNotes} />
+				Show move notes
+			</label>
 		{/if}
 
 		<!-- Progress bar -->
@@ -1489,11 +1634,27 @@
 			</div>
 		{/if}
 
+		{#if pendingLineNoteStep}
+			<div class="note-box line-note-pause">
+				<div class="note-label">NOTE — {pendingLineNoteStep.san}</div>
+				<NoteText text={noteByMove.get(fenKey(pendingLineNoteStep.fromFen) + ':' + pendingLineNoteStep.san) ?? ''} />
+				<div class="line-note-actions">
+					<a
+						href={editNoteHref(currentLine.slice(0, lineStepIdx).map((s) => s.san))}
+						class="note-edit-link">Edit</a
+					>
+					<button class="btn btn--primary btn--small" onclick={dismissLineNote}>
+						Continue <kbd>Space</kbd>
+					</button>
+				</div>
+			</div>
+		{/if}
+
 		<!-- ── Phase-specific content ─────────────────────────────────────────── -->
 
 		{#if !started}
 			<!-- Start screen — shown before the user begins drilling -->
-			{#if (drillType === 'card' && allDueCards.length === 0) || (drillType === 'line' && allDueCards.length === 0)}
+			{#if (drillType === 'card' && allDueCards.length === 0) || (drillType === 'line' && dueLineCount === 0)}
 				<div class="empty-state">
 					<div class="empty-icon">✓</div>
 					<p class="empty-title">All caught up!</p>
@@ -1501,12 +1662,14 @@
 						No cards due right now. Come back later or build more repertoire.
 					</p>
 					<a href="/build" class="btn btn--primary">Build Mode</a>
-					<a href="/drill?mode=all" class="btn btn--secondary">Drill all cards</a>
+					<a href="/drill?mode=all{drillType === 'line' ? '&type=line' : ''}" class="btn btn--secondary"
+						>Drill all {drillType === 'line' ? 'lines' : 'cards'}</a
+					>
 				</div>
 			{:else}
 				<div class="start-screen">
 					<div class="start-count">
-						{drillType === 'card' ? filteredCards.length : allDueCards.length}
+						{drillType === 'card' ? filteredCards.length : dueLineCount}
 					</div>
 					<div class="start-label">{drillType === 'card' ? 'cards' : 'lines'} to drill</div>
 
@@ -1529,7 +1692,8 @@
 
 					<button
 						class="btn btn--primary start-btn"
-						disabled={drillType === 'card' && filteredCards.length === 0}
+						disabled={(drillType === 'card' && filteredCards.length === 0) ||
+							(drillType === 'line' && dueLineCount === 0)}
 						onclick={startDrilling}
 					>
 						Start Drilling <kbd>Space</kbd>
@@ -1556,14 +1720,31 @@
 				<button class="btn btn--primary next-btn" onclick={advanceToNextLine}>
 					Next Line <kbd>Space</kbd>
 				</button>
+				<a
+					href="/build?line={encodeURIComponent(currentLine.map((s) => s.san).join(','))}"
+					class="btn btn--secondary"
+				>
+					Build from this line
+				</a>
 			</div>
-		{:else if drillType === 'line' && allLines.length === 0 && phase !== 'playing'}
-			<!-- Line mode but no lines to drill -->
+		{:else if drillType === 'line' && allLines.length === 0 && phase !== 'playing' && totalLineCount === 0}
+			<!-- Line mode, repertoire truly has no complete lines yet -->
 			<div class="empty-state">
 				<div class="empty-icon">✓</div>
 				<p class="empty-title">No lines to drill</p>
 				<p class="empty-hint">Your repertoire has no complete lines yet. Build more moves first.</p>
 				<a href="/build" class="btn btn--primary">Build Mode</a>
+			</div>
+		{:else if drillType === 'line' && allLines.length === 0 && phase !== 'playing'}
+			<!-- Line mode, repertoire has lines but none are currently due — same
+			     messaging as the pre-start empty state, reached here because
+			     "Drill again" re-runs initLineMode() without a full page reload. -->
+			<div class="empty-state">
+				<div class="empty-icon">✓</div>
+				<p class="empty-title">All caught up!</p>
+				<p class="empty-hint">No cards due right now. Come back later or build more repertoire.</p>
+				<a href="/build" class="btn btn--primary">Build Mode</a>
+				<a href="/drill?mode=all&type=line" class="btn btn--secondary">Drill all lines</a>
 			</div>
 		{:else if drillType === 'card' && allDueCards.length === 0}
 			<!-- No cards due -->
@@ -1700,7 +1881,10 @@
 			{#if drillType === 'card' && currentPositionNote}
 				<div class="note-box">
 					<div class="note-label">NOTE</div>
-					<div class="note-text">{currentPositionNote}</div>
+					<NoteText text={currentPositionNote} />
+					<div class="note-edit-row">
+						<a href={editNoteHref(path.slice(0, -1))} class="note-edit-link">Edit</a>
+					</div>
 				</div>
 			{/if}
 		{:else if phase === 'correct'}
@@ -1728,7 +1912,10 @@
 			{#if currentMoveNote}
 				<div class="note-box">
 					<div class="note-label">NOTE</div>
-					<div class="note-text">{currentMoveNote}</div>
+					<NoteText text={currentMoveNote} />
+					<div class="note-edit-row">
+						<a href={editNoteHref(path)} class="note-edit-link">Edit</a>
+					</div>
 				</div>
 			{/if}
 
@@ -1809,7 +1996,10 @@
 			{#if currentMoveNote}
 				<div class="note-box">
 					<div class="note-label">NOTE</div>
-					<div class="note-text">{currentMoveNote}</div>
+					<NoteText text={currentMoveNote} />
+					<div class="note-edit-row">
+						<a href={editNoteHref(path)} class="note-edit-link">Edit</a>
+					</div>
 				</div>
 			{/if}
 
@@ -1982,25 +2172,6 @@
 		border-radius: var(--radius-sm);
 		font-size: 0.82rem;
 		font-weight: 600;
-		color: var(--color-accent, #3b82f6);
-	}
-
-	.drill-all-link {
-		display: block;
-		text-align: center;
-		padding: var(--space-2) var(--space-3);
-		font-size: 0.8rem;
-		color: var(--color-text-secondary);
-		text-decoration: none;
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-sm);
-		transition:
-			border-color var(--dur-fast) var(--ease-snap),
-			color var(--dur-fast) var(--ease-snap);
-	}
-
-	.drill-all-link:hover {
-		border-color: var(--color-accent, rgba(59, 130, 246, 0.4));
 		color: var(--color-accent, #3b82f6);
 	}
 
@@ -2515,12 +2686,53 @@
 		text-transform: uppercase;
 	}
 
-	.note-text {
+	/* NoteText's own wrapper, styled from here to match the old .note-text look */
+	.note-box :global(.note-text-content) {
 		font-size: 0.8rem;
 		color: var(--color-text-secondary);
 		line-height: 1.45;
-		font-style: italic;
-		white-space: pre-wrap;
+	}
+
+	.note-edit-row {
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	.note-edit-link {
+		font-size: 0.7rem;
+		font-weight: 600;
+		color: var(--color-accent);
+		text-decoration: none;
+	}
+
+	.note-edit-link:hover {
+		text-decoration: underline;
+	}
+
+	.line-notes-toggle {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: 0.75rem;
+		color: var(--color-text-secondary);
+		cursor: pointer;
+		margin-bottom: var(--space-2);
+	}
+
+	.line-note-pause {
+		margin-bottom: var(--space-2);
+	}
+
+	.line-note-actions {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-top: 0.25rem;
+	}
+
+	.btn--small {
+		padding: 0.3rem 0.7rem;
+		font-size: 0.75rem;
 	}
 
 	/* ── Next + Undo buttons ─────────────────────────────────────────────────── */
