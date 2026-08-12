@@ -151,7 +151,7 @@
 					<p class="widget-empty">No lapses recorded yet — nothing to concentrate on.</p>
 				{:else}
 					<ul class="opening-list">
-						{#each data.openingStats as o (o.name ?? 'unclassified')}
+						{#each data.openingStats as o (`${o.code ?? 'none'}-${o.name ?? 'unclassified'}`)}
 							<li class="opening-item">
 								<span class="opening-name">
 									{#if o.code}<span class="opening-code">{o.code}</span>{/if}
