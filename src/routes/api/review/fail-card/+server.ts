@@ -10,14 +10,15 @@
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { repertoire, userMove, userRepertoireMove } from '$lib/db/schema';
+import { repertoire, userMove, userRepertoireMove, reviewLog } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { gradeCard, Rating } from '$lib/fsrs';
+import { gradeCard, buildReviewLogEntry, Rating } from '$lib/fsrs';
 import { loadFsrsConfig } from '$lib/server/fsrs-config';
 import { fenKey } from '$lib/fen';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
 	if (!locals.user) throw error(401, 'Not authenticated');
+	const userId = locals.user.id;
 
 	let body;
 	try {
@@ -39,18 +40,18 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		db
 			.select()
 			.from(repertoire)
-			.where(and(eq(repertoire.id, repertoireId), eq(repertoire.userId, locals.user.id))),
+			.where(and(eq(repertoire.id, repertoireId), eq(repertoire.userId, userId))),
 		db
 			.select()
 			.from(userRepertoireMove)
 			.where(
 				and(
-					eq(userRepertoireMove.userId, locals.user.id),
+					eq(userRepertoireMove.userId, userId),
 					eq(userRepertoireMove.repertoireId, repertoireId),
 					eq(userRepertoireMove.fromFen, fromFen)
 				)
 			),
-		loadFsrsConfig(locals.user.id)
+		loadFsrsConfig(userId)
 	]);
 
 	if (!repRows[0]) throw error(404, 'Repertoire not found');
@@ -61,18 +62,31 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	if (card) {
 		// Card exists — apply Again rating via FSRS.
 		const updated = gradeCard(card, Rating.Again, now, fsrsConfig);
-		await db.update(userRepertoireMove).set(updated).where(eq(userRepertoireMove.id, card.id));
+		const logEntry = buildReviewLogEntry(
+			card,
+			Rating.Again,
+			updated,
+			now,
+			'REVIEW_DEVIATION',
+			fsrsConfig
+		);
+		await db.transaction(async (tx) => {
+			await tx.update(userRepertoireMove).set(updated).where(eq(userRepertoireMove.id, card.id));
+			await tx.insert(reviewLog).values({ userId, cardId: card.id, ...logEntry });
+		});
 		return json({ updated: true, due: updated.due });
 	}
 
 	// No SR card exists — find the corresponding userMove to get the SAN,
-	// then create a new card in an immediately-due state.
+	// then create a new card in an immediately-due state. This is card
+	// creation, not a graded review (the card has never been shown to the
+	// user yet), so no review_log entry is written here.
 	const [moveRow] = await db
 		.select()
 		.from(userMove)
 		.where(
 			and(
-				eq(userMove.userId, locals.user.id),
+				eq(userMove.userId, userId),
 				eq(userMove.repertoireId, repertoireId),
 				eq(userMove.fromFen, fromFen)
 			)
@@ -84,7 +98,7 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	}
 
 	await db.insert(userRepertoireMove).values({
-		userId: locals.user.id,
+		userId,
 		repertoireId,
 		fromFen,
 		san: moveRow.san,

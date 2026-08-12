@@ -10,13 +10,14 @@
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { userRepertoireMove } from '$lib/db/schema';
+import { userRepertoireMove, reviewLog } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { gradeCard, Rating } from '$lib/fsrs';
+import { gradeCard, buildReviewLogEntry, Rating } from '$lib/fsrs';
 import { loadFsrsConfig } from '$lib/server/fsrs-config';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
 	if (!locals.user) throw error(401, 'Not authenticated');
+	const userId = locals.user.id;
 
 	let body;
 	try {
@@ -37,8 +38,8 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		db
 			.select()
 			.from(userRepertoireMove)
-			.where(and(eq(userRepertoireMove.id, cardId), eq(userRepertoireMove.userId, locals.user.id))),
-		loadFsrsConfig(locals.user.id)
+			.where(and(eq(userRepertoireMove.id, cardId), eq(userRepertoireMove.userId, userId))),
+		loadFsrsConfig(userId)
 	]);
 
 	const card = cardRows[0];
@@ -47,9 +48,14 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	// Run the FSRS algorithm to get the updated memory state.
 	const now = new Date();
 	const updated = gradeCard(card, rating as Rating, now, fsrsConfig);
+	const logEntry = buildReviewLogEntry(card, rating as Rating, updated, now, 'DRILL', fsrsConfig);
 
-	// Write the new state back to the database.
-	await db.update(userRepertoireMove).set(updated).where(eq(userRepertoireMove.id, cardId));
+	// Write the new state back to the database, and append the review log
+	// entry, in the same transaction so the two never drift out of sync.
+	await db.transaction(async (tx) => {
+		await tx.update(userRepertoireMove).set(updated).where(eq(userRepertoireMove.id, cardId));
+		await tx.insert(reviewLog).values({ userId, cardId, ...logEntry });
+	});
 
 	return json({ updated: true, due: updated.due });
 };
