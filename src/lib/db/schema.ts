@@ -324,6 +324,55 @@ export const userRepertoireMove = pgTable(
 	})
 );
 
+// One row per FSRS grading event (drill grade or review-mode deviation
+// fail-card). Append-only — nothing here is ever updated, only inserted.
+// Historical reviews cannot be reconstructed after the fact, so this table
+// exists purely to accumulate data going forward for a future FSRS weight
+// optimizer (see fsrs-review-log branch notes).
+//
+// Captures both pre- and post-review card state: ts-fsrs's own ReviewLog
+// type records state AFTER the review, while the revlog format used by FSRS
+// optimizers (fsrs-rs, fsrs4anki) expects state BEFORE the review to replay
+// history correctly. Storing both avoids guessing which one an eventual
+// optimizer implementation will need.
+export const reviewLog = pgTable(
+	'review_log',
+	{
+		id: serial('id').primaryKey(),
+		userId: integer('user_id')
+			.notNull()
+			.references(() => user.id, { onDelete: 'cascade' }),
+		cardId: integer('card_id')
+			.notNull()
+			.references(() => userRepertoireMove.id, { onDelete: 'cascade' }),
+
+		rating: integer('rating').notNull(), // 1=Again, 3=Good, 4=Easy
+		reviewedAt: timestamp('reviewed_at').notNull(),
+		source: text('source').notNull(), // "DRILL" or "REVIEW_DEVIATION"
+
+		stateBefore: integer('state_before').notNull(),
+		stabilityBefore: doublePrecision('stability_before'),
+		difficultyBefore: doublePrecision('difficulty_before'),
+		elapsedDaysBefore: integer('elapsed_days_before'),
+		scheduledDaysBefore: integer('scheduled_days_before'),
+		learningStepsBefore: integer('learning_steps_before').notNull(),
+
+		stateAfter: integer('state_after').notNull(),
+		stabilityAfter: doublePrecision('stability_after').notNull(),
+		difficultyAfter: doublePrecision('difficulty_after').notNull(),
+		elapsedDaysAfter: integer('elapsed_days_after').notNull(),
+		scheduledDaysAfter: integer('scheduled_days_after').notNull(),
+		learningStepsAfter: integer('learning_steps_after').notNull(),
+
+		requestRetention: doublePrecision('request_retention').notNull()
+	},
+	(table) => ({
+		userIdIdx: index('idx_review_log_user_id').on(table.userId),
+		cardIdIdx: index('idx_review_log_card_id').on(table.cardId),
+		reviewedAtIdx: index('idx_review_log_reviewed_at').on(table.reviewedAt)
+	})
+);
+
 // A game the user has imported and reviewed for deviations from their repertoire.
 export const reviewedGame = pgTable(
 	'reviewed_game',

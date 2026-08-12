@@ -170,6 +170,67 @@ export function gradeCard(
 	return cardToUpdate(result.card, now);
 }
 
+// Fields ready to insert into review_log, minus userId/cardId which the
+// caller already has in scope (they loaded the card row to grade it).
+export interface ReviewLogEntry {
+	rating: Rating;
+	reviewedAt: Date;
+	source: 'DRILL' | 'REVIEW_DEVIATION';
+	stateBefore: number;
+	stabilityBefore: number | null;
+	difficultyBefore: number | null;
+	elapsedDaysBefore: number | null;
+	scheduledDaysBefore: number | null;
+	learningStepsBefore: number;
+	stateAfter: number;
+	stabilityAfter: number;
+	difficultyAfter: number;
+	elapsedDaysAfter: number;
+	scheduledDaysAfter: number;
+	learningStepsAfter: number;
+	requestRetention: number;
+}
+
+/**
+ * Build a review_log row from the pre-review card state and the FSRSUpdate
+ * gradeCard() produced. Call this alongside gradeCard() at every grading
+ * site — it does not persist anything itself, callers insert the result.
+ *
+ * @param row     The card row as loaded BEFORE grading (same row passed to gradeCard).
+ * @param rating  The rating that was applied.
+ * @param updated The FSRSUpdate gradeCard() returned.
+ * @param now     The time of review (must match what gradeCard() was called with).
+ * @param source  Which endpoint triggered this grading event.
+ * @param config  The same per-user FSRS config gradeCard() was called with.
+ */
+export function buildReviewLogEntry(
+	row: FSRSCardRow,
+	rating: Rating,
+	updated: FSRSUpdate,
+	now: Date,
+	source: ReviewLogEntry['source'],
+	config?: FSRSUserConfig
+): ReviewLogEntry {
+	return {
+		rating,
+		reviewedAt: now,
+		source,
+		stateBefore: row.state ?? State.New,
+		stabilityBefore: row.stability,
+		difficultyBefore: row.difficulty,
+		elapsedDaysBefore: row.elapsedDays,
+		scheduledDaysBefore: row.scheduledDays,
+		learningStepsBefore: row.learningSteps,
+		stateAfter: updated.state,
+		stabilityAfter: updated.stability,
+		difficultyAfter: updated.difficulty,
+		elapsedDaysAfter: updated.elapsedDays,
+		scheduledDaysAfter: updated.scheduledDays,
+		learningStepsAfter: updated.learningSteps,
+		requestRetention: config?.requestRetention ?? DEFAULT_RETENTION
+	};
+}
+
 // Human-readable label for a time difference, e.g. "10 min", "1 day", "4 days".
 function formatInterval(dueDate: Date, now: Date): string {
 	const diffMin = Math.round((dueDate.getTime() - now.getTime()) / 60000);
