@@ -183,6 +183,13 @@
 			"when": 1774800000000,
 			"tag": "0025_trainer_lead_in_moves",
 			"breakpoints": true
+		},
+		{
+			"idx": 26,
+			"version": "6",
+			"when": 1786665600000,
+			"tag": "0026_position_eval_cache",
+			"breakpoints": true
 		}
 	]
 }

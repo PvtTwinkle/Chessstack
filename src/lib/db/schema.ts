@@ -153,6 +153,32 @@ export const celebrityMoves = pgTable(
 	})
 );
 
+// Cache of Stockfish evaluations, keyed by FEN. Used to color-code candidate
+// moves (currently the Players tab) by how good the resulting position is,
+// without re-running the engine every time the same position is visited.
+//
+// Not user-scoped: a Stockfish eval of a position is objective, so every
+// user on the same instance shares one cache entry per (fen, depth). The
+// depth column is part of what identifies an entry so that a future change
+// to POSITION_EVAL_DEPTH does not collide with entries computed at a
+// different depth.
+//
+// Populated lazily on first view (see $lib/stockfish/evalCache.ts) —
+// never pre-seeded, unlike the shared book tables above.
+export const positionEvalCache = pgTable(
+	'position_eval_cache',
+	{
+		fen: text('fen').notNull(),
+		depth: integer('depth').notNull(),
+		evalCp: integer('eval_cp'), // null when evalMate is set instead
+		evalMate: integer('eval_mate'), // null when evalCp is set instead
+		computedAt: timestamp('computed_at').notNull().defaultNow()
+	},
+	(table) => ({
+		pk: primaryKey({ columns: [table.fen, table.depth] })
+	})
+);
+
 // Lichess puzzles filtered by opening and imported via the puzzle-import script.
 // Shared/read-only data — the app never writes to this table.
 // Data is NOT shipped with the app; users download the Lichess puzzle CSV
