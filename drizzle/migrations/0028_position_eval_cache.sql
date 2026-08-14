@@ -1,4 +1,4 @@
--- 0026_position_eval_cache.sql
+-- 0028_position_eval_cache.sql
 -- Cache of Stockfish evaluations, keyed by (fen, depth). Populated lazily
 -- the first time a position is viewed with an eval-coloring feature, not
 -- pre-seeded. Not user-scoped: an engine eval is the same for everyone on
