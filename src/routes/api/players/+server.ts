@@ -6,6 +6,13 @@
 //
 // The input FEN is normalized to 4 fields (stripping halfmove clock and
 // fullmove number) to match the storage format in lichess_moves.
+//
+// Each move is additionally annotated with a Stockfish eval of the resulting
+// position (see evalCache.ts), so the client can color-code popular moves
+// by whether they're actually good, not just popular. The first request for
+// a given resulting position computes it live; every request after that is
+// a cache hit. Evals are computed sequentially and can dominate response
+// time on a cold cache — see evalCache.ts for the depth/timeout trade-off.
 
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
@@ -13,6 +20,8 @@ import { db } from '$lib/db';
 import { lichessMoves } from '$lib/db/schema';
 import { eq, and, desc } from 'drizzle-orm';
 import { fenKey } from '$lib/fen';
+import { getCachedEval } from '$lib/stockfish/evalCache';
+import { Chess } from 'chess.js';
 import type { MastersMove, MastersResponse } from '../masters/+server';
 
 const MAX_MOVES = 12;
@@ -41,13 +50,33 @@ export const GET: RequestHandler = async ({ url, locals }) => {
 
 	if (rows.length === 0) return json(EMPTY_RESPONSE);
 
-	const moves: MastersMove[] = rows.map((r) => ({
-		san: r.moveSan,
-		white: r.whiteWins,
-		draws: r.draws,
-		black: r.blackWins,
-		totalGames: r.gamesPlayed
-	}));
+	// Eval each resulting position, sequentially (Stockfish handles one
+	// analysis at a time — see $lib/stockfish/index.ts). Cache hits resolve
+	// near-instantly; a cold cache pays the full engine cost per move here.
+	const moves: MastersMove[] = [];
+	for (const r of rows) {
+		let evalCp: number | null = null;
+		let evalMate: number | null = null;
+		try {
+			const whiteMultiplier = new Chess(r.resultingFen).turn() === 'w' ? 1 : -1;
+			const positionEval = await getCachedEval(r.resultingFen);
+			evalCp = positionEval.evalCp != null ? positionEval.evalCp * whiteMultiplier : null;
+			evalMate = positionEval.evalMate != null ? positionEval.evalMate * whiteMultiplier : null;
+		} catch {
+			// Engine or DB hiccup on this one move — fall through with no eval
+			// rather than failing the whole response.
+		}
+
+		moves.push({
+			san: r.moveSan,
+			white: r.whiteWins,
+			draws: r.draws,
+			black: r.blackWins,
+			totalGames: r.gamesPlayed,
+			evalCp,
+			evalMate
+		});
+	}
 
 	const totalGames = moves.reduce((sum, m) => sum + m.totalGames, 0);
 
