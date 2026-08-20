@@ -47,6 +47,9 @@
 		draws: number;
 		black: number;
 		totalGames: number;
+		// Only populated for Players-tab rows (see moveEvalBgClass below).
+		evalCp?: number | null;
+		evalMate?: number | null;
 	}
 
 	interface Props {
@@ -524,6 +527,44 @@
 		return 'eval-equal';
 	}
 
+	// ── Players tab — background coloring by eval delta vs the best move ─────
+	// Converts a (cp, mate) pair into one comparable number, from the current
+	// player's perspective (higher = better for them), so mate scores and cp
+	// scores can be ranked against each other. Mates are pushed far outside
+	// the cp range so "mate for me" always outranks any cp score and "mate
+	// against me" always underranks any cp score.
+	function playerScore(cp: number | null, mate: number | null): number | null {
+		if (mate !== null) {
+			const playerMate = playerColor === 'BLACK' ? -mate : mate;
+			return playerMate > 0 ? 100_000 - playerMate : -100_000 - playerMate;
+		}
+		if (cp === null) return null;
+		return playerColor === 'BLACK' ? -cp : cp;
+	}
+
+	// Best score among the currently loaded Players-tab moves. null if none
+	// of them have an eval yet (still loading, or the engine is unavailable).
+	let playersBestScore = $derived.by(() => {
+		const scores = playersMoves
+			.map((m) => playerScore(m.evalCp ?? null, m.evalMate ?? null))
+			.filter((s): s is number => s !== null);
+		return scores.length > 0 ? Math.max(...scores) : null;
+	});
+
+	// Background tint for a Players-tab move, by how far its eval trails the
+	// best evaluated move: <20cp good, 20-50cp neutral, >50cp bad. Returns ''
+	// for Masters/Stars rows (evalCp is undefined there — not computed) so
+	// this only ever affects the Players tab.
+	function moveEvalBgClass(m: MastersMove): string {
+		if (m.evalCp === undefined || playersBestScore === null) return '';
+		const score = playerScore(m.evalCp ?? null, m.evalMate ?? null);
+		if (score === null) return '';
+		const delta = playersBestScore - score;
+		if (delta < 20) return 'move-eval-good';
+		if (delta < 50) return 'move-eval-neutral';
+		return 'move-eval-bad';
+	}
+
 	// ── Scroll-into-view for keyboard navigation ─────────────────────────
 	let listEl = $state<HTMLDivElement | null>(null);
 
@@ -599,6 +640,9 @@
 		<button
 			class="candidate-row"
 			class:candidate-highlighted={highlightedIndex === idx}
+			class:move-eval-good={moveEvalBgClass(m) === 'move-eval-good'}
+			class:move-eval-neutral={moveEvalBgClass(m) === 'move-eval-neutral'}
+			class:move-eval-bad={moveEvalBgClass(m) === 'move-eval-bad'}
 			onclick={() => onSelectMove(m.san)}
 			onmouseenter={() => onHoverMove?.(m.san)}
 			onmouseleave={() => onHoverMove?.(null)}
@@ -891,6 +935,24 @@
 	.candidate-row:disabled {
 		opacity: 0.4;
 		cursor: default;
+	}
+
+	/* ── Players tab — background tint by eval delta vs best move ──────────── */
+	/* Subtle tint + left border so the WDL bar underneath stays legible. */
+
+	.move-eval-good {
+		background: rgba(63, 176, 110, 0.12);
+		border-left: 3px solid var(--color-eval-good);
+	}
+
+	.move-eval-neutral {
+		background: rgba(212, 168, 67, 0.1);
+		border-left: 3px solid var(--color-eval-inaccuracy);
+	}
+
+	.move-eval-bad {
+		background: rgba(224, 84, 84, 0.12);
+		border-left: 3px solid var(--color-eval-blunder);
 	}
 
 	.candidate-main {

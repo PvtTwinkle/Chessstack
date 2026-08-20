@@ -22,6 +22,11 @@ export interface MastersMove {
 	draws: number;
 	black: number; // games won by black after this move
 	totalGames: number; // white + draws + black
+	// Stockfish eval of the resulting position, in white's perspective —
+	// same convention as the Engine tab. Populated only by /api/players
+	// (see evalCache.ts); undefined for Masters/Stars, which don't compute it.
+	evalCp?: number | null;
+	evalMate?: number | null;
 }
 
 export interface MastersResponse {
