@@ -1,6 +1,12 @@
 # Security scanning pipeline
 #
-# Runs on every push to main and every PR targeting main.
+# Runs on every push to main or deploy, and every PR targeting either.
+# main is Stéphane's clean reference branch; deploy is what actually gets
+# built into the production Docker image. deploy is integrated by local
+# `git merge` + direct push, never a GitHub PR, so on deploy this workflow
+# acts as a post-merge safety net rather than a pre-merge gate — still far
+# better than the previous state, where deploy had no CI security coverage
+# at all (the trigger only listed main).
 # This is separate from ci.yml (which handles build + type-check + migrations)
 # so that security failures are clearly visible as their own check.
 #
@@ -20,9 +26,9 @@ name: Security
 
 on:
   push:
-    branches: [main]
+    branches: [main, deploy]
   pull_request:
-    branches: [main]
+    branches: [main, deploy]
 
 jobs:
   # ── Job 1: Fast security scans ─────────────────────────────────────────────
