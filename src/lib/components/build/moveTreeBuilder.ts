@@ -62,19 +62,30 @@ function buildTreeDFS(
 	const key = fenKey(fen);
 	const edges = adj.get(key);
 	if (!edges) return [];
-	if (visited.has(key)) return [];
-	visited.add(key);
 
 	return edges.map((edge) => {
 		const nodePath = [...pathSans, edge.san];
+		const childKey = fenKey(edge.toFen);
+		const alreadyVisited = visited.has(childKey);
+
+		if (!alreadyVisited) {
+			visited.add(childKey);
+		}
+
 		return {
 			san: edge.san,
 			fromFen: edge.fromFen,
 			toFen: edge.toFen,
-			toFenKey: fenKey(edge.toFen),
+			toFenKey: childKey,
 			ply,
-			children: buildTreeDFS(edge.toFen, adj, visited, ply + 1, nodePath),
-			pathSans: nodePath
+			// A transposition: this move leads to a position already reached via a
+			// different path elsewhere in the tree. Stop expanding here instead of
+			// re-walking the whole subtree again, but flag it so the UI can show
+			// this is a convergence point, not a dead end.
+			children: alreadyVisited ? [] : buildTreeDFS(edge.toFen, adj, visited, ply + 1, nodePath),
+			pathSans: nodePath,
+			isTransposition: alreadyVisited,
+			transposesToFenKey: alreadyVisited ? childKey : undefined
 		};
 	});
 }
@@ -125,7 +136,7 @@ export function buildMoveTree(moves: MoveInput[], startFen: string | null): Tree
 	const fullmove = parseInt(fenParts[5] ?? '1', 10);
 	const startPly = (fullmove - 1) * 2 + (isWhite ? 1 : 2);
 
-	const visited = new Set<string>();
+	const visited = new Set<string>([fenKey(rootFen)]);
 	return buildTreeDFS(rootFen, adj, visited, startPly, prefixPath);
 }
 
