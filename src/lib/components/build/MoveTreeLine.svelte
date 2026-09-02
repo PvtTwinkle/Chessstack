@@ -7,6 +7,8 @@
 		ply: number;
 		children: TreeNode[];
 		pathSans: string[]; // full path from STARTING_FEN for navigation
+		isTransposition?: boolean; // true when toFen was already reached via a different path
+		transposesToFenKey?: string; // the fenKey this move converges into, when isTransposition is true
 	}
 </script>
 
@@ -72,6 +74,9 @@
 			class:is-current={n.toFenKey === currentFenKey}
 			onclick={() => onNavigateToLine(n.pathSans)}>{n.san}</button
 		>
+		{#if n.isTransposition}
+			<span class="tree-transposition" title="Transpose vers une ligne déjà affichée">⇥</span>
+		{/if}
 		{#if n.children.length > 1}
 			{#each n.children.slice(1) as branch (branch.toFenKey)}
 				{@const bk = branchKey(n.toFenKey, branch.san)}
@@ -130,6 +135,13 @@
 		background: var(--color-surface-alt);
 		color: var(--color-accent);
 		font-weight: 600;
+	}
+
+	.tree-transposition {
+		color: var(--color-text-muted);
+		font-size: 11px;
+		margin: 0 2px;
+		user-select: none;
 	}
 
 	.branch-toggle {

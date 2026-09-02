@@ -1,20 +1,34 @@
 # Security scanning pipeline
 #
-# Runs on every push to main and every PR targeting main.
+# Runs on every push to main or deploy, and every PR targeting either.
+# main is Stéphane's clean reference branch; deploy is what actually gets
+# built into the production Docker image. deploy is integrated by local
+# `git merge` + direct push, never a GitHub PR, so on deploy this workflow
+# acts as a post-merge safety net rather than a pre-merge gate — still far
+# better than the previous state, where deploy had no CI security coverage
+# at all (the trigger only listed main).
 # This is separate from ci.yml (which handles build + type-check + migrations)
 # so that security failures are clearly visible as their own check.
 #
-# Two parallel jobs:
-#   1. security-checks — fast scans that don't need a Docker build
-#   2. image-scan — builds the Docker image and scans it for CVEs
+# Three parallel jobs:
+#   1. security-checks       — fast scans that don't need a Docker build
+#   2. image-scan             — builds the Docker image and scans it for CVEs
+#   3. bundled-deps-audit     — audits devDependencies (@sveltejs/kit, svelte,
+#      @sveltejs/adapter-node and their real dependency tree) that adapter-node
+#      compiles directly into build/index.js, the production server. Job 1's
+#      `npm audit --omit=dev` and Job 2's Trivy image scan both miss these:
+#      the packages are pruned out of the final image's node_modules by
+#      `npm prune --omit=dev` in the Dockerfile, even though their code keeps
+#      running inside the compiled bundle. See scripts/ci/audit-bundled-deps.mjs
+#      for the exact method and its known limitations.
 
 name: Security
 
 on:
   push:
-    branches: [main]
+    branches: [main, deploy]
   pull_request:
-    branches: [main]
+    branches: [main, deploy]
 
 jobs:
   # ── Job 1: Fast security scans ─────────────────────────────────────────────
@@ -105,3 +119,34 @@ jobs:
           severity: 'HIGH,CRITICAL'
           exit-code: '1'
           ignore-unfixed: true
+
+  # ── Job 3: Audit devDependencies bundled into the production server ─────────
+  # @sveltejs/kit and svelte are devDependencies, but with adapter-node their
+  # source is compiled directly into build/index.js by `vite build`, and the
+  # packages themselves are then removed from the final image by
+  # `npm prune --omit=dev`. `npm audit --omit=dev` (Job 1) and the Trivy image
+  # scan (Job 2) both miss vulnerabilities here as a result. This job runs a
+  # full `npm audit` and keeps only the findings that fall inside the real
+  # dependency tree of @sveltejs/kit, svelte, and @sveltejs/adapter-node, so
+  # dev-only tooling (eslint, typescript, drizzle-kit, vite as a build tool,
+  # prettier, license-checker, ...) does not show up here and does not need
+  # its own exclusion list.
+  bundled-deps-audit:
+    name: Audit Production-Bundled Dev Dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit @sveltejs/kit, svelte, adapter-node dependency tree
+        run: node scripts/ci/audit-bundled-deps.mjs
