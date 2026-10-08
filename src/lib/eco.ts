@@ -15,6 +15,7 @@
 import { inArray } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { ecoOpening } from '$lib/db/schema';
+import { fenKey } from '$lib/fen';
 import type * as schema from '$lib/db/schema';
 
 // Look up the most specific ECO name for a sequence of board positions.
@@ -33,6 +34,10 @@ export async function lookupEco(
 ): Promise<{ code: string; name: string } | null> {
 	if (fens.length === 0) return null;
 
+	// eco_opening.fen holds 4-field keys (migration 0011), but callers such as
+	// OpeningName.svelte send chess.js's 6-field FENs, which never matched.
+	const keys = fens.map(fenKey);
+
 	// Fetch all matching rows in a single query — no N+1 lookups.
 	const matches = await db
 		.select({
@@ -41,7 +46,7 @@ export async function lookupEco(
 			fen: ecoOpening.fen
 		})
 		.from(ecoOpening)
-		.where(inArray(ecoOpening.fen, fens));
+		.where(inArray(ecoOpening.fen, keys));
 
 	if (matches.length === 0) return null;
 
@@ -50,8 +55,8 @@ export async function lookupEco(
 
 	// Return the first match walking from current → oldest.
 	// This gives us the most specific recognised opening name.
-	for (const fen of fens) {
-		const match = byFen.get(fen);
+	for (const key of keys) {
+		const match = byFen.get(key);
 		if (match) return match;
 	}
 

@@ -1,6 +1,8 @@
 // Shared FEN utilities — canonical source for FEN normalization and validation.
 // All other modules should import from here instead of defining their own copies.
 
+import { FEN_MAX_LENGTH } from '$lib/validation-limits';
+
 /**
  * Strip the half-move clock and full-move counter from a FEN string.
  * Positions reached via different move orders compare equal if the first four
@@ -21,9 +23,6 @@ export function toFullFen(fen: string): string {
 	return fen.split(' ').length <= 4 ? `${fen} 0 1` : fen;
 }
 
-/** Maximum length of a valid FEN string (generous upper bound). */
-const MAX_FEN_LENGTH = 100;
-
 /**
  * Validates that a FEN string is plausibly well-formed and within length limits.
  * This is a lightweight check for input sanitization, not a full chess legality
@@ -34,6 +33,6 @@ const MAX_FEN_LENGTH = 100;
 export function sanitizeFen(fen: unknown): string | null {
 	if (typeof fen !== 'string') return null;
 	const trimmed = fen.trim();
-	if (trimmed.length === 0 || trimmed.length > MAX_FEN_LENGTH) return null;
+	if (trimmed.length === 0 || trimmed.length > FEN_MAX_LENGTH) return null;
 	return trimmed;
 }

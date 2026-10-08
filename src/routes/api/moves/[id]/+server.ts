@@ -19,72 +19,84 @@ import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { userMove, userRepertoireMove } from '$lib/db/schema';
-import { eq, and, notExists, sql } from 'drizzle-orm';
+import { eq, and, notExists, sql, inArray } from 'drizzle-orm';
+import { isRepertoireLocked } from '$lib/stripe/tiers.server';
+import { requireAuth, parseIntParam } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { updateMoveNotesSchema } from '$lib/server/schemas/moves';
 
-// Recursively deletes all moves reachable from startFen in the given repertoire.
-// Depth-first: removes the deepest branches before their parents.
-// Returns the number of move rows deleted.
+// Collects all move IDs in the subtree reachable from startFen using a
+// recursive CTE, then batch-deletes SR cards and moves in just 3 queries.
+// This replaces the old recursive function that did 3 queries per move.
 async function deleteSubtree(
 	userId: number,
 	repertoireId: number,
 	startFen: string
 ): Promise<number> {
-	let count = 0;
+	// Step 1: Collect all moves in the subtree with a recursive CTE.
+	// Walks from_fen → to_fen links within the same repertoire.
+	const subtreeRows = await db.execute<{ id: number; from_fen: string; san: string }>(sql`
+		WITH RECURSIVE subtree AS (
+			SELECT id, from_fen, to_fen, san
+			FROM user_move
+			WHERE repertoire_id = ${repertoireId} AND from_fen = ${startFen}
+			UNION ALL
+			SELECT m.id, m.from_fen, m.to_fen, m.san
+			FROM user_move m
+			JOIN subtree s ON m.from_fen = s.to_fen
+			WHERE m.repertoire_id = ${repertoireId}
+		)
+		SELECT id, from_fen, san FROM subtree
+	`);
 
-	// Find every move that starts from this position.
-	const children = await db
-		.select()
-		.from(userMove)
-		.where(and(eq(userMove.repertoireId, repertoireId), eq(userMove.fromFen, startFen)));
+	if (subtreeRows.length === 0) return 0;
 
-	for (const child of children) {
-		// Recurse into the child's subtree before deleting the child itself.
-		count += await deleteSubtree(userId, repertoireId, child.toFen);
+	const moveIds = subtreeRows.map((r) => r.id);
 
-		// Delete the SR card for this move if one exists.
-		// (Only user-turn moves have SR cards, but a no-op delete is harmless.)
-		await db
-			.delete(userRepertoireMove)
-			.where(
-				and(
-					eq(userRepertoireMove.userId, userId),
-					eq(userRepertoireMove.repertoireId, repertoireId),
-					eq(userRepertoireMove.fromFen, startFen),
-					eq(userRepertoireMove.san, child.san)
-				)
-			);
+	// Step 2: Batch delete SR cards matching any (fromFen, san) in the subtree.
+	// Uses a VALUES list to match the composite key pairs.
+	await db.execute(sql`
+		DELETE FROM user_repertoire_move
+		WHERE user_id = ${userId}
+		  AND repertoire_id = ${repertoireId}
+		  AND (from_fen, san) IN (${sql.join(
+				subtreeRows.map((r) => sql`(${r.from_fen}, ${r.san})`),
+				sql`, `
+			)})
+	`);
 
-		// Delete the move row itself.
-		await db.delete(userMove).where(eq(userMove.id, child.id));
-		count++;
-	}
+	// Step 3: Batch delete all move rows by ID.
+	await db.delete(userMove).where(inArray(userMove.id, moveIds));
 
-	return count;
+	return moveIds.length;
 }
 
 export const DELETE: RequestHandler = async ({ locals, params }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	const id = parseInt(params.id);
-	if (isNaN(id)) throw error(400, 'Invalid move ID');
+	const id = parseIntParam(params.id, 'move ID');
 
 	// Fetch the move — must exist and belong to this user.
 	const [move] = await db
 		.select()
 		.from(userMove)
-		.where(and(eq(userMove.id, id), eq(userMove.userId, locals.user.id)));
+		.where(and(eq(userMove.id, id), eq(userMove.userId, user.id)));
 
 	if (!move) throw error(404, 'Move not found');
 
+	if (await isRepertoireLocked(user.id, move.repertoireId, user.tier ?? 'free')) {
+		throw error(403, 'This repertoire is read-only. Upgrade your plan to edit it.');
+	}
+
 	// Delete all moves reachable from this move's destination position.
-	const subtreeCount = await deleteSubtree(locals.user.id, move.repertoireId, move.toFen);
+	const subtreeCount = await deleteSubtree(user.id, move.repertoireId, move.toFen);
 
 	// Delete the SR card for the move being deleted.
 	await db
 		.delete(userRepertoireMove)
 		.where(
 			and(
-				eq(userRepertoireMove.userId, locals.user.id),
+				eq(userRepertoireMove.userId, user.id),
 				eq(userRepertoireMove.repertoireId, move.repertoireId),
 				eq(userRepertoireMove.fromFen, move.fromFen),
 				eq(userRepertoireMove.san, move.san)
@@ -98,32 +110,25 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 	// An SR card is orphaned if no userMove exists with the same
 	// (repertoireId, fromFen, san). This catches edge cases like FEN
 	// normalization mismatches from PGN transpositions.
-	// Uses a single NOT EXISTS subquery instead of per-card lookups.
-	const orphanedCards = await db
-		.select({ id: userRepertoireMove.id })
-		.from(userRepertoireMove)
-		.where(
-			and(
-				eq(userRepertoireMove.userId, locals.user.id),
-				eq(userRepertoireMove.repertoireId, move.repertoireId),
-				notExists(
-					db
-						.select({ one: sql`1` })
-						.from(userMove)
-						.where(
-							and(
-								eq(userMove.repertoireId, userRepertoireMove.repertoireId),
-								eq(userMove.fromFen, userRepertoireMove.fromFen),
-								eq(userMove.san, userRepertoireMove.san)
-							)
+	// Single DELETE with NOT EXISTS — no per-card roundtrips.
+	await db.delete(userRepertoireMove).where(
+		and(
+			eq(userRepertoireMove.userId, user.id),
+			eq(userRepertoireMove.repertoireId, move.repertoireId),
+			notExists(
+				db
+					.select({ one: sql`1` })
+					.from(userMove)
+					.where(
+						and(
+							eq(userMove.repertoireId, userRepertoireMove.repertoireId),
+							eq(userMove.fromFen, userRepertoireMove.fromFen),
+							eq(userMove.san, userRepertoireMove.san)
 						)
-				)
+					)
 			)
-		);
-
-	for (const card of orphanedCards) {
-		await db.delete(userRepertoireMove).where(eq(userRepertoireMove.id, card.id));
-	}
+		)
+	);
 
 	return json({ deleted: subtreeCount + 1 });
 };
@@ -134,39 +139,29 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 // An empty string is coerced to null — we do not store empty annotations.
 
 export const PATCH: RequestHandler = async ({ locals, request, params }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	const id = parseInt(params.id);
-	if (isNaN(id)) throw error(400, 'Invalid move ID');
+	const id = parseIntParam(params.id, 'move ID');
 
 	// Ownership check — one query, fails for wrong user or missing row.
 	const [move] = await db
 		.select()
 		.from(userMove)
-		.where(and(eq(userMove.id, id), eq(userMove.userId, locals.user.id)));
+		.where(and(eq(userMove.id, id), eq(userMove.userId, user.id)));
 
 	if (!move) throw error(404, 'Move not found');
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-	let { notes } = body;
-
-	if (notes !== null && typeof notes !== 'string') {
-		throw error(400, 'notes must be a string or null');
-	}
-	if (typeof notes === 'string') {
-		notes = notes.trim();
-		if (notes.length === 0) notes = null;
-		if (notes !== null && notes.length > 500) {
-			throw error(400, 'notes must be 500 characters or fewer');
-		}
+	if (await isRepertoireLocked(user.id, move.repertoireId, user.tier ?? 'free')) {
+		throw error(403, 'This repertoire is read-only. Upgrade your plan to edit it.');
 	}
 
-	const [updated] = await db.update(userMove).set({ notes }).where(eq(userMove.id, id)).returning();
+	const { notes } = await parseBody(request, updateMoveNotesSchema);
+
+	const [updated] = await db
+		.update(userMove)
+		.set({ notes })
+		.where(and(eq(userMove.id, id), eq(userMove.userId, user.id)))
+		.returning();
 
 	return json(updated);
 };

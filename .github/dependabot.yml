@@ -1,0 +1,56 @@
+# Dependabot — automated dependency update PRs.
+#
+# Minor and patch updates are grouped into one weekly PR per ecosystem so they
+# are quick to review (CI runs the full test suite on each). Major updates
+# arrive as individual PRs because they usually need code changes.
+# Security updates are always raised immediately, regardless of this schedule.
+
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: chg
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # @types/node tracks the Node runtime major (Dockerfile + CI); bump together.
+      - dependency-name: '@types/node'
+        update-types: [version-update:semver-major]
+      # SvelteKit 3 needs a planned migration (config move, $lib -> #lib, origin
+      # handling, TypeScript 6) — see docs/sveltekit-3-migration.md.
+      - dependency-name: '@sveltejs/kit'
+        update-types: [version-update:semver-major]
+      - dependency-name: '@sveltejs/adapter-node'
+        update-types: [version-update:semver-major]
+      # TypeScript 6+ is only needed for (and comes with) the SvelteKit 3 migration.
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: chg
+    groups:
+      actions:
+        update-types: [major, minor, patch]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: chg
+    ignore:
+      # Node major upgrades are planned deliberately (runtime + CI together).
+      - dependency-name: node
+        update-types: [version-update:semver-major]

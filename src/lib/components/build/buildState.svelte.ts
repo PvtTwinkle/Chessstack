@@ -6,6 +6,7 @@
  * state/actions to the template and child components.
  */
 
+import { untrack } from 'svelte';
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import { Chess } from 'chess.js';
 import { playMove, playCapture } from '$lib/sounds';
@@ -187,16 +188,39 @@ export function createBuildState(params: CreateBuildStateParams) {
 		}
 	}
 
+	// The repertoire whose data was last synced, so a refresh of the same
+	// repertoire can be told apart from a switch to another one.
+	let syncedRepertoireId: number | null = null;
+
 	// Sync all local state from server-provided page data.
 	function syncFromData(newMoves: RepertoireMove[], jumpLine?: string | null): void {
+		const repertoireId = params.getRepertoireId();
+
+		// A data refresh of the same repertoire (e.g. invalidateAll after the
+		// tutorial is skipped or advances) can land right after the user played
+		// a move. Keep their line and position when every move in it is still
+		// in the refreshed data. untrack: the caller runs inside an $effect, and
+		// reading navHistory there would re-run the sync on every move.
+		const keepLine = untrack(
+			() =>
+				!jumpLine &&
+				repertoireId === syncedRepertoireId &&
+				navHistory.every((entry) =>
+					newMoves.some((m) => fenKey(m.fromFen) === fenKey(entry.fromFen) && m.san === entry.san)
+				)
+		);
+		syncedRepertoireId = repertoireId;
+
 		moves = newMoves;
+		conflictSan = null;
+		errorMsg = null;
+		startFen = params.getStartFen();
+		if (keepLine) return;
+
 		navHistory = [];
 		currentFen = STARTING_FEN;
 		lastMove = undefined;
-		conflictSan = null;
-		errorMsg = null;
 		exploreMode = false;
-		startFen = params.getStartFen();
 
 		if (jumpLine) {
 			replayLine(jumpLine.split(',').filter(Boolean));

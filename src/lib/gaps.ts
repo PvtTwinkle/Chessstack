@@ -6,10 +6,13 @@
 // and 1...e6 as responses, but the user only has lines after 1...e5,
 // then 1...c5 and 1...e6 are gaps.
 
-import { fenKey, STARTING_FEN } from '$lib/fen';
-import { bookMove, chessmontMoves } from '$lib/db/schema';
+import { Chess } from 'chess.js';
+import { fenKey, toFullFen, STARTING_FEN } from '$lib/fen';
+import { bookMove, chessmontMoves, ecoOpening } from '$lib/db/schema';
 import { and, inArray, gte, desc } from 'drizzle-orm';
-import { getEffectiveStartFens } from '$lib/repertoire';
+import { getEffectiveStartFens, buildInScopeFens } from '$lib/repertoire';
+import { sectionForMoveNumber } from '$lib/drill/drill-logic';
+import type { DrillSection } from '$lib/drill/types';
 import type { db } from '$lib/db';
 export { fenKey, STARTING_FEN };
 
@@ -21,6 +24,7 @@ export interface Gap {
 	line: string; // comma-separated SAN list for ?line= deep link to Build Mode
 	depth: number; // number of half-moves to reach toFen (for ranking)
 	gamesPlayed?: number; // masters DB game count (undefined for book-only gaps)
+	opening?: { code: string; name: string }; // deepest named ECO opening along the line
 }
 
 /** Minimal move shape — works with userMove, bookMove, and chessmontMoves row types. */
@@ -48,8 +52,6 @@ export function computeGaps(
 	color: 'WHITE' | 'BLACK',
 	startFens?: string[]
 ): Gap[] {
-	if (moves.length === 0) return [];
-
 	// Build the user-turn "covered" set — positions where the user has a move.
 	// A position is covered if any userMove starts from it on the user's turn.
 	const userTurnChar = color === 'WHITE' ? 'w' : 'b';
@@ -93,32 +95,8 @@ export function computeGaps(
 		}
 	}
 
-	// Build the set of in-scope positions: only check gaps at positions
-	// reachable from the effective start FEN(s).
-	const effectiveStarts = startFens ?? [STARTING_FEN];
-	const inScopeKeys = new Set<string>();
-	const scopeQueue: string[] = [];
-
-	for (const fen of effectiveStarts) {
-		const key = fenKey(fen);
-		if (!inScopeKeys.has(key)) {
-			inScopeKeys.add(key);
-			scopeQueue.push(key);
-		}
-	}
-
-	while (scopeQueue.length > 0) {
-		const current = scopeQueue.shift()!;
-		const children = adj.get(current);
-		if (!children) continue;
-
-		for (const child of children) {
-			const childKey = fenKey(child.toFen);
-			if (inScopeKeys.has(childKey)) continue;
-			inScopeKeys.add(childKey);
-			scopeQueue.push(childKey);
-		}
-	}
+	// Only check gaps at positions reachable from the effective start FEN(s).
+	const inScopeKeys = buildInScopeFens(startFens ?? [STARTING_FEN], moves);
 
 	// Find gaps: book moves whose destination is not covered by any user move.
 	// Only consider book moves from in-scope positions.
@@ -162,6 +140,15 @@ export function computeGaps(
 }
 
 /**
+ * Depth section of the move the user is missing, with the same move ranges as
+ * Drill's sections. `depth` counts plies from the starting position, so the
+ * missing move is played at move floor(depth / 2) + 1.
+ */
+export function gapSection(depth: number): DrillSection {
+	return sectionForMoveNumber(Math.floor(depth / 2) + 1);
+}
+
+/**
  * Formats a comma-separated SAN list into a human-readable move sequence.
  * Example: "e4,c5,Nf3" → "1. e4 c5 2. Nf3"
  */
@@ -188,38 +175,35 @@ export async function loadGapData(
 	startFen: string | null,
 	minGames: number
 ): Promise<Gap[]> {
-	if (moves.length === 0) return [];
-
+	// Scan every opponent-turn position in scope, leaves included. Collecting
+	// only positions the opponent already has a move from missed the position
+	// right after a reply the user just added, so gaps surfaced one ply at a
+	// time; it also skipped the starting position of an empty Black repertoire.
+	const startFens = getEffectiveStartFens(startFen, moves, repColor);
 	const opponentTurnChar = repColor === 'WHITE' ? 'b' : 'w';
-	const opponentFens = [
-		...new Set(
-			moves.filter((m) => m.fromFen.split(' ')[1] === opponentTurnChar).map((m) => m.fromFen)
-		)
-	];
+	const opponentFenKeys = [...buildInScopeFens(startFens, moves)].filter(
+		(key) => key.split(' ')[1] === opponentTurnChar
+	);
 
-	// Normalize to 4-field FEN keys for the masters table lookup.
-	const opponentFenKeys = [...new Set(opponentFens.map(fenKey))];
+	if (opponentFenKeys.length === 0) return [];
 
 	// Query masters database first — only moves played >= minGames times.
-	const mastersMoves =
-		opponentFenKeys.length > 0
-			? await database
-					.select()
-					.from(chessmontMoves)
-					.where(
-						and(
-							inArray(chessmontMoves.positionFen, opponentFenKeys),
-							gte(chessmontMoves.gamesPlayed, minGames)
-						)
-					)
-					.orderBy(desc(chessmontMoves.gamesPlayed))
-			: [];
+	const mastersMoves = await database
+		.select()
+		.from(chessmontMoves)
+		.where(
+			and(
+				inArray(chessmontMoves.positionFen, opponentFenKeys),
+				gte(chessmontMoves.gamesPlayed, minGames)
+			)
+		)
+		.orderBy(desc(chessmontMoves.gamesPlayed));
 
 	// Track which positions have masters data so we can fall back to book for the rest.
 	const mastersPositions = new Set(mastersMoves.map((m) => m.positionFen));
 
 	// Fall back to book moves for positions without masters data.
-	const bookFallbackFens = opponentFens.filter((f) => !mastersPositions.has(fenKey(f)));
+	const bookFallbackFens = opponentFenKeys.filter((f) => !mastersPositions.has(f));
 	const relevantBookMoves =
 		bookFallbackFens.length > 0
 			? await database.select().from(bookMove).where(inArray(bookMove.fromFen, bookFallbackFens))
@@ -235,6 +219,53 @@ export async function loadGapData(
 
 	const allOpponentMoves = [...mastersAsMoveRows, ...relevantBookMoves];
 
-	const startFens = getEffectiveStartFens(startFen, moves, repColor);
-	return computeGaps(moves, allOpponentMoves, repColor, startFens);
+	const gaps = computeGaps(moves, allOpponentMoves, repColor, startFens);
+	return attachOpeningNames(database, gaps);
+}
+
+/**
+ * Replays a gap line from the starting position and returns the 4-field FEN
+ * key after each move, oldest first. Stops at the first move that doesn't
+ * replay, so a bad line yields a shorter history rather than an error.
+ */
+export function lineFenKeys(line: string): string[] {
+	const chess = new Chess(toFullFen(STARTING_FEN));
+	const keys: string[] = [];
+	for (const san of line.split(',')) {
+		if (!san) continue;
+		try {
+			chess.move(san);
+		} catch {
+			break;
+		}
+		keys.push(fenKey(chess.fen()));
+	}
+	return keys;
+}
+
+/**
+ * Names each gap after the deepest ECO opening along its line, with one query
+ * for the whole list so the dashboard doesn't need a lookup per gap.
+ */
+async function attachOpeningNames(database: typeof db, gaps: Gap[]): Promise<Gap[]> {
+	if (gaps.length === 0) return gaps;
+
+	const histories = gaps.map((g) => lineFenKeys(g.line));
+	const allKeys = [...new Set(histories.flat())];
+	if (allKeys.length === 0) return gaps;
+
+	const rows = await database
+		.select({ fen: ecoOpening.fen, code: ecoOpening.code, name: ecoOpening.name })
+		.from(ecoOpening)
+		.where(inArray(ecoOpening.fen, allKeys));
+	const byFen = new Map(rows.map((r) => [r.fen, { code: r.code, name: r.name }]));
+
+	return gaps.map((gap, i) => {
+		const history = histories[i];
+		for (let j = history.length - 1; j >= 0; j--) {
+			const opening = byFen.get(history[j]);
+			if (opening) return { ...gap, opening };
+		}
+		return gap;
+	});
 }

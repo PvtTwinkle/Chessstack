@@ -2,7 +2,8 @@
 //
 // The client sends the card ID and the user's rating (Forgot=1, Unsure=3, Easy=4).
 // We load the card, run the FSRS algorithm to compute the next due date and
-// updated memory state, then write the result back to user_repertoire_move.
+// updated memory state, then write the result back to user_repertoire_move
+// and record the grade in review_log.
 //
 // The card must belong to the requesting user — we verify ownership before
 // touching anything.
@@ -12,44 +13,35 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { userRepertoireMove } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { gradeCard, Rating } from '$lib/fsrs';
+import { isRepertoireLocked } from '$lib/stripe/tiers.server';
+import { requireAuth } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { gradeCardSchema } from '$lib/server/schemas/drill';
 import { loadFsrsConfig } from '$lib/server/fsrs-config';
+import { applyGrade } from '$lib/server/grading';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-	const { cardId, rating } = body;
-
-	// Validate inputs.
-	if (typeof cardId !== 'number') throw error(400, 'cardId must be a number');
-	if (![Rating.Again, Rating.Good, Rating.Easy].includes(rating)) {
-		throw error(400, 'rating must be 1 (Forgot), 3 (Unsure), or 4 (Easy)');
-	}
+	const { cardId, rating } = await parseBody(request, gradeCardSchema);
 
 	// Load card + FSRS config in parallel — they are independent queries.
 	const [cardRows, fsrsConfig] = await Promise.all([
 		db
 			.select()
 			.from(userRepertoireMove)
-			.where(and(eq(userRepertoireMove.id, cardId), eq(userRepertoireMove.userId, locals.user.id))),
-		loadFsrsConfig(locals.user.id)
+			.where(and(eq(userRepertoireMove.id, cardId), eq(userRepertoireMove.userId, user.id))),
+		loadFsrsConfig(user.id)
 	]);
 
 	const card = cardRows[0];
 	if (!card) throw error(404, 'Card not found');
 
-	// Run the FSRS algorithm to get the updated memory state.
-	const now = new Date();
-	const updated = gradeCard(card, rating as Rating, now, fsrsConfig);
+	if (await isRepertoireLocked(user.id, card.repertoireId, user.tier ?? 'free')) {
+		throw error(403, 'This repertoire is read-only. Upgrade your plan to edit it.');
+	}
 
-	// Write the new state back to the database.
-	await db.update(userRepertoireMove).set(updated).where(eq(userRepertoireMove.id, cardId));
+	const updated = await applyGrade(user.id, card, rating, 'DRILL', fsrsConfig);
 
 	return json({ updated: true, due: updated.due });
 };

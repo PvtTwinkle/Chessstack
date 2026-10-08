@@ -10,7 +10,8 @@ import { db } from '$lib/db';
 import { opponentPreps, opponentMoves } from '$lib/db/schema';
 import { eq, desc } from 'drizzle-orm';
 import { fenKey } from '$lib/fen';
-import type { AggregatedMove } from '$lib/prep/types';
+import { parseBody } from '$lib/server/validation';
+import { createPrepSchema } from '$lib/server/schemas/prep';
 
 // ── GET ──────────────────────────────────────────────────────────────────────
 
@@ -31,13 +32,6 @@ export const GET: RequestHandler = async ({ locals }) => {
 export const POST: RequestHandler = async ({ locals, request }) => {
 	if (!locals.user) throw error(401, 'Not authenticated');
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-
 	const {
 		opponentName,
 		platform,
@@ -46,25 +40,7 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		gamesAsWhite,
 		gamesAsBlack,
 		moves
-	} = body as {
-		opponentName: string;
-		platform: string;
-		platformUsername: string;
-		timeWindow: string;
-		gamesAsWhite: number;
-		gamesAsBlack: number;
-		moves: AggregatedMove[];
-	};
-
-	// Validate required fields
-	if (!opponentName || typeof opponentName !== 'string')
-		throw error(400, 'opponentName is required');
-	if (opponentName.length > 100) throw error(400, 'opponentName is too long');
-	if (platform !== 'LICHESS' && platform !== 'CHESSCOM')
-		throw error(400, 'platform must be LICHESS or CHESSCOM');
-	if (!platformUsername || typeof platformUsername !== 'string')
-		throw error(400, 'platformUsername is required');
-	if (!Array.isArray(moves)) throw error(400, 'moves must be an array');
+	} = await parseBody(request, createPrepSchema);
 
 	const now = new Date();
 

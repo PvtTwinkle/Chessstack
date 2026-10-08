@@ -14,6 +14,9 @@ const gitignorePath = path.resolve(import.meta.dirname, '.gitignore');
 
 export default defineConfig(
 	includeIgnoreFile(gitignorePath),
+	// Vendored, minified Stockfish build (see engine/README.md), and the
+	// open-source edition's files, which are linted once exported.
+	{ ignores: ['engine/', 'open-source/files/'] },
 	js.configs.recommended,
 	...ts.configs.recommended,
 	...svelte.configs.recommended,

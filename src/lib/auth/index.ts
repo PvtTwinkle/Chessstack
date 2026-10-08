@@ -6,22 +6,31 @@
 // All functions here are async because the PostgreSQL driver is async.
 
 import crypto from 'crypto';
+import { error } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { session } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { eq, lt } from 'drizzle-orm';
+
+// Type-guard that throws 401 if the request is unauthenticated.
+// Returns the non-null user object so TypeScript narrows the type
+// and callers can use `user.id` etc. without further null checks.
+type AuthenticatedUser = NonNullable<App.Locals['user']>;
+
+export function requireUser(user: App.Locals['user']): AuthenticatedUser {
+	if (!user) throw error(401, 'Not authenticated');
+	return user;
+}
 
 // The cookie name. Must match exactly between the code that sets the cookie
 // (login action) and the code that reads it (hooks.server.ts).
 export const SESSION_COOKIE_NAME = 'chessstack_session';
 
-// Derive cookie "secure" flag from the ORIGIN env var.
-// If ORIGIN starts with https://, the app is accessed over HTTPS and cookies
-// must be marked secure. Otherwise (plain HTTP), secure must be false or the
-// browser will silently reject the cookie.
+// Secure cookies over HTTPS, plain cookies over HTTP (local dev).
+// Controlled by the ORIGIN env var — https:// origins get secure cookies.
 export const SECURE_COOKIE = (process.env.ORIGIN ?? '').startsWith('https://');
 
-// Sessions are valid for 30 days. After this, the user must log in again.
-const SESSION_DURATION_DAYS = 30;
+// Sessions are valid for 14 days. After this, the user must log in again.
+const SESSION_DURATION_DAYS = 14;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // createSession(userId)
@@ -82,4 +91,16 @@ export async function validateSession(token: string): Promise<{ userId: number }
 
 export async function deleteSession(token: string): Promise<void> {
 	await db.delete(session).where(eq(session.id, token));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// cleanExpiredSessions()
+//
+// Bulk-deletes all sessions past their expiry date. Called periodically by the
+// import scheduler to prevent unbounded table growth in multi-user deployments.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function cleanExpiredSessions(): Promise<number> {
+	const result = await db.delete(session).where(lt(session.expiresAt, new Date())).returning();
+	return result.length;
 }

@@ -20,6 +20,8 @@ import {
 } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { fenKey } from '$lib/fen';
+import { parseBody } from '$lib/server/validation';
+import { exportPrepSchema } from '$lib/server/schemas/prep';
 
 export const POST: RequestHandler = async ({ locals, params, request }) => {
 	if (!locals.user) throw error(401, 'Not authenticated');
@@ -27,17 +29,7 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 	const prepId = parseInt(params.id);
 	if (isNaN(prepId)) throw error(400, 'Invalid prep ID');
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-
-	const { color } = body;
-	if (color !== 'white' && color !== 'black') {
-		throw error(400, 'color must be white or black');
-	}
+	const { color } = await parseBody(request, exportPrepSchema);
 
 	// Verify prep ownership
 	const [prep] = await db

@@ -1,0 +1,105 @@
+/*
+ * Styles shared by the Drill page and its components: sidebar sections, the move
+ * list, session stats and the button family. Namespaced under .drill-ui (the page's
+ * root wrapper) so they cannot leak to other pages. Rule order matters: keep it.
+ */
+
+.drill-ui {
+	display: contents;
+}
+
+/* ── Section headings and move list ──────────────────────────────────────── */
+
+.drill-ui .section {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.drill-ui .section-label {
+	font-size: 11px;
+	font-family: var(--font-body);
+	font-weight: 700;
+	letter-spacing: 0.12em;
+	color: var(--color-text-muted);
+	text-transform: uppercase;
+}
+
+.drill-ui .complete-stats {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.drill-ui .stat-row {
+	display: flex;
+	justify-content: space-between;
+	font-size: 0.85rem;
+}
+
+.drill-ui .stat-label {
+	color: var(--color-text-secondary);
+}
+
+.drill-ui .stat-value {
+	color: var(--color-text-primary);
+	font-weight: 600;
+}
+
+.drill-ui .stat-pct {
+	color: var(--color-text-secondary);
+	font-weight: 400;
+}
+
+/* ── Generic buttons ──────────────────────────────────────────────────────── */
+
+.drill-ui .btn {
+	display: block;
+	text-align: center;
+	padding: var(--space-2) var(--space-4);
+	border-radius: var(--radius-md);
+	font-size: 0.85rem;
+	font-family: var(--font-body);
+	font-weight: 600;
+	cursor: pointer;
+	text-decoration: none;
+	border: 1px solid transparent;
+	transition: filter var(--dur-fast) var(--ease-snap);
+}
+
+.drill-ui .btn:hover {
+	filter: brightness(1.15);
+}
+
+.drill-ui .btn--primary {
+	background: var(--color-accent);
+	border-color: var(--color-accent);
+	color: var(--color-base);
+}
+
+.drill-ui .btn--primary:hover:not(:disabled) {
+	box-shadow: var(--glow-accent);
+}
+
+.drill-ui .btn--secondary {
+	background: var(--color-surface);
+	border-color: var(--color-border);
+	color: var(--color-text-secondary);
+}
+
+.drill-ui .btn--secondary:hover {
+	border-color: var(--color-accent);
+	color: var(--color-text-primary);
+}
+/* Keyboard-shortcut hints, used in buttons and the grading panel. */
+.drill-ui kbd {
+	display: inline-block;
+	padding: 0.05rem 0.3rem;
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
+	background: var(--color-surface);
+	color: var(--color-text-muted);
+	font-size: 0.65rem;
+	font-family: var(--font-body);
+	line-height: 1.4;
+}

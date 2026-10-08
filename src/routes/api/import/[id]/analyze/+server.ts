@@ -10,6 +10,9 @@ import { db } from '$lib/db';
 import { importedGame, repertoire, userMove } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { parsePgn, analyzeGame, computeMatchDepth } from '$lib/pgn';
+import { isRateLimited } from '$lib/auth/rate-limit';
+import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
+import { requireAuth, parseIntParam } from '$lib/server/api-helpers';
 
 /** Format the first N half-moves as readable notation, e.g. "1. e4 e5 2. Nf3 Nc6". */
 function formatOpeningMoves(moves: { san: string }[], plies = 4): string {
@@ -32,16 +35,19 @@ interface RepertoireAnalysis {
 }
 
 export const POST: RequestHandler = async ({ locals, params }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	const id = parseInt(params.id);
-	if (isNaN(id)) throw error(400, 'Invalid game ID');
+	if (await isRateLimited(String(user.id), RATE_LIMITS.importAnalyze)) {
+		return json({ error: 'Too many requests. Please try again later.' }, { status: 429 });
+	}
+
+	const id = parseIntParam(params.id, 'game ID');
 
 	// Load the imported game and verify ownership.
 	const [game] = await db
 		.select()
 		.from(importedGame)
-		.where(and(eq(importedGame.id, id), eq(importedGame.userId, locals.user.id)));
+		.where(and(eq(importedGame.id, id), eq(importedGame.userId, user.id)));
 
 	if (!game) throw error(404, 'Game not found');
 
@@ -62,7 +68,7 @@ export const POST: RequestHandler = async ({ locals, params }) => {
 	const matchingReps = await db
 		.select()
 		.from(repertoire)
-		.where(and(eq(repertoire.userId, locals.user.id), eq(repertoire.color, color)));
+		.where(and(eq(repertoire.userId, user.id), eq(repertoire.color, color)));
 
 	if (matchingReps.length === 0) {
 		return json({
@@ -79,7 +85,7 @@ export const POST: RequestHandler = async ({ locals, params }) => {
 		const moves = await db
 			.select()
 			.from(userMove)
-			.where(and(eq(userMove.userId, locals.user.id), eq(userMove.repertoireId, rep.id)));
+			.where(and(eq(userMove.userId, user.id), eq(userMove.repertoireId, rep.id)));
 
 		const matchDepth = computeMatchDepth(parsed.moves, moves, color);
 

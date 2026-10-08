@@ -10,7 +10,9 @@ import { Chess } from 'chess.js';
 import { db } from '$lib/db';
 import { opponentPreps, prepMoves } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { fenKey, sanitizeFen } from '$lib/fen';
+import { fenKey } from '$lib/fen';
+import { parseBody } from '$lib/server/validation';
+import { addPrepMoveSchema, deletePrepMoveSchema } from '$lib/server/schemas/prep';
 
 // ── POST ─────────────────────────────────────────────────────────────────────
 
@@ -20,20 +22,9 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 	const prepId = parseInt(params.id);
 	if (isNaN(prepId)) throw error(400, 'Invalid prep ID');
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-
+	const body = await parseBody(request, addPrepMoveSchema);
 	const { san, color } = body;
-	if (!san || typeof san !== 'string') throw error(400, 'san is required');
-	if (color !== 'white' && color !== 'black') throw error(400, 'color must be white or black');
-
-	const sanitized = sanitizeFen(body.fromFen);
-	if (!sanitized) throw error(400, 'Invalid FEN');
-	const fromFen = fenKey(sanitized);
+	const fromFen = fenKey(body.fromFen);
 
 	// Verify prep ownership
 	const [prep] = await db
@@ -130,15 +121,7 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 export const DELETE: RequestHandler = async ({ locals, request }) => {
 	if (!locals.user) throw error(401, 'Not authenticated');
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-
-	const { moveId } = body;
-	if (!moveId || typeof moveId !== 'number') throw error(400, 'moveId is required');
+	const { moveId } = await parseBody(request, deletePrepMoveSchema);
 
 	// Verify the move belongs to this user
 	const [move] = await db

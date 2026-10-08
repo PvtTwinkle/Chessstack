@@ -2,7 +2,7 @@
 # Chessstack — Docker Compose
 #
 # Two services:
-#   app        — the SvelteKit application (Node.js HTTP server + Stockfish)
+#   app        — the SvelteKit application (Node.js HTTP server)
 #   postgres   — PostgreSQL database
 #
 # Quick start:
@@ -10,7 +10,9 @@
 #
 # On first run the app automatically creates the database tables and the
 # default user using the DEFAULT_USERNAME / DEFAULT_PASSWORD values below.
-# Change those before the first run, then keep them safe.
+# Change those before the first run, then keep them safe. The first run also
+# loads the reference datasets, which takes several minutes. Follow it with:
+#   docker compose logs -f app
 #
 # Upgrade to a new release:
 #   docker compose pull && docker compose up -d
@@ -81,7 +83,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      # First boot loads the reference datasets (several minutes).
+      start_period: 300s
 
   # ── PostgreSQL ──────────────────────────────────────────────────────────────
   postgres:

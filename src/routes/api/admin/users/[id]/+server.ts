@@ -5,6 +5,9 @@
 
 import type { RequestHandler } from './$types';
 import { json, error } from '@sveltejs/kit';
+import { requireAdmin, parseIntParam } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { updateUserSchema } from '$lib/server/schemas/admin';
 import { db } from '$lib/db';
 import {
 	user,
@@ -16,17 +19,19 @@ import {
 	reviewedGame,
 	drillSession,
 	puzzleAttempt,
-	importedGame
+	importedGame,
+	subscription,
+	passwordResetToken,
+	auditLog
 } from '$lib/db/schema';
 import { eq, and, count } from 'drizzle-orm';
+import { getStripe } from '$lib/stripe/client';
 
 export const PATCH: RequestHandler = async ({ locals, params, request }) => {
-	if (!locals.user || locals.user.role !== 'admin') throw error(403, 'Admin only');
+	const admin = requireAdmin(locals);
+	const targetId = parseIntParam(params.id, 'user ID');
 
-	const targetId = parseInt(params.id);
-	if (isNaN(targetId)) throw error(400, 'Invalid user ID');
-
-	const body = await request.json();
+	const body = await parseBody(request, updateUserSchema);
 
 	// Look up the target user
 	const [target] = await db
@@ -36,9 +41,9 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 	if (!target) throw error(404, 'User not found');
 
 	// Toggle enabled
-	if (typeof body.enabled === 'boolean') {
+	if (body.enabled !== undefined) {
 		// Cannot disable yourself
-		if (targetId === locals.user.id) {
+		if (targetId === admin.id) {
 			throw error(400, 'You cannot disable your own account.');
 		}
 
@@ -51,9 +56,9 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 	}
 
 	// Change role
-	if (body.role === 'admin' || body.role === 'user') {
+	if (body.role !== undefined) {
 		// Cannot demote yourself
-		if (targetId === locals.user.id && body.role !== 'admin') {
+		if (targetId === admin.id && body.role !== 'admin') {
 			throw error(400, 'You cannot remove your own admin role.');
 		}
 
@@ -72,14 +77,8 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 	}
 
 	// Change username
-	if (typeof body.username === 'string') {
-		const newUsername = body.username.trim();
-		if (newUsername.length < 3 || newUsername.length > 30) {
-			throw error(400, 'Username must be 3–30 characters.');
-		}
-		if (!/^[a-zA-Z0-9_-]+$/.test(newUsername)) {
-			throw error(400, 'Username may only contain letters, numbers, hyphens, and underscores.');
-		}
+	if (body.username !== undefined) {
+		const newUsername = body.username;
 		// Check uniqueness (skip if unchanged)
 		if (newUsername !== target.username) {
 			const [existing] = await db
@@ -93,6 +92,27 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 		}
 	}
 
+	// Toggle emailVerified
+	if (body.emailVerified !== undefined) {
+		await db.update(user).set({ emailVerified: body.emailVerified }).where(eq(user.id, targetId));
+	}
+
+	// Audit log — record what changed.
+	const changes: string[] = [];
+	if (body.enabled !== undefined) changes.push(`enabled=${body.enabled}`);
+	if (body.role !== undefined) changes.push(`role=${body.role}`);
+	if (body.username !== undefined) changes.push(`username="${body.username}"`);
+	if (body.emailVerified !== undefined) changes.push(`emailVerified=${body.emailVerified}`);
+	if (changes.length > 0) {
+		await db.insert(auditLog).values({
+			adminUserId: admin.id,
+			action: 'update_user',
+			targetUserId: targetId,
+			details: changes.join(', '),
+			createdAt: new Date()
+		});
+	}
+
 	// Return updated user
 	const [updated] = await db
 		.select({
@@ -100,6 +120,7 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 			username: user.username,
 			role: user.role,
 			enabled: user.enabled,
+			emailVerified: user.emailVerified,
 			createdAt: user.createdAt
 		})
 		.from(user)
@@ -109,13 +130,11 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 };
 
 export const DELETE: RequestHandler = async ({ locals, params }) => {
-	if (!locals.user || locals.user.role !== 'admin') throw error(403, 'Admin only');
-
-	const targetId = parseInt(params.id);
-	if (isNaN(targetId)) throw error(400, 'Invalid user ID');
+	const admin = requireAdmin(locals);
+	const targetId = parseIntParam(params.id, 'user ID');
 
 	// Cannot delete yourself
-	if (targetId === locals.user.id) {
+	if (targetId === admin.id) {
 		throw error(400, 'You cannot delete your own account.');
 	}
 
@@ -137,8 +156,36 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 		}
 	}
 
+	// Audit log — record before deletion (the target row will be gone after).
+	await db.insert(auditLog).values({
+		adminUserId: admin.id,
+		action: 'delete_user',
+		targetUserId: targetId,
+		details: `Deleted user id=${targetId}`,
+		createdAt: new Date()
+	});
+
+	// Cancel Stripe subscription if one exists.
+	const [sub] = await db
+		.select({ stripeSubscriptionId: subscription.stripeSubscriptionId })
+		.from(subscription)
+		.where(eq(subscription.userId, targetId));
+
+	if (sub?.stripeSubscriptionId) {
+		const stripe = getStripe();
+		if (stripe) {
+			try {
+				await stripe.subscriptions.cancel(sub.stripeSubscriptionId);
+			} catch {
+				// Subscription may already be cancelled or invalid in Stripe — proceed anyway.
+			}
+		}
+	}
+
 	// Cascade-delete all user data in FK-safe order (children before parents).
 	await db.transaction(async (tx) => {
+		await tx.delete(passwordResetToken).where(eq(passwordResetToken.userId, targetId));
+		await tx.delete(subscription).where(eq(subscription.userId, targetId));
 		await tx.delete(session).where(eq(session.userId, targetId));
 		await tx.delete(puzzleAttempt).where(eq(puzzleAttempt.userId, targetId));
 		await tx.delete(drillSession).where(eq(drillSession.userId, targetId));

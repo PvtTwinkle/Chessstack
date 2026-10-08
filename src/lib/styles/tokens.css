@@ -6,6 +6,7 @@
 :root {
 	/* ── Colors ───────────────────────────────────────────────── */
 	--color-base: #0a1a2e;
+	--color-logo-bg: #f0efed;
 	--color-surface: #181a1f;
 	--color-surface-alt: #1f2128;
 	--color-border: #1e3a56;
@@ -98,6 +99,7 @@
 [data-theme='light'] {
 	/* ── Colors ───────────────────────────────────────────────── */
 	--color-base: #e9ecf0;
+	--color-logo-bg: #e4e2de;
 	--color-surface: #ffffff;
 	--color-surface-alt: #f2f4f7;
 	--color-border: #d0d7de;

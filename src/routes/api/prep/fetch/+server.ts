@@ -12,33 +12,19 @@ import type { RequestHandler } from './$types';
 import { fetchLichessGames, LichessApiError } from '$lib/lichess';
 import { fetchChesscomGames, ChesscomApiError } from '$lib/chesscom';
 import { timeWindowToSince } from '$lib/prep/timeWindow';
+import { parseBody } from '$lib/server/validation';
+import { fetchOpponentGamesSchema } from '$lib/server/schemas/prep';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
 	if (!locals.user) throw error(401, 'Not authenticated');
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
+	const { opponentUsername, platform, timeWindow, maxGames } = await parseBody(
+		request,
+		fetchOpponentGamesSchema
+	);
 
-	const { opponentUsername, platform, timeWindow } = body;
-
-	if (!opponentUsername || typeof opponentUsername !== 'string') {
-		throw error(400, 'opponentUsername is required');
-	}
-	if (opponentUsername.length > 50) {
-		throw error(400, 'opponentUsername is too long');
-	}
-	if (platform !== 'LICHESS' && platform !== 'CHESSCOM') {
-		throw error(400, 'platform must be LICHESS or CHESSCOM');
-	}
-
-	const since = timeWindowToSince(timeWindow);
+	const since = timeWindowToSince(timeWindow ?? undefined);
 	const sinceDate = since ? new Date(since) : undefined;
-	const rawMax = typeof body.maxGames === 'number' ? body.maxGames : 500;
-	const maxGames = Math.max(50, Math.min(5000, rawMax));
 
 	try {
 		let games;

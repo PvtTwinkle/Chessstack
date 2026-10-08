@@ -1,0 +1,2 @@
+# .env is in .gitignore and never committed — safe to skip in local scans
+.env

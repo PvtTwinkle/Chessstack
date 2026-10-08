@@ -1,0 +1,81 @@
+/*
+ * Styles shared by the Train page and its panel components: sidebar sections and
+ * the button family. Namespaced under .train-ui (the page's root element) so they
+ * cannot leak to other pages. Rule order matters: keep it.
+ */
+
+/* ── Section headings ────────────────────────────────────────────────────── */
+
+.train-ui .section {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.train-ui .section-label {
+	font-size: 11px;
+	font-family: var(--font-body);
+	font-weight: 700;
+	letter-spacing: 0.12em;
+	color: var(--color-text-muted);
+	text-transform: uppercase;
+}
+
+.train-ui .setup-desc {
+	font-size: 0.78rem;
+	color: var(--color-text-secondary);
+	line-height: 1.5;
+	margin: 0;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────────── */
+
+.train-ui .btn {
+	padding: var(--space-2) var(--space-3);
+	border-radius: var(--radius-md);
+	border: 1px solid transparent;
+	font-size: 0.85rem;
+	font-weight: 600;
+	font-family: var(--font-body);
+	cursor: pointer;
+	transition: all var(--dur-fast) var(--ease-snap);
+	min-height: 44px;
+}
+
+.train-ui .btn-primary {
+	background: var(--color-accent);
+	color: #fff;
+	border-color: var(--color-accent);
+}
+
+.train-ui .btn-primary:hover {
+	filter: brightness(1.15);
+	box-shadow: var(--glow-accent);
+}
+
+.train-ui .btn-secondary {
+	background: var(--color-surface);
+	color: var(--color-text);
+	border-color: var(--color-border);
+}
+
+.train-ui .btn-secondary:hover {
+	border-color: var(--color-accent);
+}
+
+.train-ui .btn-sm {
+	padding: var(--space-1) var(--space-2);
+	font-size: 0.75rem;
+	min-height: 36px;
+}
+
+.train-ui .btn-start {
+	width: 100%;
+	font-size: 1rem;
+	padding: var(--space-3);
+}
+
+.train-ui .btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}

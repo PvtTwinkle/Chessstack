@@ -14,18 +14,21 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { sql } from 'drizzle-orm';
 import { getDb } from './index';
+import { log } from '$lib/server/log';
 
-const DATA_DIR = '/app/data';
+// Configurable via SEED_DATA_DIR env var — allows cloud deployments to mount
+// seed data from a shared volume or S3 FUSE mount instead of /app/data.
+const DATA_DIR = process.env.SEED_DATA_DIR ?? '/app/data';
 
 const SEED_FILES = [
 	{
 		table: 'chessmont_moves',
-		file: `${DATA_DIR}/chessmont-moves-dump.sql.gz`,
+		file: path.join(DATA_DIR, 'chessmont-moves-dump.sql.gz'),
 		label: 'masters database'
 	},
 	{
 		table: 'puzzle',
-		file: `${DATA_DIR}/puzzles-dump.sql.gz`,
+		file: path.join(DATA_DIR, 'puzzles-dump.sql.gz'),
 		label: 'puzzle database'
 	},
 	{
@@ -40,28 +43,49 @@ const SEED_FILES = [
 	}
 ] as const;
 
-/** Run a shell pipeline and return a promise that resolves on exit 0. */
-function runPipeline(command: string): Promise<void> {
+/**
+ * Stream a gzipped SQL dump into psql: `gunzip -c <file> | psql <url>`, but
+ * without a shell, so the connection string (which may contain characters
+ * like `$`, `"` or backticks in the password) is never shell-interpreted.
+ * Resolves when both processes exit 0.
+ */
+export function restoreGzipDump(file: string, databaseUrl: string): Promise<void> {
 	return new Promise((resolve, reject) => {
-		const proc = spawn('sh', ['-c', command], {
-			stdio: ['ignore', 'pipe', 'pipe']
-		});
+		const gunzip = spawn('gunzip', ['-c', file], { stdio: ['ignore', 'pipe', 'pipe'] });
+		const psql = spawn('psql', ['--quiet', databaseUrl], { stdio: ['pipe', 'ignore', 'pipe'] });
+		gunzip.stdout.pipe(psql.stdin);
+		// If psql dies early, writing to its stdin raises EPIPE; the exit code
+		// check below reports the real failure.
+		psql.stdin.on('error', () => {});
 
 		let stderr = '';
-		proc.stderr.on('data', (chunk: Buffer) => {
-			stderr += chunk.toString();
-		});
+		gunzip.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+		psql.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
 
-		proc.on('close', (code) => {
-			if (code === 0) {
-				resolve();
-			} else {
-				reject(new Error(`Command exited with code ${code}: ${stderr.trim()}`));
+		// Wait for BOTH processes to exit, then decide — a truncated/corrupt
+		// archive makes gunzip fail even if psql happily applied a partial dump.
+		const codes: { gunzip?: number | null; psql?: number | null } = {};
+		let spawnError: Error | null = null;
+		const finish = () => {
+			if (!('gunzip' in codes) || !('psql' in codes)) return;
+			if (spawnError) return reject(spawnError);
+			if (codes.gunzip !== 0) {
+				return reject(new Error(`gunzip exited with code ${codes.gunzip}: ${stderr.trim()}`));
 			}
+			if (codes.psql !== 0) {
+				return reject(new Error(`psql exited with code ${codes.psql}: ${stderr.trim()}`));
+			}
+			resolve();
+		};
+		gunzip.on('error', (err) => (spawnError ??= err));
+		psql.on('error', (err) => (spawnError ??= err));
+		gunzip.on('close', (code) => {
+			codes.gunzip = code;
+			finish();
 		});
-
-		proc.on('error', (err) => {
-			reject(err);
+		psql.on('close', (code) => {
+			codes.psql = code;
+			finish();
 		});
 	});
 }
@@ -89,24 +113,26 @@ export async function loadSeedData(): Promise<void> {
 
 		const databaseUrl = process.env.DATABASE_URL;
 		if (!databaseUrl) {
-			console.warn('[chessstack] DATABASE_URL not set — skipping seed data restore.');
+			log.warn('DATABASE_URL not set — skipping seed data restore.');
 			return;
 		}
 
-		console.log(`[chessstack] Loading ${label}...`);
+		log.info(`Loading ${label}...`);
 		const start = Date.now();
 
 		try {
-			await runPipeline(`gunzip -c "${file}" | psql "${databaseUrl}"`);
+			await restoreGzipDump(resolved, databaseUrl);
 			const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-			console.log(`[chessstack] Loading ${label}... done (${elapsed}s)`);
+			log.info(`Loading ${label}... done`, { seconds: Number(elapsed) });
 		} catch (err) {
 			const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-			console.error(
-				`[chessstack] Failed to load ${label} after ${elapsed}s:`,
-				err instanceof Error ? err.message : err
+			log.error(
+				`Failed to load ${label}; the table is still empty and will retry on next restart.`,
+				{
+					seconds: Number(elapsed),
+					err
+				}
 			);
-			console.error('[chessstack] The table is still empty — will retry on next restart.');
 		}
 	}
 }

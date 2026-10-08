@@ -4,6 +4,8 @@
 // No authentication needed for public games.
 // Rate limit: 20 requests/minute (we make at most 1 per import trigger).
 
+import { log } from '$lib/server/log';
+
 const LICHESS_API_BASE = 'https://lichess.org';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -124,8 +126,8 @@ export async function fetchLichessGames(
 		try {
 			const raw = JSON.parse(line) as LichessNdjsonGame;
 			games.push(parseLichessGame(raw, username));
-		} catch {
-			// Skip malformed lines
+		} catch (err) {
+			log.warn('Skipping malformed Lichess NDJSON line', { err });
 		}
 	}
 

@@ -15,7 +15,8 @@ import { fetchLichessGames, LichessApiError } from '$lib/lichess';
 import { fetchChesscomGames, ChesscomApiError } from '$lib/chesscom';
 import { fenKey } from '$lib/fen';
 import { timeWindowToSince } from '$lib/prep/timeWindow';
-import type { AggregatedMove } from '$lib/prep/types';
+import { parseBody } from '$lib/server/validation';
+import { refreshPrepSchema } from '$lib/server/schemas/prep';
 
 // ── POST (mode: fetch) — return new PGNs since watermark ─────────────────────
 // ── POST (mode: merge) — upsert new aggregated move data ─────────────────────
@@ -34,28 +35,17 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 
 	if (!prep) throw error(404, 'Prep not found');
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
+	const body = await parseBody(request, refreshPrepSchema);
 
-	const mode = body.mode;
-	if (mode !== 'fetch' && mode !== 'merge-start' && mode !== 'merge-batch') {
-		throw error(400, 'mode must be "fetch", "merge-start", or "merge-batch"');
-	}
-
-	if (mode === 'fetch') {
+	if (body.mode === 'fetch') {
 		// Return PGNs — use time window if provided, otherwise watermark
-		const timeWindow = body.timeWindow as string | undefined;
+		const timeWindow = body.timeWindow ?? undefined;
 		const sinceFromWindow = timeWindowToSince(timeWindow);
 		// Use time window if provided, 0 for "all time", or watermark as fallback
 		const since = sinceFromWindow ?? (timeWindow === 'all' ? 0 : prep.lastFetchedAt.getTime() + 1);
 
 		const sinceDate = new Date(since);
-		const rawMax = typeof body.maxGames === 'number' ? body.maxGames : 500;
-		const maxGames = Math.max(50, Math.min(5000, rawMax));
+		const { maxGames } = body;
 
 		try {
 			let games;
@@ -91,11 +81,10 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 			}
 			throw error(502, `Failed to fetch games: ${e instanceof Error ? e.message : String(e)}`);
 		}
-	} else if (mode === 'merge-start') {
+	} else if (body.mode === 'merge-start') {
 		// Phase 1 of chunked merge: delete old data and update metadata.
 		// The client then sends move data in merge-batch requests.
-		const gamesAsWhite = typeof body.gamesAsWhite === 'number' ? body.gamesAsWhite : 0;
-		const gamesAsBlack = typeof body.gamesAsBlack === 'number' ? body.gamesAsBlack : 0;
+		const { gamesAsWhite, gamesAsBlack } = body;
 
 		const now = new Date();
 
@@ -105,20 +94,16 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 				.update(opponentPreps)
 				.set({
 					lastFetchedAt: now,
-					gamesAsWhite: gamesAsWhite || 0,
-					gamesAsBlack: gamesAsBlack || 0
+					gamesAsWhite,
+					gamesAsBlack
 				})
 				.where(eq(opponentPreps.id, prepId));
 		});
 
 		return json({ started: true });
-	} else if (mode === 'merge-batch') {
+	} else {
 		// Phase 2 of chunked merge: insert a batch of moves (called repeatedly).
-		const { moves } = body as { moves: AggregatedMove[] };
-
-		if (!Array.isArray(moves) || moves.length === 0) {
-			throw error(400, 'moves must be a non-empty array');
-		}
+		const { moves } = body;
 
 		await db.insert(opponentMoves).values(
 			moves.map((m) => ({
@@ -136,7 +121,4 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 
 		return json({ inserted: moves.length });
 	}
-
-	// Unreachable — mode is validated above
-	throw error(400, 'Invalid mode');
 };

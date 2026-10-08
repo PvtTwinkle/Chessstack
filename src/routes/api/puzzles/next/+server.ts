@@ -15,11 +15,18 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { puzzle, puzzleAttempt } from '$lib/db/schema';
 import { eq, and, sql, gte, lte, notInArray } from 'drizzle-orm';
+import { isRateLimited } from '$lib/auth/rate-limit';
+import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
+import { requireAuth } from '$lib/server/api-helpers';
 
 export const GET: RequestHandler = async ({ url, locals }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	const userId = locals.user.id;
+	if (await isRateLimited(String(user.id), RATE_LIMITS.puzzlesNext)) {
+		return json({ error: 'Too many requests. Please try again later.' }, { status: 429 });
+	}
+
+	const userId = user.id;
 
 	// Parse filter parameters
 	const familiesParam = url.searchParams.get('families');
@@ -82,23 +89,43 @@ export const GET: RequestHandler = async ({ url, locals }) => {
 		.from(puzzleAttempt)
 		.where(eq(puzzleAttempt.userId, userId));
 
-	// Try to find an unattempted puzzle first
+	// Try to find an unattempted puzzle first.
+	// Uses count + random offset instead of ORDER BY RANDOM() to avoid
+	// sorting the entire result set — much faster for large puzzle tables.
 	const unattemptedConditions = [...conditions, notInArray(puzzle.puzzleId, attemptedSubquery)];
-	let [result] = await db
-		.select()
-		.from(puzzle)
-		.where(and(...unattemptedConditions))
-		.orderBy(sql`RANDOM()`)
-		.limit(1);
 
-	// If no unattempted puzzle found, fall back to any matching puzzle
-	if (!result) {
+	const [{ count: unattemptedCount }] = await db
+		.select({ count: sql<number>`count(*)::int` })
+		.from(puzzle)
+		.where(and(...unattemptedConditions));
+
+	let result;
+	if (unattemptedCount > 0) {
+		const randomOffset = Math.floor(Math.random() * unattemptedCount);
 		[result] = await db
 			.select()
 			.from(puzzle)
-			.where(and(...conditions))
-			.orderBy(sql`RANDOM()`)
-			.limit(1);
+			.where(and(...unattemptedConditions))
+			.limit(1)
+			.offset(randomOffset);
+	}
+
+	// If no unattempted puzzle found, fall back to any matching puzzle.
+	if (!result) {
+		const [{ count: totalCount }] = await db
+			.select({ count: sql<number>`count(*)::int` })
+			.from(puzzle)
+			.where(and(...conditions));
+
+		if (totalCount > 0) {
+			const randomOffset = Math.floor(Math.random() * totalCount);
+			[result] = await db
+				.select()
+				.from(puzzle)
+				.where(and(...conditions))
+				.limit(1)
+				.offset(randomOffset);
+		}
 	}
 
 	if (!result) {

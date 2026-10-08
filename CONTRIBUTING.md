@@ -9,6 +9,8 @@ a development environment, the code style expected, and how to submit changes.
 
 - [Setting Up a Dev Environment](#setting-up-a-dev-environment)
 - [Running the App Locally](#running-the-app-locally)
+- [Running Tests](#running-tests)
+- [Database Migrations](#database-migrations)
 - [Code Style](#code-style)
 - [Submitting a Pull Request](#submitting-a-pull-request)
 
@@ -18,7 +20,7 @@ a development environment, the code style expected, and how to submit changes.
 
 ### Requirements
 
-- [Node.js](https://nodejs.org/) 20 or later
+- [Node.js](https://nodejs.org/) 24 (the version used in CI and Docker; 22.12+ also works)
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose (for PostgreSQL)
 - A code editor — [VS Code](https://code.visualstudio.com/) is recommended
 
@@ -26,7 +28,7 @@ a development environment, the code style expected, and how to submit changes.
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/chessstack.git
+git clone https://github.com/PvtTwinkle/chessstack.git
 cd chessstack
 
 # Install dependencies
@@ -41,26 +43,29 @@ There are two ways to run the app during development.
 
 ### Option A — Dev server with local PostgreSQL
 
-This is the fastest way to work on the UI. You need PostgreSQL running locally
-(via Docker or native install). Stockfish analysis requires the binary on your
-machine (`apt install stockfish` or `brew install stockfish`).
+This is the fastest way to work on the UI. Stockfish runs in the browser, so
+there is no engine to install.
 
 ```bash
+cp .env.example .env
+# Edit .env: set POSTGRES_PASSWORD, put the same password in DATABASE_URL,
+# and set ORIGIN=http://localhost:5173
+
+docker compose up -d postgres   # or use your own PostgreSQL 17
 npm run dev
 ```
 
-The app starts at `http://localhost:5173`.
+The app starts at `http://localhost:5173` and creates its tables on startup.
+`npm run dev` reads `.env` automatically. Sign in with the admin account it
+creates on first run (`DEFAULT_USERNAME` / `DEFAULT_PASSWORD`, default `admin` / `changeme`).
 
-You will need a `.env` file in the project root:
-
-```env
-DATABASE_URL=postgresql://chessstack:chessstack_secret@localhost:5432/chessstack
-ORIGIN=http://localhost:5173
-DEFAULT_USERNAME=admin
-DEFAULT_PASSWORD=changeme
-# Only needed if Stockfish is not at /usr/games/stockfish
-# STOCKFISH_BIN=stockfish
-```
+**Reference data in dev.** The Masters, Players and Stars tabs and the Puzzles
+page need the reference datasets, which are only baked into the Docker image.
+To load them into a dev database, download the dumps from this repository's
+[`data-v1.0` release](https://github.com/pvttwinkle/chessstack/releases/tag/data-v1.0)
+into a folder, check them by running `sha256sum -c <repo>/seed-checksums/data-v1.0.sha256` in that
+folder, and set `SEED_DATA_DIR` to its **absolute** path. They load on the next start (this
+takes several minutes and needs `psql` and `gunzip` on your machine).
 
 ### Option B — Full stack with Docker
 
@@ -86,6 +91,57 @@ npm run lint       # Check formatting and linting
 npm run format     # Auto-format all files
 npm run build      # Production build
 ```
+
+---
+
+## Running Tests
+
+There are three suites. CI runs all of them on every pull request.
+
+```bash
+# Unit tests — pure logic, no database needed
+npm test
+
+# Unit tests with a coverage report (open coverage/index.html)
+npm run test:coverage
+
+# Database integration tests — needs a DISPOSABLE PostgreSQL database
+# (migrations run automatically; tables are truncated between tests)
+DATABASE_URL=postgresql://chessstack:chessstack@localhost:5432/chessstack_test npm run test:db
+
+# End-to-end smoke test — builds on `npm run build`, starts the app and
+# drives it in Chromium (register → build a line → drill it)
+npx playwright install chromium   # first time only
+DATABASE_URL=postgresql://chessstack:chessstack@localhost:5432/chessstack_test npm run test:e2e
+```
+
+The end-to-end suite registers about a dozen accounts per run, and registration is
+rate-limited to 20 per hour per IP, so give each run a freshly created database.
+
+Unit tests live next to the code as `*.test.ts`, database tests as
+`*.db.test.ts`, and browser tests in `e2e/`. Tests for Svelte runes modules
+(`*.svelte.ts`) are named `*.svelte.test.ts`: they compile for the browser so
+`$effect` runs (wrap the module in `$effect.root` and call `flushSync()`). Please add or update tests
+for any change to billing, auth, scheduling or PGN handling.
+
+---
+
+## Database Migrations
+
+Migrations are plain SQL files in `drizzle/migrations/`, applied automatically
+in order on startup. To change the schema:
+
+1. Update the table definitions in `src/lib/db/schema.ts`.
+2. Run `npx drizzle-kit generate`. It writes the next numbered SQL file, a
+   snapshot and a journal entry in `drizzle/migrations/`; read the SQL, rename
+   the file to something descriptive if you like (keep the `tag` in
+   `meta/_journal.json` in step), and commit all three. CI fails if
+   `schema.ts` and the migrations disagree.
+3. Run `node scripts/test-migrations.mjs` against an empty database and the
+   database tests (`npm run test:db`), which apply all migrations first.
+
+Migrations must be safe on a live database with existing data. Never edit a
+migration that has already been deployed: add a new one instead.
 
 ---
 
@@ -134,23 +190,30 @@ hosted or commercial version of the software. You keep your own copyright.
    ```bash
    npm run check
    npm run lint
+   npm test
    ```
 
-4. Push and open a pull request against `main`.
+4. Push and open a pull request against `main`. Chessstack is developed alongside the hosted
+   edition at chessstack.app, and each release arrives here as one sync pull request; the
+   maintainer carries merged contributions over so the next release keeps them.
 
 5. In the PR description, explain:
    - What you changed and why
    - How you tested it (steps to reproduce, screenshots if UI-related)
 
-6. CI runs automatically — a build check, TypeScript type check, and migration
-   smoke test must all pass before the PR can be merged.
+6. CI runs automatically: type check, formatting and lint, unit tests, build, migration smoke test,
+   database and end-to-end tests, and the security scans must all pass before
+   the PR can be merged.
 
 ---
 
 ## Reporting Bugs and Requesting Features
 
-Open a [GitHub Issue](https://github.com/your-org/chessstack/issues) for bug
+Open a [GitHub Issue](https://github.com/PvtTwinkle/chessstack/issues) for bug
 reports, feature requests, or general questions.
+
+Please report security vulnerabilities privately as described in
+[SECURITY.md](SECURITY.md), not in a public issue.
 
 When reporting a bug, include:
 

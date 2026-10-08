@@ -57,3 +57,8 @@ drizzle.config.ts
 # Logs
 *.log
 npm-debug.log*
+
+# Test suites and their output — not needed in the image
+e2e
+playwright-report
+test-results

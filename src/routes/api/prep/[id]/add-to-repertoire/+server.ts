@@ -21,6 +21,8 @@ import {
 } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { fenKey } from '$lib/fen';
+import { parseBody } from '$lib/server/validation';
+import { addPrepToRepertoireSchema } from '$lib/server/schemas/prep';
 
 export const POST: RequestHandler = async ({ locals, params, request }) => {
 	if (!locals.user) throw error(401, 'Not authenticated');
@@ -28,23 +30,10 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 	const prepId = parseInt(params.id);
 	if (isNaN(prepId)) throw error(400, 'Invalid prep ID');
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-
-	const { mode, repertoireId, color } = body as {
-		mode: 'preview' | 'execute';
-		repertoireId: number;
-		color: 'white' | 'black';
-		replacements?: { fromFen: string; san: string }[];
-	};
-
-	if (mode !== 'preview' && mode !== 'execute') throw error(400, 'mode must be preview or execute');
-	if (typeof repertoireId !== 'number') throw error(400, 'repertoireId is required');
-	if (color !== 'white' && color !== 'black') throw error(400, 'color must be white or black');
+	const { mode, repertoireId, color, replacements } = await parseBody(
+		request,
+		addPrepToRepertoireSchema
+	);
 
 	const userId = locals.user.id;
 
@@ -199,7 +188,6 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 	}
 
 	// Execute mode — insert moves with conflict resolutions
-	const replacements = (body.replacements ?? []) as { fromFen: string; san: string }[];
 	const replacementSet = new Set(replacements.map((r) => fenKey(r.fromFen) + '|' + r.san));
 
 	const now = new Date();

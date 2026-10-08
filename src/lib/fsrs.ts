@@ -170,6 +170,59 @@ export function gradeCard(
 	return cardToUpdate(result.card, now);
 }
 
+export type ReviewSource = 'DRILL' | 'REVIEW_DEVIATION';
+
+// A review_log row without userId and cardId, which the caller already has.
+export interface ReviewLogEntry {
+	rating: Rating;
+	reviewedAt: Date;
+	source: ReviewSource;
+	stateBefore: number;
+	stabilityBefore: number | null;
+	difficultyBefore: number | null;
+	elapsedDaysBefore: number | null;
+	scheduledDaysBefore: number | null;
+	learningStepsBefore: number;
+	stateAfter: number;
+	stabilityAfter: number;
+	difficultyAfter: number;
+	elapsedDaysAfter: number;
+	scheduledDaysAfter: number;
+	learningStepsAfter: number;
+	requestRetention: number;
+}
+
+/**
+ * Describe one grade for review_log, from the card as it was before grading
+ * and the update gradeCard() returned for it.
+ */
+export function buildReviewLogEntry(
+	before: FSRSCardRow,
+	rating: Rating,
+	after: FSRSUpdate,
+	source: ReviewSource,
+	config?: FSRSUserConfig
+): ReviewLogEntry {
+	return {
+		rating,
+		reviewedAt: after.lastReview,
+		source,
+		stateBefore: before.state ?? State.New,
+		stabilityBefore: before.stability,
+		difficultyBefore: before.difficulty,
+		elapsedDaysBefore: before.elapsedDays,
+		scheduledDaysBefore: before.scheduledDays,
+		learningStepsBefore: before.learningSteps,
+		stateAfter: after.state,
+		stabilityAfter: after.stability,
+		difficultyAfter: after.difficulty,
+		elapsedDaysAfter: after.elapsedDays,
+		scheduledDaysAfter: after.scheduledDays,
+		learningStepsAfter: after.learningSteps,
+		requestRetention: config?.requestRetention ?? DEFAULT_RETENTION
+	};
+}
+
 // Human-readable label for a time difference, e.g. "10 min", "1 day", "4 days".
 function formatInterval(dueDate: Date, now: Date): string {
 	const diffMin = Math.round((dueDate.getTime() - now.getTime()) / 60000);
