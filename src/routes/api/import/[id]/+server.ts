@@ -8,30 +8,22 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { importedGame } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
+import { requireAuth, parseIntParam } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { updateImportedGameSchema } from '$lib/server/schemas/import';
 
 export const PATCH: RequestHandler = async ({ locals, params, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	const id = parseInt(params.id);
-	if (isNaN(id)) throw error(400, 'Invalid game ID');
+	const id = parseIntParam(params.id, 'game ID');
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-
-	const { status } = body;
-	if (status !== 'skipped' && status !== 'pending') {
-		throw error(400, 'status must be "skipped" or "pending"');
-	}
+	const { status } = await parseBody(request, updateImportedGameSchema);
 
 	// Verify the game belongs to this user.
 	const [game] = await db
 		.select()
 		.from(importedGame)
-		.where(and(eq(importedGame.id, id), eq(importedGame.userId, locals.user.id)));
+		.where(and(eq(importedGame.id, id), eq(importedGame.userId, user.id)));
 
 	if (!game) throw error(404, 'Game not found');
 

@@ -17,9 +17,18 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: CI only reads the repository.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same branch/PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ci:
-    name: Build, Type Check & Migrations
+    name: Build, Type Check, Tests & Migrations
     runs-on: ubuntu-latest
 
     # PostgreSQL service container for the migration smoke test.
@@ -45,16 +54,16 @@ jobs:
       # Step 1: Check out the repository code onto the GitHub-hosted machine.
       # Without this step, the machine has no code to work with.
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Step 2: Install the correct version of Node.js.
-      # We pin to Node 22 because that matches the @types/node version in package.json.
+      # Node 24 (LTS) matches the Docker runtime image and @types/node in package.json.
       # cache: 'npm' tells GitHub to save the npm cache between runs so that
       # repeated CI runs don't have to re-download every package from scratch.
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
 
       # Step 3: Install all dependencies exactly as specified in package-lock.json.
@@ -71,14 +80,65 @@ jobs:
       - name: Type check
         run: npm run check
 
-      # Step 5: Production build.
+      # Step 5: Formatting and lint.
+      # `npm run lint` runs `prettier --check` and ESLint, so a file that was
+      # never run through `npm run format` fails here.
+      - name: Format and lint
+        run: npm run lint
+
+      # Schema drift check. The latest snapshot in drizzle/migrations/meta must
+      # describe schema.ts exactly, or `drizzle-kit generate` writes a bogus
+      # migration the next time someone changes the schema. Any file it
+      # creates here means schema.ts changed without a matching migration.
+      - name: Schema matches migrations
+        run: |
+          npx drizzle-kit generate
+          if [ -n "$(git status --porcelain drizzle/)" ]; then
+            git status --porcelain drizzle/
+            echo "::error::schema.ts does not match drizzle/migrations. Run npx drizzle-kit generate and commit the result."
+            exit 1
+          fi
+
+      # Step 6: Unit tests, with a coverage report.
+      # Pure-logic tests (FSRS scheduling, PGN parsing, Stripe status mapping,
+      # trainer ratings, password rules…). No database needed. Coverage is
+      # reported, not enforced: the totals go in the job summary and the
+      # per-file HTML report is uploaded below.
+      - name: Unit tests
+        run: npm run test:coverage
+
+      - name: Coverage summary
+        if: always() && hashFiles('coverage/summary.txt') != ''
+        run: |
+          {
+            echo '### Unit-test coverage'
+            echo '```'
+            cat coverage/summary.txt
+            echo '```'
+            echo '<details><summary>Per file</summary>'
+            echo
+            echo '```'
+            cat coverage/files.txt
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: always() && hashFiles('coverage/index.html') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
+
+      # Step 7: Production build.
       # Runs `vite build` with the adapter-node adapter to produce a self-contained
       # Node.js server in the build/ directory. If any import fails, a component
       # is malformed, or a SvelteKit API route has a problem, this step fails.
       - name: Build
         run: npm run build
 
-      # Step 6: Migration smoke test.
+      # Step 8: Migration smoke test.
       # Runs our custom script that applies every migration file in drizzle/migrations/
       # against the PostgreSQL service container. If any SQL file has a syntax error,
       # a missing table reference, or a constraint problem, this step fails.
@@ -86,3 +146,106 @@ jobs:
         run: node scripts/test-migrations.mjs
         env:
           DATABASE_URL: postgresql://chessstack:chessstack@localhost:5432/chessstack
+
+      # Step 9: Database integration tests.
+      # Runs against the same PostgreSQL service container (migrations are
+      # applied automatically; tables are truncated between tests). Covers rate
+      # limiting, single-use email/reset tokens, repertoire locking, referral
+      # activation, checkout and the Stripe webhook (Stripe API mocked).
+      - name: Database integration tests
+        run: npm run test:db
+        env:
+          DATABASE_URL: postgresql://chessstack:chessstack@localhost:5432/chessstack
+
+  # The end-to-end tests only need a production build, so they run as their
+  # own job, alongside the type check and unit tests above rather than after
+  # them. Both jobs install dependencies and build; running side by side still
+  # finishes sooner than one job doing everything in turn.
+  e2e:
+    name: End-to-end tests
+    runs-on: ubuntu-latest
+
+    # The e2e server applies migrations to this empty database on startup.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: chessstack
+          POSTGRES_PASSWORD: chessstack
+          POSTGRES_DB: chessstack
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U chessstack"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # Cache the downloaded Chromium, keyed on the Playwright version, so most
+      # runs only install the system libraries it needs.
+      - name: Get Playwright version
+        id: playwright
+        run: echo "version=$(node -p "require('./node_modules/@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browser
+        id: playwright-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+      - name: Install Playwright browser
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      # Starts the production build and drives it in headless Chromium: the
+      # critical path (register → build a line → drill it), drill, review,
+      # puzzle and trainer modes, account and settings flows, admin, the
+      # opening guides and the public pages' SEO.
+      - name: End-to-end tests (cloud edition)
+        run: npm run test:e2e
+        env:
+          EDITION: cloud
+          DATABASE_URL: postgresql://chessstack:chessstack@localhost:5432/chessstack
+
+      # The same suite against a self-hosted instance (EDITION=selfhosted), on a
+      # database of its own so its first run creates the default admin. Kept in
+      # this job rather than a matrix so the check keeps its name.
+      - name: Create the self-hosted test database
+        run: psql postgresql://chessstack:chessstack@localhost:5432/chessstack -c 'CREATE DATABASE chessstack_selfhosted'
+
+      - name: End-to-end tests (self-hosted edition)
+        run: npm run test:e2e
+        env:
+          EDITION: selfhosted
+          DATABASE_URL: postgresql://chessstack:chessstack@localhost:5432/chessstack_selfhosted
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7

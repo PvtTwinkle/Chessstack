@@ -21,30 +21,33 @@ import { db } from '$lib/db';
 import { repertoire, userMove, userRepertoireMove } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { fenKey } from '$lib/fen';
+import { isRepertoireLocked } from '$lib/stripe/tiers.server';
+import { requireAuth, parseIntParam } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { createMoveSchema } from '$lib/server/schemas/moves';
 
 // ── GET ────────────────────────────────────────────────────────────────────────
 
 export const GET: RequestHandler = async ({ locals, url }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
 	const repertoireIdParam = url.searchParams.get('repertoireId');
 	if (!repertoireIdParam) throw error(400, 'repertoireId query parameter is required');
 
-	const repertoireId = parseInt(repertoireIdParam);
-	if (isNaN(repertoireId)) throw error(400, 'repertoireId must be a number');
+	const repertoireId = parseIntParam(repertoireIdParam, 'repertoireId');
 
 	// Verify this repertoire belongs to the requesting user before returning data.
 	const [rep] = await db
 		.select()
 		.from(repertoire)
-		.where(and(eq(repertoire.id, repertoireId), eq(repertoire.userId, locals.user.id)));
+		.where(and(eq(repertoire.id, repertoireId), eq(repertoire.userId, user.id)));
 
 	if (!rep) throw error(404, 'Repertoire not found');
 
 	const moves = await db
 		.select()
 		.from(userMove)
-		.where(and(eq(userMove.userId, locals.user.id), eq(userMove.repertoireId, repertoireId)));
+		.where(and(eq(userMove.userId, user.id), eq(userMove.repertoireId, repertoireId)));
 
 	return json(moves);
 };
@@ -52,32 +55,18 @@ export const GET: RequestHandler = async ({ locals, url }) => {
 // ── POST ───────────────────────────────────────────────────────────────────────
 
 export const POST: RequestHandler = async ({ locals, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
-	const user = locals.user;
+	const user = requireAuth(locals);
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
 	// toFen is intentionally NOT read from the body — we compute it server-side
 	// by applying the move to fromFen. Accepting it from the client would allow
 	// a crafted request to store an arbitrary FEN as the destination position,
 	// corrupting the move tree.
+	const body = await parseBody(request, createMoveSchema);
 	const { repertoireId, san } = body;
-
-	// Input validation
-	if (!repertoireId || typeof repertoireId !== 'number') {
-		throw error(400, 'repertoireId is required and must be a number');
-	}
-	if (!body.fromFen || typeof body.fromFen !== 'string') throw error(400, 'fromFen is required');
-	if (body.fromFen.length > 100) throw error(400, 'fromFen is too long');
 
 	// Normalize to 4-field FEN (strip halfmove clock and fullmove counter) so
 	// transpositions always match regardless of move order.
 	const fromFen = fenKey(body.fromFen);
-	if (!san || typeof san !== 'string') throw error(400, 'san is required');
 
 	// Verify the repertoire exists and belongs to this user.
 	const [rep] = await db
@@ -86,6 +75,10 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		.where(and(eq(repertoire.id, repertoireId), eq(repertoire.userId, user.id)));
 
 	if (!rep) throw error(404, 'Repertoire not found');
+
+	if (await isRepertoireLocked(user.id, repertoireId, user.tier ?? 'free')) {
+		throw error(403, 'This repertoire is read-only. Upgrade your plan to edit it.');
+	}
 
 	// Determine if it is the user's turn at this position, and compute toFen.
 	// Chess.js parses the FEN and tells us whose turn it is ('w' or 'b').

@@ -11,34 +11,21 @@ import { db } from '$lib/db';
 import { user, session } from '$lib/db/schema';
 import { eq, and, ne } from 'drizzle-orm';
 import { SESSION_COOKIE_NAME } from '$lib/auth';
+import { requireAuth } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { changePasswordSchema } from '$lib/server/schemas/account';
 
 export const POST: RequestHandler = async ({ locals, request, cookies }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const authedUser = requireAuth(locals);
 
-	let body: { currentPassword?: string; newPassword?: string };
-	try {
-		body = (await request.json()) as { currentPassword?: string; newPassword?: string };
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-
-	const { currentPassword, newPassword } = body;
-
-	if (!currentPassword || typeof currentPassword !== 'string') {
-		throw error(400, 'Current password is required');
-	}
-	if (!newPassword || typeof newPassword !== 'string') {
-		throw error(400, 'New password is required');
-	}
-	if (newPassword.length < 8) {
-		throw error(400, 'New password must be at least 8 characters');
-	}
+	// The schema also enforces the password strength rules on newPassword.
+	const { currentPassword, newPassword } = await parseBody(request, changePasswordSchema);
 
 	// Look up the current password hash.
 	const [currentUser] = await db
 		.select({ passwordHash: user.passwordHash })
 		.from(user)
-		.where(eq(user.id, locals.user.id));
+		.where(eq(user.id, authedUser.id));
 
 	if (!currentUser) {
 		throw error(500, 'User not found');
@@ -52,7 +39,7 @@ export const POST: RequestHandler = async ({ locals, request, cookies }) => {
 
 	// Hash the new password and update.
 	const newHash = await bcrypt.hash(newPassword, 10);
-	await db.update(user).set({ passwordHash: newHash }).where(eq(user.id, locals.user.id));
+	await db.update(user).set({ passwordHash: newHash }).where(eq(user.id, authedUser.id));
 
 	// Invalidate all other sessions for this user (good security practice).
 	// The current session stays valid so the user doesn't get logged out.
@@ -60,7 +47,7 @@ export const POST: RequestHandler = async ({ locals, request, cookies }) => {
 	if (currentToken) {
 		await db
 			.delete(session)
-			.where(and(eq(session.userId, locals.user.id), ne(session.id, currentToken)));
+			.where(and(eq(session.userId, authedUser.id), ne(session.id, currentToken)));
 	}
 
 	return json({ success: true });

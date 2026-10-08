@@ -21,6 +21,10 @@ import { db } from '$lib/db';
 import { repertoire, userMove, userRepertoireMove } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { fenKey } from '$lib/fen';
+import { isRepertoireLocked } from '$lib/stripe/tiers.server';
+import { requireAuth } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { executeImportSchema } from '$lib/server/schemas/import';
 
 // Transaction type extracted from db.transaction() callback parameter
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -64,36 +68,10 @@ async function deleteSubtreeInTx(
 	}
 }
 
-interface MoveInput {
-	fromFen: string;
-	san: string;
-	annotation?: string | null;
-}
-
 export const POST: RequestHandler = async ({ locals, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
-	const user = locals.user;
+	const user = requireAuth(locals);
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-
-	const {
-		repertoireId,
-		moves,
-		replacements = []
-	} = body as {
-		repertoireId: number;
-		moves: MoveInput[];
-		replacements: MoveInput[];
-	};
-
-	if (typeof repertoireId !== 'number') throw error(400, 'repertoireId must be a number');
-	if (!Array.isArray(moves) || moves.length === 0) throw error(400, 'moves array is required');
-	if (!Array.isArray(replacements)) throw error(400, 'replacements must be an array');
+	const { repertoireId, moves, replacements } = await parseBody(request, executeImportSchema);
 
 	// Verify repertoire ownership
 	const [rep] = await db
@@ -101,6 +79,10 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		.from(repertoire)
 		.where(and(eq(repertoire.id, repertoireId), eq(repertoire.userId, user.id)));
 	if (!rep) throw error(404, 'Repertoire not found');
+
+	if (await isRepertoireLocked(user.id, repertoireId, user.tier ?? 'free')) {
+		throw error(403, 'This repertoire is read-only. Upgrade your plan to edit it.');
+	}
 
 	const repColor = rep.color as 'WHITE' | 'BLACK';
 
@@ -120,9 +102,6 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	}[] = [];
 
 	for (const m of moves) {
-		if (!m.fromFen || typeof m.fromFen !== 'string') continue;
-		if (!m.san || typeof m.san !== 'string') continue;
-
 		try {
 			const chess = new Chess(m.fromFen);
 			const fenTurn = chess.turn();

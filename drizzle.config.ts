@@ -19,8 +19,7 @@ export default defineConfig({
 	out: './drizzle/migrations',
 
 	dbCredentials: {
-		// DATABASE_URL can be set in your .env file or docker-compose.yml.
-		// Falls back to a local PostgreSQL instance for development.
-		url: process.env.DATABASE_URL ?? 'postgresql://chessstack:chessstack@localhost:5432/chessstack'
+		// DATABASE_URL must be set in your .env file or shell environment.
+		url: process.env.DATABASE_URL!
 	}
 });

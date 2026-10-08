@@ -18,7 +18,7 @@
 <script lang="ts">
 	import { invalidateAll, goto } from '$app/navigation';
 	import { resolveRoute } from '$app/paths';
-	import favicon from '$lib/assets/favicon.svg';
+	import logoIcon from '$lib/assets/logo-icon.svg';
 
 	// ── Form state ──────────────────────────────────────────────────────────────
 	let name = $state('');
@@ -71,7 +71,7 @@
 	<div class="welcome-card">
 		<!-- Header -->
 		<div class="welcome-header">
-			<img class="chess-icon" src={favicon} alt="Chessstack logo" />
+			<img class="chess-icon" src={logoIcon} alt="Chessstack logo" />
 			<h1 class="welcome-title">Welcome to Chessstack</h1>
 			<p class="welcome-subtitle">
 				Your personal chess opening trainer. Build your repertoire, drill it with spaced repetition,
@@ -156,6 +156,9 @@
 		display: block;
 		width: 48px;
 		height: 48px;
+		border-radius: 8px;
+		background: var(--color-logo-bg);
+		padding: 2px;
 		margin: 0 auto var(--space-4);
 	}
 

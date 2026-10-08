@@ -12,7 +12,26 @@ declare global {
 		//
 		// null means the request is unauthenticated.
 		interface Locals {
-			user: { id: number; username: string; role: string } | null;
+			user: {
+				id: number;
+				username: string;
+				role: string;
+				tier: 'free' | 'paid';
+				email: string | null;
+				emailVerified: boolean;
+			} | null;
+
+			// Random id for this request, set first thing in hooks.server.ts. It is
+			// attached to every log line and Sentry event for the request and sent
+			// back in the X-Request-Id header.
+			requestId: string;
+		}
+
+		// The shape of `page.error`. requestId is set for unexpected (500) errors
+		// so the error page can show it and a bug report can be matched to logs.
+		interface Error {
+			message: string;
+			requestId?: string;
 		}
 	}
 }

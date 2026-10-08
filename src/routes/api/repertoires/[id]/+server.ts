@@ -13,6 +13,9 @@ import {
 } from '$lib/db/schema';
 import { and, eq } from 'drizzle-orm';
 import { fenKey } from '$lib/fen';
+import { requireAuth, parseIntParam } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { updateRepertoireSchema } from '$lib/server/schemas/repertoires';
 
 // ── PATCH ──────────────────────────────────────────────────────────────────────
 // Expects JSON body: { name?: string, startFen?: string | null }
@@ -20,51 +23,25 @@ import { fenKey } from '$lib/fen';
 // Verifies the repertoire belongs to the current user before updating.
 
 export const PATCH: RequestHandler = async ({ locals, request, params }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	const id = parseInt(params.id);
-	if (isNaN(id)) throw error(400, 'Invalid id');
+	const id = parseIntParam(params.id, 'id');
 
 	// Ownership check.
 	const [existing] = await db
 		.select()
 		.from(repertoire)
-		.where(and(eq(repertoire.id, id), eq(repertoire.userId, locals.user.id)));
+		.where(and(eq(repertoire.id, id), eq(repertoire.userId, user.id)));
 
 	if (!existing) throw error(404, 'Repertoire not found');
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
+	const body = await parseBody(request, updateRepertoireSchema);
 
-	const updates: Record<string, unknown> = {};
-
-	// Handle name update.
-	if ('name' in body) {
-		const { name } = body;
-		if (!name || typeof name !== 'string' || name.trim() === '') {
-			throw error(400, 'name must be a non-empty string');
-		}
-		updates.name = name.trim();
-	}
-
-	// Handle startFen update (null = reset to default, string = custom start).
-	if ('startFen' in body) {
-		const { startFen } = body;
-		if (startFen !== null && (typeof startFen !== 'string' || startFen.trim() === '')) {
-			throw error(400, 'startFen must be a FEN string or null');
-		}
-		if (typeof startFen === 'string' && startFen.length > 100) {
-			throw error(400, 'startFen is too long');
-		}
-		updates.startFen = typeof startFen === 'string' ? fenKey(startFen) : null;
-	}
-
-	if (Object.keys(updates).length === 0) {
-		throw error(400, 'At least one field (name, startFen) is required');
+	const updates: Partial<typeof repertoire.$inferInsert> = {};
+	if (body.name !== undefined) updates.name = body.name;
+	// null resets to the standard start position.
+	if (body.startFen !== undefined) {
+		updates.startFen = body.startFen === null ? null : fenKey(body.startFen);
 	}
 
 	const [updated] = await db
@@ -87,16 +64,15 @@ export const PATCH: RequestHandler = async ({ locals, request, params }) => {
 // child rows (moves, sessions) must be deleted before the parent (repertoire).
 
 export const DELETE: RequestHandler = async ({ locals, params }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	const id = parseInt(params.id);
-	if (isNaN(id)) throw error(400, 'Invalid id');
+	const id = parseIntParam(params.id, 'id');
 
 	// Ownership check.
 	const [existing] = await db
 		.select()
 		.from(repertoire)
-		.where(and(eq(repertoire.id, id), eq(repertoire.userId, locals.user.id)));
+		.where(and(eq(repertoire.id, id), eq(repertoire.userId, user.id)));
 
 	if (!existing) throw error(404, 'Repertoire not found');
 

@@ -13,7 +13,10 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { chessmontMoves } from '$lib/db/schema';
 import { eq, desc } from 'drizzle-orm';
-import { fenKey } from '$lib/fen';
+import { fenKey, sanitizeFen } from '$lib/fen';
+import { isRateLimited } from '$lib/auth/rate-limit';
+import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
+import { requireAuth } from '$lib/server/api-helpers';
 
 /** Shape of each move returned to the client. */
 export interface MastersMove {
@@ -33,11 +36,14 @@ const MAX_MOVES = 12;
 const EMPTY_RESPONSE: MastersResponse = { moves: [], totalGames: 0 };
 
 export const GET: RequestHandler = async ({ url, locals }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	const fen = url.searchParams.get('fen');
-	if (!fen) throw error(400, 'fen query parameter is required');
-	if (fen.length > 100) throw error(400, 'fen is too long');
+	if (await isRateLimited(String(user.id), RATE_LIMITS.masters)) {
+		return json({ error: 'Too many requests. Please try again later.' }, { status: 429 });
+	}
+
+	const fen = sanitizeFen(url.searchParams.get('fen'));
+	if (!fen) throw error(400, 'fen is required or too long');
 
 	const normalizedFen = fenKey(fen);
 

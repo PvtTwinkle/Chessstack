@@ -3,23 +3,19 @@
 
 import type { RequestHandler } from './$types';
 import { json, error } from '@sveltejs/kit';
+import { requireAdmin, parseIntParam } from '$lib/server/api-helpers';
 import { db } from '$lib/db';
-import { user, session } from '$lib/db/schema';
+import { user, session, auditLog } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
+import { parseBody } from '$lib/server/validation';
+import { resetPasswordSchema } from '$lib/server/schemas/admin';
 
 export const POST: RequestHandler = async ({ locals, params, request }) => {
-	if (!locals.user || locals.user.role !== 'admin') throw error(403, 'Admin only');
+	const admin = requireAdmin(locals);
+	const targetId = parseIntParam(params.id, 'user ID');
 
-	const targetId = parseInt(params.id);
-	if (isNaN(targetId)) throw error(400, 'Invalid user ID');
-
-	const body = await request.json();
-	const newPassword = body.newPassword?.toString();
-
-	if (!newPassword || newPassword.length < 8) {
-		throw error(400, 'Password must be at least 8 characters.');
-	}
+	const { newPassword } = await parseBody(request, resetPasswordSchema);
 
 	// Verify target exists
 	const [target] = await db.select({ id: user.id }).from(user).where(eq(user.id, targetId));
@@ -31,6 +27,13 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 
 	// Invalidate all target user's sessions (force re-login)
 	await db.delete(session).where(eq(session.userId, targetId));
+
+	await db.insert(auditLog).values({
+		adminUserId: admin.id,
+		action: 'reset_password',
+		targetUserId: targetId,
+		createdAt: new Date()
+	});
 
 	return json({ success: true });
 };

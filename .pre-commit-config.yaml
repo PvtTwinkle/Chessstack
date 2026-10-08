@@ -22,7 +22,7 @@ repos:
   # ── Local hooks (system-installed tools) ────────────────────────────────────
   - repo: local
     hooks:
-      # Semgrep — SAST (requires `semgrep` installed locally, see SECURITY-SETUP.md)
+      # Semgrep — SAST (requires `semgrep` installed locally, see SECURITY.md)
       - id: semgrep
         name: semgrep SAST
         entry: semgrep --config p/javascript --config p/typescript --error .
@@ -34,7 +34,7 @@ repos:
       # npm audit — check dependencies for known CVEs
       - id: npm-audit
         name: npm audit
-        entry: npm audit --omit=dev
+        entry: npm audit --audit-level=high
         language: system
         pass_filenames: false
         always_run: true
@@ -57,6 +57,7 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-push]
+
       # Trivy config scan — Dockerfile and docker-compose misconfiguration check
       - id: trivy-config
         name: trivy config scan

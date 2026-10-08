@@ -1,5 +1,7 @@
 <script lang="ts">
-	import favicon from '$lib/assets/favicon.svg';
+	import '$lib/styles/fonts.css';
+	import manropeLatin from '$lib/assets/fonts/manrope/manrope-latin-wght-normal.woff2';
+	import logoIcon from '$lib/assets/logo-icon.svg';
 	import { base } from '$app/paths';
 	import { page } from '$app/stores';
 	import type { Snippet } from 'svelte';
@@ -45,8 +47,10 @@
 	}
 </script>
 
+<!-- Canonical URLs and other SEO tags come from <Seo> on each public page. -->
 <svelte:head>
-	<link rel="icon" type="image/svg+xml" href={favicon} />
+	<!-- Start the font download with the HTML instead of after the CSS is parsed. -->
+	<link rel="preload" href={manropeLatin} as="font" type="font/woff2" crossorigin="anonymous" />
 </svelte:head>
 
 <!--
@@ -56,7 +60,7 @@
 {#if data.user}
 	<header class="app-header">
 		<a href="{base}/" class="brand">
-			<img class="brand-icon" src={favicon} alt="Chessstack logo" />
+			<img class="brand-icon" src={logoIcon} alt="Chessstack logo" />
 			<span class="brand-text">Chessstack</span>
 		</a>
 
@@ -76,6 +80,7 @@
 		<RepertoireSelector
 			repertoires={data.repertoires}
 			activeRepertoireId={data.activeRepertoireId}
+			lockedRepertoireIds={data.lockedRepertoireIds ?? []}
 		/>
 
 		<!-- Sign-out (POST form prevents CSRF via crafted URL) -->
@@ -113,13 +118,25 @@
 	{/if}
 {/if}
 
-<main class="app-main">
+{#if data.user && !data.user.email}
+	<div class="email-banner">
+		<span>Please add an email address to your account for recovery purposes.</span>
+		<a href="{base}/settings">Go to Settings</a>
+	</div>
+{/if}
+
+<main class={data.user ? 'app-main' : ''}>
 	{@render children()}
 </main>
 
 <!-- Rendered outside the header so it's not trapped in the header's stacking context (z-index: 900). -->
 {#if data.user}
-	<ManageRepertoireModal bind:open={$manageRepertoiresOpen} repertoires={data.repertoires} />
+	<ManageRepertoireModal
+		bind:open={$manageRepertoiresOpen}
+		repertoires={data.repertoires}
+		tier={data.tier}
+		lockedRepertoireIds={data.lockedRepertoireIds ?? []}
+	/>
 	<TutorialOverlay />
 {/if}
 
@@ -226,7 +243,9 @@
 	.brand-icon {
 		width: 48px;
 		height: 48px;
-		border-radius: 0;
+		border-radius: 8px;
+		background: var(--color-logo-bg);
+		padding: 2px;
 	}
 
 	.brand-text {
@@ -410,6 +429,35 @@
 	.mobile-link.active {
 		color: var(--color-accent);
 		border-left: 2px solid var(--color-accent);
+	}
+
+	/* ── Email banner ────────────────────────────────────────────────── */
+
+	.email-banner {
+		position: fixed;
+		top: 56px;
+		left: 0;
+		right: 0;
+		z-index: 898;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: var(--space-4);
+		padding: var(--space-3) var(--space-6);
+		background: var(--color-warning-bg, rgba(250, 204, 21, 0.12));
+		border-bottom: 1px solid var(--color-warning-border, rgba(250, 204, 21, 0.3));
+		font-size: 13px;
+		color: var(--color-text-primary);
+	}
+
+	.email-banner a {
+		color: var(--color-accent);
+		text-decoration: none;
+		font-weight: 600;
+	}
+
+	.email-banner a:hover {
+		text-decoration: underline;
 	}
 
 	/* ── Main content area ────────────────────────────────────────────── */

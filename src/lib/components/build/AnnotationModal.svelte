@@ -54,8 +54,7 @@
 			placeholder="Add a note about this move…"
 			maxlength="500"
 			rows="4"
-			disabled={saving}
-		></textarea>
+			disabled={saving}></textarea>
 		<div class="annotation-char-count">{draft.length}/500</div>
 		{#if error}
 			<p class="annotation-error">{error}</p>

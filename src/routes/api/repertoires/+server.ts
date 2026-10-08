@@ -5,19 +5,23 @@ import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { repertoire } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { eq, count } from 'drizzle-orm';
+import { TIER_LIMITS } from '$lib/stripe/tiers';
+import { requireAuth } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { createRepertoireSchema } from '$lib/server/schemas/repertoires';
 
 // ── GET ────────────────────────────────────────────────────────────────────────
 // Returns an array of all repertoires belonging to the current user,
 // ordered by creation date (oldest first).
 
 export const GET: RequestHandler = async ({ locals }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
 	const rows = await db
 		.select()
 		.from(repertoire)
-		.where(eq(repertoire.userId, locals.user.id))
+		.where(eq(repertoire.userId, user.id))
 		.orderBy(repertoire.createdAt);
 
 	return json(rows);
@@ -28,28 +32,31 @@ export const GET: RequestHandler = async ({ locals }) => {
 // Returns the newly created repertoire row with HTTP 201.
 
 export const POST: RequestHandler = async ({ locals, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-	const { name, color } = body;
+	const { name, color } = await parseBody(request, createRepertoireSchema);
 
-	if (!name || typeof name !== 'string' || name.trim() === '') {
-		throw error(400, 'name is required');
-	}
-	if (color !== 'WHITE' && color !== 'BLACK') {
-		throw error(400, 'color must be "WHITE" or "BLACK"');
+	// Enforce tier-based repertoire limit.
+	const tier = user.tier ?? 'free';
+	const maxRepertoires = TIER_LIMITS[tier].maxRepertoires;
+	if (maxRepertoires !== Infinity) {
+		const [{ total }] = await db
+			.select({ total: count() })
+			.from(repertoire)
+			.where(eq(repertoire.userId, user.id));
+		if (total >= maxRepertoires) {
+			throw error(
+				403,
+				`Your plan allows up to ${maxRepertoires} repertoire${maxRepertoires === 1 ? '' : 's'}. Upgrade to create more.`
+			);
+		}
 	}
 
 	const [created] = await db
 		.insert(repertoire)
 		.values({
-			userId: locals.user.id,
-			name: name.trim(),
+			userId: user.id,
+			name,
 			color,
 			createdAt: new Date()
 		})

@@ -14,22 +14,21 @@ import { userSettings, importedGame } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { fetchLichessGames, LichessApiError } from '$lib/lichess';
 import { fetchChesscomGames, ChesscomApiError } from '$lib/chesscom';
+import { isRateLimited } from '$lib/auth/rate-limit';
+import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
+import { requireAuth } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { fetchImportSchema } from '$lib/server/schemas/import';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
-	const userId = locals.user.id;
+	const user = requireAuth(locals);
+	const userId = user.id;
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
+	if (await isRateLimited(String(userId), RATE_LIMITS.importFetch)) {
+		return json({ error: 'Too many requests. Please try again later.' }, { status: 429 });
 	}
 
-	const source = body.source as string;
-	if (source !== 'LICHESS' && source !== 'CHESSCOM') {
-		throw error(400, 'source must be LICHESS or CHESSCOM');
-	}
+	const { source } = await parseBody(request, fetchImportSchema);
 
 	// Load user settings to get platform username and watermark.
 	const [settings] = await db.select().from(userSettings).where(eq(userSettings.userId, userId));
@@ -141,5 +140,13 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		}
 	});
 
-	return json({ imported, skipped, total: games.length });
+	// Provide a reason when no games were imported so the UI can explain why.
+	let reason: string | undefined;
+	if (games.length === 0 && imported === 0) {
+		reason = watermark ? 'no_new_games' : 'no_games';
+	} else if (games.length > 0 && imported === 0) {
+		reason = 'all_skipped';
+	}
+
+	return json({ imported, skipped, total: games.length, ...(reason && { reason }) });
 };

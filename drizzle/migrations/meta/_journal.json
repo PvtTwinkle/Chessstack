@@ -118,70 +118,140 @@
 			"idx": 16,
 			"version": "6",
 			"when": 1774000000000,
-			"tag": "0016_gap_default_10000",
+			"tag": "0016_saas_subscription",
 			"breakpoints": true
 		},
 		{
 			"idx": 17,
-			"version": "6",
-			"when": 1774100000000,
-			"tag": "0017_add_lichess_moves",
+			"version": "7",
+			"when": 1773676077799,
+			"tag": "0017_polite_blur",
 			"breakpoints": true
 		},
 		{
 			"idx": 18,
-			"version": "6",
-			"when": 1774200000000,
-			"tag": "0018_fsrs_settings",
+			"version": "7",
+			"when": 1773676801384,
+			"tag": "0018_mixed_shen",
 			"breakpoints": true
 		},
 		{
 			"idx": 19,
-			"version": "6",
-			"when": 1774300000000,
-			"tag": "0019_add_celebrity_moves",
+			"version": "7",
+			"when": 1774100000000,
+			"tag": "0019_gap_default_10000",
 			"breakpoints": true
 		},
 		{
 			"idx": 20,
-			"version": "6",
-			"when": 1774400000000,
-			"tag": "0020_star_player_category",
+			"version": "7",
+			"when": 1774200000000,
+			"tag": "0020_admin_override",
 			"breakpoints": true
 		},
 		{
 			"idx": 21,
-			"version": "6",
-			"when": 1774500000000,
-			"tag": "0021_drop_celebrity_resulting_fen",
+			"version": "7",
+			"when": 1774300000000,
+			"tag": "0021_gift_subscription",
 			"breakpoints": true
 		},
 		{
 			"idx": 22,
-			"version": "6",
-			"when": 1774615176924,
-			"tag": "0022_opponent_prep",
+			"version": "7",
+			"when": 1774400000000,
+			"tag": "0022_email_verification",
 			"breakpoints": true
 		},
 		{
 			"idx": 23,
-			"version": "6",
-			"when": 1774626000000,
-			"tag": "0023_prep_filters",
+			"version": "7",
+			"when": 1774500000000,
+			"tag": "0023_user_id_indexes",
 			"breakpoints": true
 		},
 		{
 			"idx": 24,
-			"version": "6",
-			"when": 1774700000000,
-			"tag": "0024_trainer_mode",
+			"version": "7",
+			"when": 1774600000000,
+			"tag": "0024_add_lichess_moves",
 			"breakpoints": true
 		},
 		{
 			"idx": 25,
-			"version": "6",
+			"version": "7",
+			"when": 1774700000000,
+			"tag": "0025_fsrs_settings",
+			"breakpoints": true
+		},
+		{
+			"idx": 26,
+			"version": "7",
 			"when": 1774800000000,
-			"tag": "0025_trainer_lead_in_moves",
+			"tag": "0026_add_celebrity_moves",
+			"breakpoints": true
+		},
+		{
+			"idx": 27,
+			"version": "7",
+			"when": 1774900000000,
+			"tag": "0027_star_player_category",
+			"breakpoints": true
+		},
+		{
+			"idx": 28,
+			"version": "7",
+			"when": 1775000000000,
+			"tag": "0028_drop_celebrity_resulting_fen",
+			"breakpoints": true
+		},
+		{
+			"idx": 29,
+			"version": "7",
+			"when": 1775100000000,
+			"tag": "0029_opponent_prep",
+			"breakpoints": true
+		},
+		{
+			"idx": 30,
+			"version": "7",
+			"when": 1775200000000,
+			"tag": "0030_prep_filters",
+			"breakpoints": true
+		},
+		{
+			"idx": 31,
+			"version": "7",
+			"when": 1775300000000,
+			"tag": "0031_trainer_mode",
+			"breakpoints": true
+		},
+		{
+			"idx": 32,
+			"version": "7",
+			"when": 1775400000000,
+			"tag": "0032_trainer_lead_in_moves",
+			"breakpoints": true
+		},
+		{
+			"idx": 33,
+			"version": "7",
+			"when": 1775500000000,
+			"tag": "0033_referral",
+			"breakpoints": true
+		},
+		{
+			"idx": 34,
+			"version": "7",
+			"when": 1775600000000,
+			"tag": "0034_token_hash_and_referral_used",
+			"breakpoints": true
+		},
+		{
+			"idx": 35,
+			"version": "7",
+			"when": 1791486765962,
+			"tag": "0035_review_log",
 			"breakpoints": true
 		}
 	]

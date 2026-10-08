@@ -45,6 +45,4 @@ export interface WorkerErrorMessage {
 
 /** Union of all messages the worker can send back. */
 export type WorkerOutboundMessage =
-	| WorkerProgressMessage
-	| WorkerResultMessage
-	| WorkerErrorMessage;
+	WorkerProgressMessage | WorkerResultMessage | WorkerErrorMessage;

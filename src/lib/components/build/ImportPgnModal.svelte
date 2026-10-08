@@ -18,11 +18,9 @@
 
 <script lang="ts">
 	import { SvelteMap } from 'svelte/reactivity';
-	import type { ImportConflict, ImportPreview } from '$lib/pgn/detectConflicts';
-	import type { PgnEdge } from '$lib/pgn/parseVariations';
-	import type { DrawShape } from '@lichess-org/chessground/draw';
-	import ChessBoard from '$lib/components/ChessBoard.svelte';
-	import { Chess } from 'chess.js';
+	import type { ImportPreview } from '$lib/pgn/detectConflicts';
+	import { buildImportRequest, openConflicts } from '$lib/pgn/resolveImport';
+	import ImportConflict from './ImportConflict.svelte';
 
 	let {
 		open = $bindable(false),
@@ -50,7 +48,6 @@
 	// ── Preview state ────────────────────────────────────────────────────────
 
 	let preview = $state<ImportPreview | null>(null);
-	let currentConflictIdx = $state(0);
 	let resolvedConflicts = new SvelteMap<string, string>();
 
 	// ── Result state ─────────────────────────────────────────────────────────
@@ -60,47 +57,15 @@
 
 	// ── Derived ──────────────────────────────────────────────────────────────
 
-	const unresolvedCount = $derived(preview ? preview.conflicts.length - resolvedConflicts.size : 0);
+	// Conflicts inside a line the user already turned down aren't asked about.
+	const pending = $derived(preview ? openConflicts(preview, resolvedConflicts) : []);
+	const unresolvedCount = $derived(pending.length);
+	const currentConflict = $derived(pending[0] ?? null);
+	const request = $derived(preview ? buildImportRequest(preview, resolvedConflicts) : null);
 
 	const totalNewMoves = $derived(
 		preview ? preview.newUserMoves.length + preview.newOpponentMoves.length : 0
 	);
-
-	const currentConflict = $derived<ImportConflict | null>(
-		preview && currentConflictIdx < preview.conflicts.length
-			? preview.conflicts[currentConflictIdx]
-			: null
-	);
-
-	// Arrow colors for each alternative move on the conflict board.
-	// Green for the first, blue for the second, red for the third, etc.
-	const ARROW_COLORS = ['green', 'blue', 'red', 'yellow'];
-
-	/** Build arrow shapes showing each alternative move on the conflict board. */
-	const conflictArrows = $derived.by<DrawShape[]>(() => {
-		if (!currentConflict) return [];
-		try {
-			const chess = new Chess(currentConflict.fromFen);
-			const shapes: DrawShape[] = [];
-			for (let i = 0; i < currentConflict.alternatives.length; i++) {
-				const san = currentConflict.alternatives[i];
-				const color = ARROW_COLORS[i % ARROW_COLORS.length];
-				// Reset to conflict position before each move resolution
-				chess.load(currentConflict.fromFen);
-				const result = chess.move(san);
-				if (result) {
-					shapes.push({
-						orig: result.from,
-						dest: result.to,
-						brush: color
-					});
-				}
-			}
-			return shapes;
-		} catch {
-			return [];
-		}
-	});
 
 	// ── Close / reset ────────────────────────────────────────────────────────
 
@@ -112,7 +77,6 @@
 		parsing = false;
 		parseError = '';
 		preview = null;
-		currentConflictIdx = 0;
 		resolvedConflicts.clear();
 		result = null;
 		importError = '';
@@ -128,10 +92,18 @@
 
 	// ── File upload ──────────────────────────────────────────────────────────
 
+	const MAX_PGN_SIZE = 1_048_576; // 1 MB
+
 	function handleFileUpload(e: Event) {
 		const input = e.target as HTMLInputElement;
 		const file = input.files?.[0];
 		if (!file) return;
+
+		if (file.size > MAX_PGN_SIZE) {
+			parseError = 'File is too large — maximum size is 1 MB';
+			input.value = '';
+			return;
+		}
 
 		const reader = new FileReader();
 		reader.onload = () => {
@@ -147,6 +119,10 @@
 
 	async function handleParse() {
 		if (!pgnText.trim() || parsing) return;
+		if (pgnText.length > MAX_PGN_SIZE) {
+			parseError = 'PGN is too large — maximum size is 1 MB';
+			return;
+		}
 		parsing = true;
 		parseError = '';
 
@@ -164,7 +140,6 @@
 			}
 
 			preview = await res.json();
-			currentConflictIdx = 0;
 			resolvedConflicts.clear();
 
 			// If no conflicts, go straight to preview summary
@@ -176,66 +151,15 @@
 		}
 	}
 
-	// ── Conflict resolution ──────────────────────────────────────────────────
-
-	function resolveConflict(fromFen: string, chosenSan: string) {
-		resolvedConflicts.set(fromFen, chosenSan);
-
-		// Advance to next unresolved conflict
-		if (preview) {
-			let next = currentConflictIdx + 1;
-			while (
-				next < preview.conflicts.length &&
-				resolvedConflicts.has(preview.conflicts[next].fromFen)
-			) {
-				next++;
-			}
-			currentConflictIdx = next;
-		}
-	}
-
 	// ── Execute import ───────────────────────────────────────────────────────
 
-	/** Find annotation for a move from the preview edges. */
-	function findAnnotation(fromFen: string, san: string): string | null {
-		if (!preview) return null;
-		const allEdges: PgnEdge[] = [...preview.newUserMoves, ...preview.newOpponentMoves];
-		const edge = allEdges.find((e) => e.fromFen === fromFen && e.san === san);
-		return edge?.annotation ?? null;
-	}
-
 	async function handleImport() {
-		if (!preview) return;
+		if (!preview || !request) return;
 		step = 'importing';
 		importError = '';
 
-		// Build the full move list: new user moves + new opponent moves + resolved conflicts
-		const moves: { fromFen: string; san: string; annotation?: string | null }[] = [];
-
-		// Add non-conflicting new moves (with annotations)
-		for (const edge of preview.newUserMoves) {
-			moves.push({ fromFen: edge.fromFen, san: edge.san, annotation: edge.annotation });
-		}
-		for (const edge of preview.newOpponentMoves) {
-			moves.push({ fromFen: edge.fromFen, san: edge.san, annotation: edge.annotation });
-		}
-
-		// Add resolved conflict moves
-		const replacements: { fromFen: string; san: string }[] = [];
-		for (const conflict of preview.conflicts) {
-			const chosen = resolvedConflicts.get(conflict.fromFen);
-			if (chosen) {
-				moves.push({
-					fromFen: conflict.fromFen,
-					san: chosen,
-					annotation: findAnnotation(conflict.fromFen, chosen)
-				});
-				// If the chosen move differs from the existing repertoire move, it's a replacement
-				if (conflict.existingMove && chosen !== conflict.existingMove) {
-					replacements.push({ fromFen: conflict.fromFen, san: chosen });
-				}
-			}
-		}
+		// New moves and the resolved conflicts, minus anything in a line the user turned down.
+		const { moves, replacements } = request;
 
 		if (moves.length === 0) {
 			step = 'done';
@@ -271,12 +195,6 @@
 		onComplete();
 		close();
 	}
-
-	/** Shorten a FEN to a human-readable position hint (active color + piece info). */
-	function positionHint(fen: string): string {
-		const turn = fen.split(' ')[1] === 'w' ? 'White' : 'Black';
-		return `${turn} to move`;
-	}
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -302,8 +220,7 @@
 						class="pgn-textarea"
 						bind:value={pgnText}
 						placeholder="1. d4 Nf6 2. Nc3 d5 3. Bf4 ..."
-						rows="10"
-					></textarea>
+						rows="10"></textarea>
 
 					<div class="input-actions">
 						<label class="file-label">
@@ -368,59 +285,20 @@
 						{/if}
 
 						<!-- Conflict resolution -->
-						{#if preview.conflicts.length > 0 && unresolvedCount > 0}
+						{#if unresolvedCount > 0}
 							<div class="conflict-section">
 								<h3>
-									Choose your move ({resolvedConflicts.size}/{preview.conflicts.length} resolved)
+									Choose your move ({unresolvedCount} left)
 								</h3>
 
 								{#if currentConflict}
-									<div class="conflict-card">
-										<p class="conflict-context">
-											{positionHint(currentConflict.fromFen)}
-											{#if currentConflict.source === 'REPERTOIRE_VS_PGN'}
-												— your repertoire has a different move
-											{:else}
-												— PGN has multiple options
-											{/if}
-										</p>
-
-										<div class="conflict-body">
-											<div class="conflict-board">
-												{#key currentConflict.fromFen}
-													<ChessBoard
-														fen={currentConflict.fromFen}
-														orientation={repertoireColor === 'WHITE' ? 'white' : 'black'}
-														interactive={false}
-														autoShapes={conflictArrows}
-													/>
-												{/key}
-											</div>
-
-											<div class="conflict-choices">
-												{#each currentConflict.alternatives as alt, i (alt)}
-													<button
-														class="choice-btn"
-														class:choice-existing={alt === currentConflict.existingMove}
-														onclick={() => resolveConflict(currentConflict!.fromFen, alt)}
-													>
-														<span class="choice-row">
-															<span
-																class="arrow-dot"
-																style:background={ARROW_COLORS[i % ARROW_COLORS.length]}
-															></span>
-															<span class="choice-san">{alt}</span>
-														</span>
-														{#if alt === currentConflict.existingMove}
-															<span class="choice-tag">current</span>
-														{:else}
-															<span class="choice-tag">PGN</span>
-														{/if}
-													</button>
-												{/each}
-											</div>
-										</div>
-									</div>
+									<ImportConflict
+										conflict={currentConflict}
+										{repertoireColor}
+										newLabel="PGN"
+										internalNote="PGN has multiple options"
+										onChoose={(san) => resolvedConflicts.set(currentConflict!.fromFen, san)}
+									/>
 								{/if}
 							</div>
 						{/if}
@@ -442,7 +320,7 @@
 								<button class="btn-primary" onclick={handleImport} disabled={unresolvedCount > 0}>
 									{unresolvedCount > 0
 										? `Resolve ${unresolvedCount} conflict${unresolvedCount > 1 ? 's' : ''}`
-										: `Import ${totalNewMoves + resolvedConflicts.size} move${totalNewMoves + resolvedConflicts.size !== 1 ? 's' : ''}`}
+										: `Import ${request?.moves.length ?? 0} move${request?.moves.length !== 1 ? 's' : ''}`}
 								</button>
 							{/if}
 						</div>
@@ -679,91 +557,6 @@
 		font-weight: 600;
 	}
 
-	.conflict-card {
-		padding: var(--space-3);
-		background: var(--color-surface-alt);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-md);
-	}
-
-	.conflict-context {
-		margin: 0 0 var(--space-2);
-		font-size: 0.8rem;
-		color: var(--color-text-secondary);
-		line-height: 1.4;
-	}
-
-	.conflict-body {
-		display: flex;
-		gap: var(--space-3);
-		align-items: flex-start;
-	}
-
-	.conflict-board {
-		width: 200px;
-		flex-shrink: 0;
-	}
-
-	.conflict-choices {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-		flex: 1;
-	}
-
-	.choice-btn {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: var(--space-1);
-		padding: var(--space-3) var(--space-3);
-		background: var(--color-surface-alt);
-		border: 2px solid var(--color-border);
-		border-radius: var(--radius-md);
-		font-family: var(--font-body);
-		cursor: pointer;
-		transition:
-			border-color var(--dur-fast),
-			background var(--dur-fast);
-	}
-
-	.choice-btn:hover {
-		border-color: var(--color-accent);
-		background: var(--color-surface);
-	}
-
-	.choice-existing {
-		border-color: var(--color-success);
-	}
-
-	.choice-row {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-	}
-
-	.arrow-dot {
-		width: 10px;
-		height: 10px;
-		border-radius: 50%;
-		flex-shrink: 0;
-	}
-
-	.choice-san {
-		font-size: 1.1rem;
-		font-weight: 700;
-		color: var(--color-text-primary);
-		font-family: var(--font-body);
-	}
-
-	.choice-tag {
-		font-size: 0.65rem;
-		color: var(--color-text-muted);
-		text-transform: uppercase;
-		letter-spacing: 0.12em;
-	}
-
 	/* ── Preview actions ──────────────────────────────────────────────────── */
 
 	.preview-actions {
@@ -884,10 +677,6 @@
 
 	/* ── Mobile touch targets ── --bp-md */
 	@media (max-width: 767px) {
-		.choice-btn {
-			min-height: 44px;
-		}
-
 		.btn-primary {
 			min-height: 44px;
 		}
@@ -928,14 +717,6 @@
 			display: flex;
 			align-items: center;
 			justify-content: center;
-		}
-
-		.conflict-body {
-			flex-direction: column;
-		}
-
-		.conflict-board {
-			width: 100%;
 		}
 	}
 </style>

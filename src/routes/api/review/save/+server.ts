@@ -13,35 +13,37 @@ import { db } from '$lib/db';
 import { repertoire, reviewedGame, importedGame } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { fenKey } from '$lib/fen';
+import { isRepertoireLocked } from '$lib/stripe/tiers.server';
+import { requireAuth } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { saveReviewSchema } from '$lib/server/schemas/review';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-	const { repertoireId, pgn, deviationFen = null, notes = null, importedGameId } = body;
-
-	if (typeof repertoireId !== 'number') throw error(400, 'repertoireId must be a number');
-	if (!pgn || typeof pgn !== 'string') throw error(400, 'pgn is required');
+	const { repertoireId, pgn, deviationFen, notes, importedGameId } = await parseBody(
+		request,
+		saveReviewSchema
+	);
 
 	// Verify the repertoire belongs to this user.
 	const [rep] = await db
 		.select()
 		.from(repertoire)
-		.where(and(eq(repertoire.id, repertoireId), eq(repertoire.userId, locals.user.id)));
+		.where(and(eq(repertoire.id, repertoireId), eq(repertoire.userId, user.id)));
 	if (!rep) throw error(404, 'Repertoire not found');
+
+	if (await isRepertoireLocked(user.id, repertoireId, user.tier ?? 'free')) {
+		throw error(403, 'This repertoire is read-only. Upgrade your plan to edit it.');
+	}
 
 	// If this review is linked to an imported game, look it up for metadata.
 	let importedGameRow = null;
-	if (typeof importedGameId === 'number') {
+	if (importedGameId != null) {
 		const [ig] = await db
 			.select()
 			.from(importedGame)
-			.where(and(eq(importedGame.id, importedGameId), eq(importedGame.userId, locals.user.id)));
+			.where(and(eq(importedGame.id, importedGameId), eq(importedGame.userId, user.id)));
 		if (ig) importedGameRow = ig;
 	}
 
@@ -54,15 +56,15 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	const [saved] = await db
 		.insert(reviewedGame)
 		.values({
-			userId: locals.user.id,
+			userId: user.id,
 			repertoireId,
 			pgn,
 			source,
 			lichessGameId,
-			deviationFen: typeof deviationFen === 'string' ? fenKey(deviationFen) : null,
+			deviationFen: deviationFen ? fenKey(deviationFen) : null,
 			playedAt,
 			reviewedAt: new Date(),
-			notes: typeof notes === 'string' && notes.trim() ? notes.trim() : null
+			notes
 		})
 		.returning();
 

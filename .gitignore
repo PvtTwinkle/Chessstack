@@ -18,6 +18,9 @@ Thumbs.db
 !.env.example
 !.env.test
 
+# Unit-test coverage report (npm run test:coverage)
+/coverage/
+
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
@@ -25,11 +28,8 @@ vite.config.ts.timestamp-*
 # Database data directory — not committed (PostgreSQL uses a Docker volume)
 /data/
 
-# Claude Code local instructions — personal, not for version control
-CLAUDE.md
-
-# PGN example file
-Jobava London Rare 3rd Moves.pgn
+# Claude Code personal instructions — CLAUDE.md itself is shared and committed
+CLAUDE.local.md
 
 # Chessmont Database Files
 chessmont.pgn
@@ -41,9 +41,11 @@ lichess_db_puzzle.csv
 # Data dump files (distributed via GitHub Releases, not committed)
 *.sql.gz
 
-# Import scripts — not shipped; users restore from pg_dump instead
-scripts/puzzle-import.py
-
 # PGN & Zip Files used in Star player imports
 *.pgn
 *.zip
+
+# Playwright
+/playwright-report/
+/test-results/
+/blob-report/

@@ -12,24 +12,20 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { repertoire, userMove, userRepertoireMove } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { gradeCard, Rating } from '$lib/fsrs';
+import { Rating } from '$lib/fsrs';
 import { loadFsrsConfig } from '$lib/server/fsrs-config';
+import { applyGrade } from '$lib/server/grading';
 import { fenKey } from '$lib/fen';
+import { isRepertoireLocked } from '$lib/stripe/tiers.server';
+import { requireAuth } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { failCardSchema } from '$lib/server/schemas/review';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
+	const body = await parseBody(request, failCardSchema);
 	const { repertoireId } = body;
-
-	if (typeof repertoireId !== 'number') throw error(400, 'repertoireId must be a number');
-	if (!body.fromFen || typeof body.fromFen !== 'string') throw error(400, 'fromFen is required');
-	if (body.fromFen.length > 100) throw error(400, 'fromFen is too long');
 
 	// Normalize to 4-field FEN so transpositions always match.
 	const fromFen = fenKey(body.fromFen);
@@ -39,40 +35,52 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		db
 			.select()
 			.from(repertoire)
-			.where(and(eq(repertoire.id, repertoireId), eq(repertoire.userId, locals.user.id))),
+			.where(and(eq(repertoire.id, repertoireId), eq(repertoire.userId, user.id))),
 		db
 			.select()
 			.from(userRepertoireMove)
 			.where(
 				and(
-					eq(userRepertoireMove.userId, locals.user.id),
+					eq(userRepertoireMove.userId, user.id),
 					eq(userRepertoireMove.repertoireId, repertoireId),
 					eq(userRepertoireMove.fromFen, fromFen)
 				)
 			),
-		loadFsrsConfig(locals.user.id)
+		loadFsrsConfig(user.id)
 	]);
 
 	if (!repRows[0]) throw error(404, 'Repertoire not found');
+
+	if (await isRepertoireLocked(user.id, repertoireId, user.tier ?? 'free')) {
+		throw error(403, 'This repertoire is read-only. Upgrade your plan to edit it.');
+	}
+
 	const card = cardRows[0];
 
 	const now = new Date();
 
 	if (card) {
 		// Card exists — apply Again rating via FSRS.
-		const updated = gradeCard(card, Rating.Again, now, fsrsConfig);
-		await db.update(userRepertoireMove).set(updated).where(eq(userRepertoireMove.id, card.id));
+		const updated = await applyGrade(
+			user.id,
+			card,
+			Rating.Again,
+			'REVIEW_DEVIATION',
+			fsrsConfig,
+			now
+		);
 		return json({ updated: true, due: updated.due });
 	}
 
 	// No SR card exists — find the corresponding userMove to get the SAN,
-	// then create a new card in an immediately-due state.
+	// then create a new card in an immediately-due state. The card has never
+	// been shown, so this is not a grade and gets no review_log row.
 	const [moveRow] = await db
 		.select()
 		.from(userMove)
 		.where(
 			and(
-				eq(userMove.userId, locals.user.id),
+				eq(userMove.userId, user.id),
 				eq(userMove.repertoireId, repertoireId),
 				eq(userMove.fromFen, fromFen)
 			)
@@ -84,7 +92,7 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	}
 
 	await db.insert(userRepertoireMove).values({
-		userId: locals.user.id,
+		userId: user.id,
 		repertoireId,
 		fromFen,
 		san: moveRow.san,

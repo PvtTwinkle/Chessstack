@@ -8,10 +8,10 @@
 #   git push origin v1.0.0
 #
 # The workflow produces these image tags automatically:
-#   ghcr.io/pvttwinkle/chessstack:v1.0.0
-#   ghcr.io/pvttwinkle/chessstack:v1.0
-#   ghcr.io/pvttwinkle/chessstack:v1
-#   ghcr.io/pvttwinkle/chessstack:latest
+#   ghcr.io/<owner>/<repository>:v1.0.0
+#   ghcr.io/<owner>/<repository>:v1.0
+#   ghcr.io/<owner>/<repository>:v1
+#   ghcr.io/<owner>/<repository>:latest
 #
 # No secrets need to be configured — the built-in GITHUB_TOKEN has write
 # access to the repository's container registry automatically.
@@ -40,17 +40,17 @@ jobs:
     steps:
       # Step 1: Check out the repository at the tagged commit.
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Step 2: Set up Docker Buildx, which is the builder backend that
       # supports build caching.
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # Step 3: Authenticate with the GitHub Container Registry.
       # GITHUB_TOKEN is provided automatically by GitHub Actions.
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -58,13 +58,13 @@ jobs:
 
       # Step 4: Generate Docker tags from the git tag.
       # For a tag like v1.2.3, this produces:
-      #   ghcr.io/pvttwinkle/chessstack:v1.2.3
-      #   ghcr.io/pvttwinkle/chessstack:v1.2
-      #   ghcr.io/pvttwinkle/chessstack:v1
-      #   ghcr.io/pvttwinkle/chessstack:latest
+      #   ghcr.io/<owner>/<repository>:v1.2.3
+      #   ghcr.io/<owner>/<repository>:v1.2
+      #   ghcr.io/<owner>/<repository>:v1
+      #   ghcr.io/<owner>/<repository>:latest
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -77,7 +77,7 @@ jobs:
       # The GitHub Actions layer cache speeds up rebuilds when only source
       # code changes (the npm ci layer is cached).
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64

@@ -84,3 +84,27 @@ The aggregated data is shipped pre-loaded in the Docker image.
 
 **What we use**: Sound effects for move, capture, correct, and incorrect events
 (`move.mp3`, `capture.mp3`, `correct.mp3`, `incorrect.mp3`).
+
+---
+
+## Manrope Font
+
+- **Source**: https://github.com/sharanda/manrope (files from [Fontsource](https://fontsource.org/fonts/manrope), `@fontsource-variable/manrope` 5.3.0)
+- **Creator**: The Manrope Project Authors
+- **License**: [SIL Open Font License 1.1](https://openfontlicense.org) (full text in `src/lib/assets/fonts/manrope/OFL.txt`)
+
+**What we use**: The Manrope variable font (WOFF2, split into Latin, Latin
+Extended, Cyrillic, Greek and Vietnamese subsets) as the interface typeface,
+served from our own domain.
+
+---
+
+## Stockfish and Stockfish.js
+
+- **Source**: https://github.com/official-stockfish/Stockfish and https://github.com/nmrugg/stockfish.js/tree/v19.0.0 (`stockfish` npm package 19.0.0)
+- **Creators**: The Stockfish developers; Stockfish.js by Nathan Rugg and Chess.com
+- **License**: [GNU GPL v3](https://www.gnu.org/licenses/gpl-3.0.html) (full text in `engine/COPYING.txt`)
+
+**What we use**: The "lite" multi-threaded and single-threaded WebAssembly builds of
+Stockfish 19, unmodified, in `engine/`. They are sent to the browser, which runs the
+engine analysis locally.

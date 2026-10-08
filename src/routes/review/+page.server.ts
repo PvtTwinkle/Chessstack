@@ -16,6 +16,7 @@ import { db } from '$lib/db';
 import { repertoire, userMove, reviewedGame, importedGame, userSettings } from '$lib/db/schema';
 import { eq, and, desc } from 'drizzle-orm';
 import { parsePgn, analyzeGame, computeMatchDepth } from '$lib/pgn';
+import { isRepertoireLocked } from '$lib/stripe/tiers.server';
 
 /** Format the first N half-moves as readable notation, e.g. "1. e4 e5 2. Nf3 Nc6". */
 function formatOpeningMoves(moves: { san: string }[], plies = 4): string {
@@ -30,7 +31,7 @@ function formatOpeningMoves(moves: { san: string }[], plies = 4): string {
 }
 
 export const load: PageServerLoad = async ({ locals, parent, url }) => {
-	const { activeRepertoireId, repertoires } = await parent();
+	const { activeRepertoireId, repertoires, lockedRepertoireIds } = await parent();
 
 	if (!activeRepertoireId) {
 		redirect(302, '/');
@@ -95,7 +96,7 @@ export const load: PageServerLoad = async ({ locals, parent, url }) => {
 					chesscomUsername: settings.chesscomUsername
 				}
 			: null,
-		allRepertoires: repertoires,
+		allRepertoires: repertoires.filter((r) => !lockedRepertoireIds.includes(r.id)),
 		prefilledGame
 	};
 };
@@ -145,6 +146,12 @@ export const actions: Actions = {
 				.from(repertoire)
 				.where(and(eq(repertoire.id, repId), eq(repertoire.userId, locals.user.id)));
 			if (!rep) return fail(400, { error: 'Repertoire not found' });
+
+			// Block analysis against locked repertoires for free users.
+			if (await isRepertoireLocked(locals.user.id, repId, locals.user.tier ?? 'free')) {
+				return fail(403, { error: 'Upgrade your plan to use this repertoire.' });
+			}
+
 			bestRep = rep;
 			bestMoves = await db
 				.select()
@@ -153,10 +160,19 @@ export const actions: Actions = {
 		} else {
 			// Paste PGN flow — find the best matching repertoire based on opening.
 			// Get all repertoires for this user that match the player's color.
-			const allReps = await db
+			// Filter out locked repertoires so free users only match against their free one.
+			const allRepsRaw = await db
 				.select()
 				.from(repertoire)
 				.where(and(eq(repertoire.userId, locals.user.id), eq(repertoire.color, playerColor)));
+
+			const userTier = locals.user.tier ?? 'free';
+			const allReps: typeof allRepsRaw = [];
+			for (const rep of allRepsRaw) {
+				if (!(await isRepertoireLocked(locals.user.id, rep.id, userTier))) {
+					allReps.push(rep);
+				}
+			}
 
 			if (allReps.length === 0) {
 				return fail(400, {
