@@ -28,11 +28,18 @@
 
 	let {
 		repertoires = [],
-		activeRepertoireId = null
+		activeRepertoireId = null,
+		lockedRepertoireIds = []
 	}: {
 		repertoires: Repertoire[];
 		activeRepertoireId: number | null;
+		lockedRepertoireIds: number[];
 	} = $props();
+
+	// Only show unlocked repertoires in the switcher dropdown.
+	// Locked ones are accessible via the Manage modal for export/delete.
+	const lockedSet = $derived(new Set(lockedRepertoireIds));
+	const selectableRepertoires = $derived(repertoires.filter((r) => !lockedSet.has(r.id)));
 
 	// ── UI state ────────────────────────────────────────────────────────────────
 	let dropdownOpen = $state(false);
@@ -106,7 +113,7 @@
 
 	{#if dropdownOpen}
 		<div class="dropdown" role="listbox">
-			{#each repertoires as rep (rep.id)}
+			{#each selectableRepertoires as rep (rep.id)}
 				<button
 					class="dropdown-item"
 					class:is-active={rep.id === activeRepertoireId}
@@ -122,7 +129,11 @@
 				</button>
 			{/each}
 
-			{#if repertoires.length === 0}
+			{#if lockedRepertoireIds.length > 0}
+				<p class="dropdown-locked-hint">{lockedRepertoireIds.length} locked — manage to export</p>
+			{/if}
+
+			{#if selectableRepertoires.length === 0 && lockedRepertoireIds.length === 0}
 				<p class="dropdown-empty">No repertoires yet</p>
 			{/if}
 
@@ -252,6 +263,14 @@
 		padding: var(--space-2) var(--space-3);
 		color: var(--color-text-muted);
 		font-size: 12px;
+		margin: 0;
+	}
+
+	.dropdown-locked-hint {
+		padding: var(--space-1) var(--space-3);
+		color: var(--color-text-muted);
+		font-size: 11px;
+		font-style: italic;
 		margin: 0;
 	}
 

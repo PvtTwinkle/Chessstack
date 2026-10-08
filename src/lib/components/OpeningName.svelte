@@ -32,28 +32,36 @@
 
 	// Fetch the ECO name whenever the position changes.
 	// We pass currentFen first so the server checks it before the history.
-	// AbortController prevents stale responses from overwriting newer data
-	// when the user navigates positions rapidly.
+	// Debounced to avoid burning rate limits during rapid navigation.
+	// AbortController prevents stale responses from overwriting newer data.
 	$effect(() => {
 		const fens = [currentFen, ...fenHistory];
 		const controller = new AbortController();
 
-		fetch('/api/eco', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ fens }),
-			signal: controller.signal
-		})
-			.then((r) => r.json())
-			.then((data: { code: string; name: string } | null) => {
-				ecoResult = data;
+		const timer = setTimeout(() => {
+			fetch('/api/eco', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ fens }),
+				signal: controller.signal
 			})
-			.catch(() => {
-				// Silently swallow errors — a missing ECO name is not fatal.
-				// This also catches AbortError when the effect re-runs.
-			});
+				.then((r) => {
+					if (r.status === 429) return null;
+					return r.json();
+				})
+				.then((data: { code: string; name: string } | null) => {
+					ecoResult = data;
+				})
+				.catch(() => {
+					// Silently swallow errors — a missing ECO name is not fatal.
+					// This also catches AbortError when the effect re-runs.
+				});
+		}, 150);
 
-		return () => controller.abort();
+		return () => {
+			clearTimeout(timer);
+			controller.abort();
+		};
 	});
 </script>
 

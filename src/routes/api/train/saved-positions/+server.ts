@@ -8,7 +8,9 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { trainerSavedPosition } from '$lib/db/schema';
 import { eq, and, desc } from 'drizzle-orm';
-import { fenKey, sanitizeFen } from '$lib/fen';
+import { fenKey } from '$lib/fen';
+import { parseBody } from '$lib/server/validation';
+import { savePositionSchema, deletePositionSchema } from '$lib/server/schemas/train';
 
 /** List all saved positions for the authenticated user. */
 export const GET: RequestHandler = async ({ locals }) => {
@@ -27,28 +29,13 @@ export const GET: RequestHandler = async ({ locals }) => {
 export const POST: RequestHandler = async ({ request, locals }) => {
 	if (!locals.user) throw error(401, 'Not authenticated');
 
-	let body: { fen?: string; name?: string; leadInMoves?: string[] };
-	try {
-		body = (await request.json()) as typeof body;
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
+	const body = await parseBody(request, savePositionSchema);
+	const { name } = body;
 
-	const rawFen = sanitizeFen(body.fen);
-	if (!rawFen) throw error(400, 'Invalid FEN');
+	// Lead-in moves are stored as a JSON array of SAN strings.
+	const leadInMoves = body.leadInMoves ? JSON.stringify(body.leadInMoves) : null;
 
-	const name = typeof body.name === 'string' ? body.name.trim() : '';
-	if (name.length === 0 || name.length > 100) {
-		throw error(400, 'Name must be 1-100 characters');
-	}
-
-	// Lead-in moves: JSON array of SAN strings from the standard position to this FEN
-	const leadInMoves =
-		Array.isArray(body.leadInMoves) && body.leadInMoves.every((m) => typeof m === 'string')
-			? JSON.stringify(body.leadInMoves)
-			: null;
-
-	const normalizedFen = fenKey(rawFen);
+	const normalizedFen = fenKey(body.fen);
 
 	try {
 		const [inserted] = await db
@@ -76,14 +63,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 export const DELETE: RequestHandler = async ({ request, locals }) => {
 	if (!locals.user) throw error(401, 'Not authenticated');
 
-	let body: { id?: number };
-	try {
-		body = (await request.json()) as typeof body;
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-
-	if (typeof body.id !== 'number') throw error(400, 'id is required');
+	const body = await parseBody(request, deletePositionSchema);
 
 	const deleted = await db
 		.delete(trainerSavedPosition)

@@ -6,18 +6,18 @@ import { db } from '$lib/db';
 import { repertoire, userMove } from '$lib/db/schema';
 import { and, eq } from 'drizzle-orm';
 import { exportRepertoirePgn } from '$lib/pgn/exportPgn';
+import { requireAuth, parseIntParam } from '$lib/server/api-helpers';
 
 export const GET: RequestHandler = async ({ locals, params }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	const id = parseInt(params.id);
-	if (isNaN(id)) throw error(400, 'Invalid id');
+	const id = parseIntParam(params.id, 'id');
 
 	// Ownership check
 	const [existing] = await db
 		.select()
 		.from(repertoire)
-		.where(and(eq(repertoire.id, id), eq(repertoire.userId, locals.user.id)));
+		.where(and(eq(repertoire.id, id), eq(repertoire.userId, user.id)));
 
 	if (!existing) throw error(404, 'Repertoire not found');
 
@@ -25,7 +25,7 @@ export const GET: RequestHandler = async ({ locals, params }) => {
 	const moves = await db
 		.select()
 		.from(userMove)
-		.where(and(eq(userMove.repertoireId, id), eq(userMove.userId, locals.user.id)));
+		.where(and(eq(userMove.repertoireId, id), eq(userMove.userId, user.id)));
 
 	const pgn = exportRepertoirePgn({
 		repertoireName: existing.name,

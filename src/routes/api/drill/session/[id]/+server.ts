@@ -7,30 +7,32 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { drillSession, userRepertoireMove } from '$lib/db/schema';
 import { eq, and, gt, min } from 'drizzle-orm';
+import { isRepertoireLocked } from '$lib/stripe/tiers.server';
+import { requireAuth, parseIntParam } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { finishDrillSessionSchema } from '$lib/server/schemas/drill';
 
 export const PATCH: RequestHandler = async ({ locals, params, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
-	const userId = locals.user.id;
+	const user = requireAuth(locals);
+	const userId = user.id;
 
-	const sessionId = parseInt(params.id, 10);
-	if (isNaN(sessionId)) throw error(400, 'Invalid session id');
+	const sessionId = parseIntParam(params.id, 'session id');
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-	const { cardsReviewed, cardsCorrect } = body;
-
-	if (!Number.isInteger(cardsReviewed) || cardsReviewed < 0 || cardsReviewed > 10000) {
-		throw error(400, 'cardsReviewed must be a non-negative integer (max 10000)');
-	}
-	if (!Number.isInteger(cardsCorrect) || cardsCorrect < 0 || cardsCorrect > cardsReviewed) {
-		throw error(400, 'cardsCorrect must be a non-negative integer <= cardsReviewed');
-	}
+	const { cardsReviewed, cardsCorrect } = await parseBody(request, finishDrillSessionSchema);
 
 	const now = new Date();
+
+	// Verify the session exists and check if the repertoire is locked.
+	const [sessCheck] = await db
+		.select({ repertoireId: drillSession.repertoireId })
+		.from(drillSession)
+		.where(and(eq(drillSession.id, sessionId), eq(drillSession.userId, userId)));
+
+	if (!sessCheck) throw error(404, 'Session not found');
+
+	if (await isRepertoireLocked(userId, sessCheck.repertoireId, user.tier ?? 'free')) {
+		throw error(403, 'This repertoire is read-only. Upgrade your plan to edit it.');
+	}
 
 	// Wrap in a transaction to prevent double-finalization from rapid duplicate
 	// submissions (e.g. user double-clicks "Finish"). The guard on completedAt

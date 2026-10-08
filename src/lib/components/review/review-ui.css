@@ -1,0 +1,117 @@
+/*
+ * Styles shared by the Review page and its components (ReviewInput, ReviewSaved):
+ * the button family and section labels. Namespaced under .review-ui (the page's
+ * root wrapper) so they cannot leak to other pages. Rule order matters: keep it.
+ */
+
+.review-ui {
+	display: contents;
+}
+
+.review-ui .btn--import {
+	flex: 1;
+	min-width: 180px;
+	padding: var(--space-2) var(--space-3);
+	border-radius: var(--radius-md);
+	border: 1px solid var(--color-border);
+	background: var(--color-base);
+	color: var(--color-text-secondary);
+	font-size: 0.82rem;
+	font-weight: 500;
+	cursor: pointer;
+	font-family: var(--font-body);
+	transition:
+		border-color var(--dur-fast) var(--ease-snap),
+		color var(--dur-fast) var(--ease-snap);
+}
+
+.review-ui .btn--import:hover:not(:disabled) {
+	border-color: var(--color-accent);
+	color: var(--color-text-primary);
+	box-shadow: var(--glow-accent);
+}
+
+.review-ui .btn--import:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.review-ui .btn--sm {
+	padding: 2px var(--space-2);
+	font-size: 0.72rem;
+	border-radius: var(--radius-sm);
+}
+
+.review-ui .btn--ghost {
+	background: transparent;
+	border-color: var(--color-border);
+	color: var(--color-text-muted);
+}
+
+.review-ui .btn--ghost:hover:not(:disabled) {
+	color: var(--color-text-secondary);
+	border-color: var(--color-text-muted);
+}
+
+/* ── Section label ──────────────────────────────────────────────────────── */
+
+.review-ui .section-label {
+	font-size: 11px;
+	font-weight: 700;
+	letter-spacing: 0.12em;
+	color: var(--color-text-muted);
+	text-transform: uppercase;
+}
+
+/* ── Shared button styles ───────────────────────────────────────────────── */
+
+.review-ui .btn {
+	display: block;
+	text-align: center;
+	padding: var(--space-2) var(--space-4);
+	border-radius: var(--radius-md);
+	font-size: 0.85rem;
+	font-weight: 600;
+	cursor: pointer;
+	text-decoration: none;
+	border: 1px solid transparent;
+	transition: filter var(--dur-fast) var(--ease-snap);
+	font-family: var(--font-body);
+}
+
+.review-ui .btn:hover:not(:disabled) {
+	filter: brightness(1.15);
+}
+
+.review-ui .btn:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.review-ui .btn--primary {
+	background: var(--color-accent);
+	border-color: var(--color-accent);
+	color: var(--color-base);
+}
+
+.review-ui .btn--primary:hover:not(:disabled) {
+	box-shadow: var(--glow-accent);
+}
+
+.review-ui .btn--secondary {
+	background: var(--color-surface);
+	border-color: var(--color-border);
+	color: var(--color-text-secondary);
+}
+
+.review-ui .btn--full {
+	width: 100%;
+	box-sizing: border-box;
+}
+
+/* ── Small phones (< 480px) ── --bp-sm */
+@media (max-width: 479px) {
+	.review-ui .btn--import {
+		min-width: 100%;
+	}
+}

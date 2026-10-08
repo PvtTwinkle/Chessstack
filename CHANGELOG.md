@@ -9,6 +9,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `EDITION` setting: `cloud` for chessstack.app, anything else (the default) for a self-hosted install. Self-hosted instances have no plan limits, send logged-out visitors to the login form instead of the public website, make the email optional at sign-up, hide billing and referrals, and create a default admin from `DEFAULT_USERNAME` / `DEFAULT_PASSWORD` on first run
+
+### Fixed
+
+- Databases created by the self-hosted edition (v1.0.0 to v1.3.1) can now be upgraded to this version: on startup Chessstack recognises their migration history, which used different numbering, and applies the migrations they are missing instead of failing to start
+- The engine no longer reports "Stockfish engine is not available" when its search threads take a few seconds to start, which happened in Firefox: Chessstack now waits for them as part of loading the engine
+- The in-browser engine's files are served without a login check, so the engine no longer fails to load when the browser doesn't send the session cookie with the engine's own requests
+- Engine suggestions and analysis now work in Firefox: when the multi-threaded engine can't start, Chessstack now switches to the single-threaded one (and remembers that for next time) instead of reporting the engine as unavailable
+
+### Changed
+
+- The Opening Trainer scores the final position of a game with the browser engine too, and the server uses that score for the result and the rating change
+- Review's game analysis (the accuracy colours for every move and the evaluations of a deviation and its repertoire move) now also runs in the browser engine
+- Engine suggestions on the Build and Prep pages (and in Review's issue picker) now run Stockfish 19 in your browser instead of on the server. It uses several CPU threads where the browser allows it and a single thread elsewhere, and downloads about 1.7 MB once. Every page now sends cross-origin isolation headers, which the multi-threaded engine needs
+- Engine analysis is no longer limited by plan: free accounts can now set Stockfish depth anywhere from 15 to 30, the same as paid ones. The paid plan still unlocks unlimited repertoires
+
+### Removed
+
+- The server no longer runs Stockfish: the Docker image drops Debian's Stockfish package, and `STOCKFISH_BIN` and `STOCKFISH_MAX_CONCURRENT` are gone. The opening book lookup moved from `/api/stockfish` to `/api/book`, and its rate limit is now `RATE_LIMIT_BOOK` (was `RATE_LIMIT_STOCKFISH`)
+- `scripts/lichess-recover.py`, which only applied to an older version of the Lichess import and dropped the whole players table as its first step. A crashed import resumes with `lichess-import.py --resume`, or `--finalize-only --start-bracket N` if it stopped during the final merge
+- Three empty placeholder modules (`src/lib/eco/`, `src/lib/fsrs/`, `src/lib/lichess/`) left over from early scaffolding, and the unused `@types/bcryptjs` package (bcryptjs ships its own types)
+
+### Security
+
+- The Docker build checks each downloaded reference-data dump against a SHA-256 checksum committed in `seed-checksums/`, and fails if a dump is missing or has changed, so a replaced release file can't reach the database. A failed download now also stops the build instead of only the last one
+- The Docker image now applies Debian security updates at build time, picking up the fix for `libpcre2-8-0` CVE-2026-103111 that the base image did not yet include
+- Cleared the remaining dependency advisories by forcing patched versions of two transitive packages: `cookie` 0.7.2 under SvelteKit (GHSA-pxg6-pf52-xh8x) and `esbuild` 0.25 under drizzle-kit's loader (GHSA-67mh-4wv8-2f99). Neither was exploitable here: cookie names, paths and domains are all constants, and the old esbuild was only used by the drizzle-kit CLI, never as a dev server
+
+---
+
+## [1.4.0] -- 2026-10-03
+
+This release was not published separately in this repository; its changes arrive with the next
+release.
+
+### Security
+
+- Email verification and password reset tokens are now stored as SHA-256 hashes and looked up with a single indexed query; previously every request bcrypt-compared against all outstanding tokens, an unauthenticated CPU exhaustion vector. Outstanding links issued before this change stop working (users request a new one)
+- Email verification and password reset tokens are redeemed atomically, so one link can no longer be used twice by concurrent requests
+- Patched all high-severity dependency advisories (SvelteKit 2.70.3, Svelte 5.57.1, Vite 8.3.2, devalue 5.9.4)
+- CI's npm audit now covers devDependencies, since SvelteKit, Svelte and devalue are bundled into the server despite being devDependencies
+- GitHub Actions pinned to commit SHAs and upgraded to current versions; workflows run with read-only permissions
+- Startup warning when `ORIGIN` is `https://` but `ADDRESS_HEADER` is unset (behind a proxy all clients would share one login rate limit)
+- Vulnerabilities are now reported privately (SECURITY.md) instead of through public GitHub issues
+
+### Added
+
+- The server logs at startup whether Sentry reporting is on for the server and the browser, the build logs whether source maps will be uploaded, and admins can trigger a test error at `/api/admin/sentry-test`
+- Optional error tracking with Sentry for server and browser errors, switched on by `SENTRY_DSN` / `PUBLIC_SENTRY_DSN` and off by default. Events carry no cookies, IPs, request bodies, query strings or emails. Source maps are uploaded at build time when `SENTRY_AUTH_TOKEN` is set
+- Every request gets an id, returned in the `X-Request-Id` header and shown on the error page for unexpected errors, so a bug report can be matched to the logs and the Sentry event
+- Reusable `<Seo>` head component (title, description, canonical, Open Graph, X cards, JSON-LD) and `$lib/seo` helpers, ready for new public sections such as opening guides
+- Static favicons (`/favicon.svg`, `/favicon-96x96.png`, `/favicon.ico`) that search engines can crawl
+- End-to-end tests for Review (6) and Drill (5) plus account deletion, and unit tests for review evaluation, drill line logic and admin helpers
+- Test suites: Vitest unit tests, database integration tests (rate limiting, tokens, referrals, checkout, Stripe webhook) and a Playwright end-to-end smoke test, all run in CI
+- `GET /api/health/ready` readiness endpoint that checks the database (HTTP 503 when unreachable) for uptime monitoring
+- Dependabot for npm packages, GitHub Actions and Docker base images
+- Opening trainer mode: practice openings against a computer that plays moves weighted by real game statistics, with Elo rating tracking
+- Saved starting positions for the opening trainer so you can jump straight into specific lines
+- Opening trainer step added to the onboarding tutorial
+
+### Changed
+
+- Every JSON API endpoint validates its request body against a shared schema, so malformed or out-of-range input always gets a 400 with a message naming the field
+- Server logs are now one JSON object per line with a timestamp, level and request id, plus one line per request (method, path, status, duration). Set `LOG_FORMAT=text` for the old human-readable style
+- Manrope is self-hosted instead of loaded from Google Fonts; the Content-Security-Policy no longer allows Google Fonts
+- Large pages split into focused components and tested modules: Settings (2095 → 1512 lines), Admin (1132 → 306), Review (3419 → 2232) and Drill (2733 → 2168), with cloud-only parts of Settings and Admin in their own components; verified with pixel-identical before/after screenshots
+- Runtime upgraded to Node.js 24 LTS (Docker image and CI); `@types/node` matches at v24
+- Stripe SDK upgraded from 20.4.1 to 22.6.2 (pinned Stripe API version 2026-08-26.dahlia)
+- SvelteKit 3 upgrade deferred until 3.x matures; migration plan in `docs/sveltekit-3-migration.md`
+- Replaced the deprecated Semgrep GitHub Action with the official Semgrep container
+- Updated dependencies: Vite 8, ESLint 10, Svelte 5.55, Drizzle 0.45.2
+
+### Fixed
+
+- PGN import no longer saves the rest of a line whose move you turned down at a conflict, which left stray moves in the repertoire that couldn't be reached from the start
+- Unknown URLs return 404 instead of redirecting logged-out visitors to the landing page (soft 404s in search)
+- Drill depth sections (Foundations / Mainlines / Deep Lines) now count cards by their real move number. Since positions were normalised to 4-field FENs (no move counters), every card was counted as move 1, so Mainlines and Deep Lines were always empty
+- `npm run dev` now loads `.env`; previously the documented local setup failed with "DATABASE_URL ... is required but not set"
+- Seed data restore no longer goes through a shell, so database passwords containing `$`, quotes or backticks work
+- A corrupt or truncated seed download is now detected and retried on the next start, instead of possibly leaving a half-loaded table that was never reloaded
+- Rate-limit documentation corrected to the actual 5-minute window and defaults
+- Fixed build mode locking up with 429 errors by increasing rate limits (120 req/5 min instead of 60 req/15 min) and adding 150ms debounce to all position-change API calls
+- Rate limit errors now show "Too many requests" instead of misleading "database unavailable" messages
+- Rate limit detection now works consistently across all candidate tabs (players, stars), not just book and masters
+- Review move list no longer expands the layout between the board and sidebar
+
 ---
 
 ## [1.3.1] -- 2026-04-30
@@ -130,6 +218,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Removed pricing section from the landing page — pricing is now only shown in-app under settings
+- Renamed hero CTA from "Get Started Free" to "Get Started"
 - FSRS config loading extracted into a shared helper — eliminates duplicated query logic across three API routes
 - FSRS instances are now cached by config key, avoiding redundant instantiation on repeated calls
 - Interval label computation calls `f.repeat()` once per card instead of three times (one per rating)
@@ -137,6 +227,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drill grade and fail-card API routes now load the card and FSRS config in parallel
 - Dockerfile no longer creates an empty placeholder for the Lichess dump file
 - PostgreSQL port exposed by default in docker-compose for easier local access
+- Replaced recursive per-move deletion with a single recursive CTE query + batch deletes — reduces N+1 DB roundtrips to 3 queries regardless of subtree size
+- Replaced `ORDER BY RANDOM()` puzzle selection with count + random offset — avoids full-table sort on large puzzle tables
+- Extracted `requireAuth()`, `requireAdmin()`, and `parseIntParam()` helpers into `api-helpers.ts` — eliminates boilerplate across 37 API routes
+- Centralised validation limits (`USERNAME_MIN/MAX_LENGTH`, `FEN_MAX_LENGTH`, `NOTES_MAX_LENGTH`, `MAX_CARDS_REVIEWED`) into `validation-limits.ts`
+- Migrated 3 routes from hardcoded FEN length checks to the shared `sanitizeFen()` helper
+- Named inline magic numbers: `SESSION_CLEANUP_INTERVAL_MS` in hooks, `STARTUP_DELAY_MS` in import scheduler
+- Added `upgrade-insecure-requests` to Content-Security-Policy header
+- Replaced app logo with new professional brand assets (pawn-on-stacked-layers icon) across all pages
+- Logo displays on a theme-aware rounded background (#f0efed in dark mode, #e4e2de in light mode)
+- Added `--color-logo-bg` design token for logo background color
+- Privacy Policy — replaced placeholder with formal legal template (Chessstack LLC), merged in app-specific details (chess data, third-party services, cookie specs, security measures)
+- Terms of Use — replaced placeholder with formal legal template (Chessstack LLC, Florida governing law), added IP rights, user representations, indemnification, and liability sections
+- Stronger password requirements — minimum 12 characters with uppercase, lowercase, number, and special character (enforced on registration, password change, and admin reset)
 
 ### Added
 
@@ -149,10 +252,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Link to the FSRS algorithm wiki in Settings for users who want to understand how scheduling works
 - **Players tab** in Build mode — shows the most popular moves played at each position, filtered by rating bracket (0–1000 through 2201–2400), sourced from the Lichess Open Database
 - Import script for Lichess game data — streams .pgn.zst files, supports incremental month-by-month imports, and exports a pg_dump for Docker distribution
+- OpenGraph meta tags (og:image, og:title, og:type) on the landing page for social sharing previews
+- Apple touch icon and theme-color meta tag in app.html
+- New logo assets: `logo-icon.svg` (favicon), `logo-icon-white.svg` (white variant), `og-image.png`, `apple-touch-icon.png`
+- Loops contact management — self-registered users are automatically added as contacts in Loops with their username and email
+- Changing email in settings updates the corresponding Loops contact
+- Admin can manually verify users from the admin panel (new "Verify" button next to unverified badge)
+- Verify-email page shows immediate error when the verification email fails to send
+- Verify-email page shows a reminder after 2 minutes if the email hasn't arrived
+- Support email (support@chessstack.app) — mailto links on email verification, forgot-password, reset-password, terms, privacy, landing footer, and settings pages
+- Custom error page — styled 404/403/500 page with friendly messages and a link back to the dashboard
+- Password reset via Loops — "Forgot password?" link on login page sends a reset email; tokens expire after 1 hour, single-use; all sessions invalidated on reset
+- New env var: `LOOPS_PASSWORD_RESET_ID` (requires a separate Loops transactional email template)
+- Email verification via Loops — new users must verify their email before accessing the app; admin-created users verify on first login
+- Verify-email page with resend button and rate limiting (3 per 15 min)
+- Graceful degradation — email verification is skipped when `LOOPS_API_KEY` is not set
+- "Unverified" badge on admin user cards for users who haven't verified their email
+- New env vars: `LOOPS_API_KEY`, `LOOPS_TRANSACTIONAL_ID`
+- Clickable upgrade links — "Upgrade" text in manage repertoires and Stockfish depth settings now links directly to the subscription section
+- Self-host recommendation in Settings — free-tier users see a callout with a link to the GitHub self-hosting guide
+- Required email for all new accounts — registration and admin user creation now require a unique email address
+- Email management in Settings — users can view and update their email from the Account section
+- Missing-email banner — existing users without an email see a persistent prompt linking to Settings
+- Self-service account deletion — users can delete their own account from Settings with password confirmation; cancels Stripe subscription, cascade-deletes all data, and redirects to landing page
+- Admin user search — filter users by username or email with a debounced search bar
+- Tier and subscription badges on admin user cards — shows Free/Paid tier, subscription status (Active, Past Due, Canceled), and email
+- Admin gift subscriptions — admins can gift paid access for 1 month, 1 year, or lifetime without Stripe; gifts are immune to Stripe webhook downgrades
+- Gift status on the Settings page — gifted users see "Gift" as their plan with expiry info instead of "Monthly"; visible even when Stripe is not configured
+- Pagination on the admin user list (50 users per page)
+- Self-hosting callout section on the landing page — encourages users to run Chessstack on their own hardware with a link to the GitHub repo
+- Landing page at `/landing` — hero section, feature overview, pricing comparison table, and footer with legal links; unauthenticated visitors are now redirected here instead of `/login`
+- Terms of Service page at `/terms` (placeholder content for legal counsel review)
+- Privacy Policy page at `/privacy` covering data collection, third-party services (Stripe, Lichess, Chess.com), GDPR rights, and cookies
+- Monthly and annual subscription plans — users can choose between $3/month or $30/year at checkout, with a plan picker on the Settings page showing both options and savings
+- `STRIPE_PRICE_ID_MONTHLY` and `STRIPE_PRICE_ID_ANNUAL` env vars replace the single `STRIPE_PRICE_ID`
+
+### Fixed
+
+- Registration page now uses the correct logo asset instead of an old hardcoded SVG icon
+- Chess.com import now surfaces archive fetch failures instead of silently returning 0 games — throws a clear error when all archives return non-200
+- Import endpoint returns a `reason` field (`no_new_games`, `no_games`, `all_skipped`) so the UI explains why 0 games were imported
+- Content-Security-Policy now allows Cloudflare beacon script and analytics reporting
+- Silent catch blocks in Lichess, Chess.com, and import scheduler now log warnings instead of swallowing errors
+- Email send failures now log with a greppable `[EMAIL_SEND_FAILURE]` tag and include userId/email context
+- Session expiry comment in schema said 30 days but code uses 14 days — updated comments to match
+- Admin user deletion not cancelling Stripe subscriptions — subscription DB row was deleted but the Stripe API was never called; now cancels before cascade-delete
+- Admin cascade delete missing `subscription` and `passwordResetToken` tables
+- Stockfish analysis hanging forever when `STOCKFISH_MAX_CONCURRENT` env var is empty — `parseInt("", 10)` produced `NaN`, permanently blocking the concurrency semaphore
+- Settings page showing "Monthly" for admin-gifted subscriptions that have no Stripe price ID
+
+### Removed
+
+- Old hand-crafted isometric favicon (`favicon.svg`)
+- Social media kit and JPG print files from logos directory
+
+### Security
+
+- Added 1 MB size limit on PGN imports (server returns 413, client shows error before sending)
+
+### Performance
+
+- Added database indexes on `user_id` for 8 user tables (`user_settings`, `repertoire`, `user_move`, `user_repertoire_move`, `reviewed_game`, `drill_session`, `password_reset_token`, `email_verification_token`) — prevents sequential scans as data grows
 - "Analyze on Lichess" link in Build mode — opens the current position on Lichess for deeper analysis
 
 ### Changed
 
+- Checkout endpoint now accepts a `plan` parameter (`monthly` or `annual`) in the request body
+- Settings page shows which billing interval (Monthly/Annual) the user is on instead of just "Paid"
 - Dockerfile now downloads seed data dumps from GitHub Releases during build — Railway, CI, and local builds all work without needing the dump files in the repo
 - Release workflow simplified — seed download step removed since the Dockerfile handles it
 - Removed unused `resulting_fen` column from the celebrity moves table — simplifies storage and import scripts
@@ -166,6 +332,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gap finder default threshold raised from 1,000 to 10,000 master games — less noise out of the box
 - Build sidebar is more compact — repertoire tree starts collapsed (click to expand), action buttons consolidated into a single row of chips, and Import/Export PGN moved into a "⋯" overflow menu
 - Dependency updates — patched prototype pollution vulnerabilities in devalue and flatted, plus minor bumps to SvelteKit, Svelte, Drizzle Kit, ts-fsrs, and typescript-eslint
+
+---
+
+- Repertoire locking for cancelled subscriptions — when a user's tier reverts to free, only their first (oldest) repertoire remains active; additional repertoires become read-only with export and delete still available
+- Server-only tier helpers (`tiers.server.ts`) for DB-backed repertoire lock checks on all write API endpoints
+- Locked repertoire indicators in the manage modal with "Read-only" badge and upgrade prompt
+- Stripe billing integration — users can upgrade from free to paid via Stripe Checkout, manage billing (cancel, update payment, view invoices) via Stripe Customer Portal, and webhooks keep the subscription table in sync
+- Billing UI on the Settings page — shows current plan, upgrade button (free tier), manage billing button (paid tier), cancellation notices, payment failure warnings, and post-checkout confirmation
+- `billingEnabled` layout flag — hides the billing section when Stripe is not configured
+- First-user admin bootstrap — the first account registered on a fresh database is automatically promoted to admin
+- Subscription schema — `subscription` and `password_reset_token` tables, plus `email` and `stripe_customer_id` columns on user
+- Tier model — every authenticated request loads the user's tier (`free` or `paid`) from the database and passes it to all pages
+- Tier constants (`src/lib/stripe/tiers.ts`) defining per-tier limits for repertoires and Stockfish depth
+- Tier enforcement — free users are hard-capped at Stockfish depth 15 (stream + settings save endpoints) and 1 repertoire (modal shows upgrade message at limit); settings slider dynamically reflects tier max
+- Audit log table — all admin actions (create, update, delete, password reset) are recorded with admin and target user IDs
+- CORS configuration — allowlist of permitted origins via `CORS_ORIGINS` env var
+- Expired session cleanup — stale sessions are automatically pruned every 6 hours
+- Per-user rate limiting on expensive endpoints — Stockfish analysis (single, batch, stream), game imports, and game analysis are all rate-limited per user with configurable thresholds via env vars
+- Missing `rate_limit` table migration added to 0018
+
+### Changed
+
+- Docker Compose now reads all environment variables from `.env` via interpolation instead of hardcoding values — added passthrough for Stripe, CORS, rate limit, and other vars
+- Seed data path is now configurable via `SEED_DATA_PATH` env var
+- Rate limiting moved from in-memory to database-backed sliding window for multi-instance support
+- Secure cookie flag is now derived from ORIGIN (https = secure, http = plain) instead of being hardcoded to true
+- Session cookie `sameSite` changed from `strict` to `lax` so sessions survive external redirects (Stripe checkout/portal return)
+- CSP header updated to allow SvelteKit inline scripts and Google Fonts
+
+### Fixed
+
+- Health check endpoint no longer queries the database, preventing false failures when the DB is slow
+- Import scheduler now uses a PostgreSQL advisory lock to prevent duplicate runs across multiple instances
+- Stripe cancellation detection now checks both `cancel_at_period_end` and `cancel_at` fields
+
+### Security
+
+- Removed default admin account auto-creation — first user must be created explicitly
+- Removed hardcoded database credentials from Docker Compose
+- `DATABASE_URL` is now required — removed silent localhost fallback that could mask misconfiguration
+- Login rate limiting — 10 attempts per 15 minutes per IP
+- Registration rate limiting — 5 attempts per hour per IP
+- Stockfish concurrency semaphore — limits parallel engine processes to prevent CPU exhaustion
+- Cookie settings hardened — `Secure` (when HTTPS), `SameSite=Strict`, 14-day max session lifetime
+- Error logging sanitized — server hooks no longer log request bodies, query params, or full error objects
+- HSTS header added (2-year max-age with includeSubDomains) and security headers updated
+- Stripe webhook endpoint authenticated via signature verification, not session cookies
 
 ---
 
@@ -388,7 +601,8 @@ game review, puzzle training, and a local masters database — all running offli
 
 ---
 
-[Unreleased]: https://github.com/PvtTwinkle/Chessstack/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/PvtTwinkle/chessstack/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/PvtTwinkle/chessstack/releases/tag/v1.4.0
 [1.3.1]: https://github.com/PvtTwinkle/Chessstack/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/PvtTwinkle/Chessstack/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/PvtTwinkle/Chessstack/compare/v1.2.1...v1.2.2

@@ -16,23 +16,35 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: these jobs only read the repository.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same branch/PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ── Job 1: Fast security scans ─────────────────────────────────────────────
   security-checks:
     name: Security Scans
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # gitleaks lists the commits of a PR
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history needed for Gitleaks to scan all commits
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
 
       - name: Install dependencies
@@ -40,36 +52,47 @@ jobs:
 
       # ── Secret scanning ────────────────────────────────────────────────────
       - name: Gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: false # would need pull-requests: write; the failed check is enough
 
       # ── Dependency audit ────────────────────────────────────────────────────
+      # Audits devDependencies too: svelte, @sveltejs/kit and devalue are
+      # listed as devDependencies but are bundled into the server build, so
+      # --omit=dev would hide vulnerabilities that ship to production.
       - name: npm audit
-        run: npm audit --omit=dev
+        run: npm audit --audit-level=high
 
       # ── ESLint security rules ───────────────────────────────────────────────
       - name: ESLint security check
         run: npm run lint:security
 
       # ── License compliance ──────────────────────────────────────────────────
+      # `sentry` (the Sentry CLI, pulled in by @sentry/sveltekit's build plugin)
+      # is FSL-1.1-Apache-2.0: source-available, each release turning Apache-2.0
+      # after two years. It only runs at build time to upload source maps and is
+      # never part of the app, so it is excluded by name at whatever version is
+      # installed.
       - name: License compliance check
         run: >-
           npx license-checker
           --excludePrivatePackages
+          --excludePackages "sentry@$(node -p "require('./node_modules/sentry/package.json').version")"
           --onlyAllow 'MIT;ISC;BSD-2-Clause;BSD-3-Clause;Apache-2.0;MPL-2.0;GPL-3.0-or-later;Python-2.0;Unlicense;CC0-1.0;CC-BY-3.0;CC-BY-4.0;BlueOak-1.0.0;(MIT OR WTFPL);(MIT AND CC-BY-3.0);(BSD-2-Clause OR MIT OR Apache-2.0)'
 
       # ── Semgrep SAST ────────────────────────────────────────────────────────
+      # Runs the official Semgrep container (the old returntocorp/semgrep-action
+      # is deprecated). Pinned by digest; bump the tag + digest together.
       - name: Semgrep SAST
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: >-
-            p/javascript
-            p/typescript
+        run: >-
+          docker run --rm -v "${{ github.workspace }}:/src" -w /src
+          semgrep/semgrep:1.178.0@sha256:32e459968daabe7ab86968184a29109b9564aa00392401156f9788452b42786b
+          semgrep scan --config p/javascript --config p/typescript --error --metrics=off
 
       # ── Trivy config scan (Dockerfiles, docker-compose) ─────────────────────
       - name: Trivy config scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: 'config'
           scan-ref: '.'
@@ -84,22 +107,13 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
-      # The seed dump files (~200 MB) are not committed to the repo — they
-      # ship inside the published Docker image only. Create empty gzipped
-      # placeholders so the Dockerfile COPY succeeds. The image scan only
-      # needs a valid build, not real seed data.
-      - name: Create placeholder seed dumps
-        run: |
-          gzip -n < /dev/null > chessmont-moves-dump.sql.gz
-          gzip -n < /dev/null > puzzles-dump.sql.gz
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build Docker image
         run: docker build -t chessstack:ci-scan .
 
       - name: Trivy image scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: 'chessstack:ci-scan'
           severity: 'HIGH,CRITICAL'

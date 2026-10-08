@@ -4,7 +4,7 @@
 //   1. Opens a connection to the PostgreSQL database
 //   2. Runs any pending migrations — creates all tables on first run,
 //      applies only new migrations on subsequent runs
-//   3. Creates a default user if no user exists yet
+//   3. Creates a default admin if no user exists yet (self-hosted edition only)
 //   4. Exports the `db` object that every other file uses to query the database
 //
 // IMPORTANT: The connection and initialization are lazy — they only happen when
@@ -16,30 +16,36 @@
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
-import { count } from 'drizzle-orm';
-import bcrypt from 'bcryptjs';
 import path from 'path';
+import bcrypt from 'bcryptjs';
+import { count } from 'drizzle-orm';
 import * as schema from './schema';
-import { user } from './schema';
 import { loadSeedData } from './seed-data';
+import { bridgeSelfHostedMigrations } from './migration-bridge';
+import { log } from '$lib/server/log';
+import { IS_CLOUD } from '$lib/server/edition';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration via environment variables
 //
-// DATABASE_URL:    PostgreSQL connection string.
-//                 Development default: postgresql://chessstack:chessstack@localhost:5432/chessstack
-//                 Docker: set in docker-compose.yml pointing to the postgres service.
+// DATABASE_URL:    PostgreSQL connection string (required).
+//                 Set in .env or docker-compose.yml.
 //
-// DEFAULT_USERNAME: Username for the automatically created first user.
-//                 Default: "admin"
-//
-// DEFAULT_PASSWORD: Password for the automatically created first user.
-//                 Default: "changeme"
-//                 IMPORTANT: Change this in production via docker-compose.yml.
+// DEFAULT_USERNAME / DEFAULT_PASSWORD: the admin account a self-hosted
+//                 instance creates on first run (default admin / changeme).
+//                 Not used by the cloud edition.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const DATABASE_URL =
-	process.env.DATABASE_URL ?? 'postgresql://chessstack:chessstack@localhost:5432/chessstack';
+function getDatabaseUrl(): string {
+	const url = process.env.DATABASE_URL;
+	if (!url) {
+		throw new Error(
+			'[chessstack] DATABASE_URL environment variable is required but not set. ' +
+				'See .env.example for the expected format.'
+		);
+	}
+	return url;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Lazy connection — the postgres.js client and Drizzle instance are created on
@@ -48,15 +54,22 @@ const DATABASE_URL =
 // ─────────────────────────────────────────────────────────────────────────────
 
 let _db: ReturnType<typeof drizzle<typeof schema>> | null = null;
+let _sql: ReturnType<typeof postgres> | null = null;
 
 export function getDb() {
 	if (!_db) {
-		const sql = postgres(DATABASE_URL, {
+		_sql = postgres(getDatabaseUrl(), {
 			onnotice: () => {} // suppress PostgreSQL NOTICE messages (e.g. "already exists" from migrations)
 		});
-		_db = drizzle(sql, { schema });
+		_db = drizzle(_sql, { schema });
 	}
 	return _db;
+}
+
+// Raw SQL client for operations Drizzle doesn't support (e.g. advisory locks).
+export function getRawSql() {
+	if (!_sql) getDb(); // ensure connection is initialized
+	return _sql!;
 }
 
 // Re-export as `db` for convenience. Every call goes through the lazy getter.
@@ -88,37 +101,52 @@ export const dbReady: Promise<void> = {
 async function initDatabase(): Promise<void> {
 	const realDb = getDb();
 
+	const migrationsFolder = path.join(process.cwd(), 'drizzle', 'migrations');
+
+	// A database created by the self-hosted edition records its migrations
+	// under the old numbering; the bridge rewrites that record first so that
+	// migrate() below sees the same history as on any other database.
+	const bridge = await bridgeSelfHostedMigrations(getRawSql(), migrationsFolder);
+	if (bridge.status === 'bridged') {
+		log.info('Upgraded self-hosted migration history.', {
+			redated: bridge.redated,
+			applied: bridge.applied
+		});
+	}
+
 	// migrate() checks which migration files have already been applied and runs
 	// only the ones that have not run yet. On first run it creates all tables.
-	await migrate(realDb, {
-		migrationsFolder: path.join(process.cwd(), 'drizzle', 'migrations')
-	});
-	console.log('[chessstack] Database migrations complete.');
+	await migrate(realDb, { migrationsFolder });
+	log.info('Database migrations complete.');
 
 	// Seed large reference tables (masters + puzzles) from embedded dump files.
 	// Skips silently in local dev (no dump files) or if tables already have data.
 	await loadSeedData();
 
-	// Default user creation — same logic as before, now async.
-	const [existingUserCount] = await realDb.select({ count: count() }).from(user);
+	// The cloud edition creates no account: the first person to register becomes
+	// admin. A self-hosted instance usually runs in invite mode, where nobody
+	// could register, so it starts with a default admin as it always has.
+	if (!IS_CLOUD) await createDefaultAdmin(realDb);
+}
 
-	if (existingUserCount && existingUserCount.count === 0) {
-		const username = process.env.DEFAULT_USERNAME ?? 'admin';
-		const password = process.env.DEFAULT_PASSWORD ?? 'changeme';
+/** Creates the self-hosted edition's first account, unless any account exists. */
+export async function createDefaultAdmin(realDb: ReturnType<typeof getDb>): Promise<void> {
+	const [{ total }] = await realDb.select({ total: count() }).from(schema.user);
+	if (total > 0) return;
 
-		// Hash the password before storing it. The number 10 is the cost factor.
-		const passwordHash = await bcrypt.hash(password, 10);
+	const username = process.env.DEFAULT_USERNAME ?? 'admin';
+	const password = process.env.DEFAULT_PASSWORD ?? 'changeme';
+	await realDb.insert(schema.user).values({
+		username,
+		passwordHash: await bcrypt.hash(password, 10),
+		role: 'admin',
+		createdAt: new Date()
+	});
 
-		await realDb.insert(user).values({
-			username,
-			passwordHash,
-			role: 'admin', // first user is always admin
-			createdAt: new Date()
-		});
-
-		console.log(`[chessstack] Default user "${username}" created on first run.`);
-		console.log(
-			'[chessstack] Set DEFAULT_USERNAME and DEFAULT_PASSWORD environment variables to customise this.'
+	log.info('Created the default admin account.', { username });
+	if (!process.env.DEFAULT_PASSWORD) {
+		log.warn(
+			'The default admin uses the password "changeme". Set DEFAULT_PASSWORD, or change it in Settings after signing in.'
 		);
 	}
 }

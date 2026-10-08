@@ -12,41 +12,37 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { userRepertoireMove } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { gradeCard, Rating } from '$lib/fsrs';
+import { gradeCard } from '$lib/fsrs';
+import { isRepertoireLocked } from '$lib/stripe/tiers.server';
+import { requireAuth } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { gradeCardSchema } from '$lib/server/schemas/drill';
 import { loadFsrsConfig } from '$lib/server/fsrs-config';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-	const { cardId, rating } = body;
-
-	// Validate inputs.
-	if (typeof cardId !== 'number') throw error(400, 'cardId must be a number');
-	if (![Rating.Again, Rating.Good, Rating.Easy].includes(rating)) {
-		throw error(400, 'rating must be 1 (Forgot), 3 (Unsure), or 4 (Easy)');
-	}
+	const { cardId, rating } = await parseBody(request, gradeCardSchema);
 
 	// Load card + FSRS config in parallel — they are independent queries.
 	const [cardRows, fsrsConfig] = await Promise.all([
 		db
 			.select()
 			.from(userRepertoireMove)
-			.where(and(eq(userRepertoireMove.id, cardId), eq(userRepertoireMove.userId, locals.user.id))),
-		loadFsrsConfig(locals.user.id)
+			.where(and(eq(userRepertoireMove.id, cardId), eq(userRepertoireMove.userId, user.id))),
+		loadFsrsConfig(user.id)
 	]);
 
 	const card = cardRows[0];
 	if (!card) throw error(404, 'Card not found');
 
+	if (await isRepertoireLocked(user.id, card.repertoireId, user.tier ?? 'free')) {
+		throw error(403, 'This repertoire is read-only. Upgrade your plan to edit it.');
+	}
+
 	// Run the FSRS algorithm to get the updated memory state.
 	const now = new Date();
-	const updated = gradeCard(card, rating as Rating, now, fsrsConfig);
+	const updated = gradeCard(card, rating, now, fsrsConfig);
 
 	// Write the new state back to the database.
 	await db.update(userRepertoireMove).set(updated).where(eq(userRepertoireMove.id, cardId));

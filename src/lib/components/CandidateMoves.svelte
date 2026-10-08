@@ -9,7 +9,7 @@
 	  • Masters — Chessmont master game statistics & W/D/L stats (instant, local DB)
 	  • Stars — moves from specific famous players like Magnus, Fischer, etc. (instant, local DB)
 	  • Players — Lichess player game statistics by rating bracket (instant, local DB)
-	  • Engine — Stockfish top-N analysis (~2-10s)
+	  • Engine — Stockfish top-N analysis, run in the browser ($lib/engine)
 
 	Five tabs switch between the sources. Book tab is shown first; if there
 	are no book moves the Masters tab is activated automatically, then Stars,
@@ -27,7 +27,12 @@
 -->
 
 <script lang="ts">
+	import { untrack } from 'svelte';
+	import { page } from '$app/state';
 	import { RATING_BRACKETS, DEFAULT_BRACKET_ID } from '$lib/ratings';
+	import { getEngine, type EngineMove } from '$lib/engine/engine';
+	import { candidateCount, toCandidates } from '$lib/engine/candidates';
+	import { engineSettings } from '$lib/engine/settings';
 
 	interface Candidate {
 		san: string;
@@ -96,6 +101,13 @@
 		starsPlayerSlug = null,
 		onStarsSettingsChanged
 	}: Props = $props();
+
+	// ── Shared rate-limit state ───────────────────────────────────────────────
+	const DEBOUNCE_MS = 150;
+
+	// Engine candidates shown in the Engine tab.
+	const ENGINE_MOVES = 3;
+	let rateLimited = $state(false);
 
 	// ── Book state ────────────────────────────────────────────────────────────
 	let bookCandidates = $state<Candidate[]>([]);
@@ -256,100 +268,104 @@
 		// Reset user-click flag so auto-cascade can fire if the current tab is empty.
 		userClickedTab = false;
 
-		fetch('/api/stockfish', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ fen, mode: 'book' }),
-			signal: controller.signal
-		})
-			.then((res) => {
-				if (!res.ok) throw new Error('Book fetch failed');
-				return res.json();
+		const timer = setTimeout(() => {
+			fetch('/api/book', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ fen }),
+				signal: controller.signal
 			})
-			.then((data) => {
-				bookCandidates = (data.candidates as Candidate[]).filter((c) => c.isBook);
-				// Auto-switch to masters if no book moves and user hasn't clicked a tab.
-				// Masters is now instant (local DB), so cascade: book → masters → engine.
-				if (bookCandidates.length === 0 && activeTab === 'book' && !userClickedTab) {
-					activeTab = 'masters';
-				}
-			})
-			.catch((err) => {
-				if (err.name !== 'AbortError') bookError = true;
-			})
-			.finally(() => {
-				if (!controller.signal.aborted) bookLoading = false;
-			});
+				.then((res) => {
+					if (res.status === 429) {
+						rateLimited = true;
+						throw new Error('Rate limited');
+					}
+					rateLimited = false;
+					if (!res.ok) throw new Error('Book fetch failed');
+					return res.json();
+				})
+				.then((data) => {
+					bookCandidates = data.candidates as Candidate[];
+					// Auto-switch to masters if no book moves and user hasn't clicked a tab.
+					// Masters is now instant (local DB), so cascade: book → masters → engine.
+					if (bookCandidates.length === 0 && activeTab === 'book' && !userClickedTab) {
+						activeTab = 'masters';
+					}
+				})
+				.catch((err) => {
+					if (err.name !== 'AbortError') bookError = true;
+				})
+				.finally(() => {
+					if (!controller.signal.aborted) bookLoading = false;
+				});
+		}, DEBOUNCE_MS);
 
 		return () => {
+			clearTimeout(timer);
 			controller.abort();
 		};
 	});
 
-	// ── Engine stream — progressive Stockfish analysis via SSE ────────────────
-	// Opens a Server-Sent Events connection that yields eval updates at each
-	// search depth. The eval bar and candidate list update live as the engine
-	// searches deeper — no more waiting for the full analysis to finish.
+	// ── Engine — progressive Stockfish analysis in the browser ────────────────
+	// The engine runs in a Web Worker ($lib/engine) and reports each completed
+	// depth, so the eval bar and candidate list update live as it searches
+	// deeper. Debounced so stepping quickly through a line doesn't start (and
+	// immediately cancel) a search for every position.
 	$effect(() => {
 		const fen = currentFen;
-		const params = new URLSearchParams({ fen });
-		const es = new EventSource(`/api/stockfish/stream?${params}`);
+		const controller = new AbortController();
+		// Read without tracking: settings refresh on every invalidateAll(), which
+		// shouldn't restart the search for the same position.
+		const { depth, timeoutMs } = engineSettings(untrack(() => page.data.settings));
 
 		engineLoading = true;
 		engineError = false;
 		engineCandidates = [];
 		engineDepth = 0;
-		engineMaxDepth = 0;
+		engineMaxDepth = depth;
 
-		es.onmessage = (event) => {
-			try {
-				const data = JSON.parse(event.data) as {
-					depth: number;
-					maxDepth: number;
-					candidates: Array<{
-						san: string;
-						uci: string;
-						evalCp: number | null;
-						evalMate: number | null;
-					}>;
-					done: boolean;
-				};
+		const showUpdate = (moves: EngineMove[], reachedDepth: number) => {
+			engineCandidates = toCandidates(fen, moves).map((c) => ({
+				...c,
+				isBook: false,
+				annotation: null,
+				openingName: null
+			}));
+			engineDepth = reachedDepth;
+		};
 
-				// Map streaming candidates to the full Candidate shape used by the UI.
-				engineCandidates = data.candidates.map((c) => ({
-					...c,
-					isBook: false,
-					annotation: null,
-					openingName: null
-				}));
-				engineDepth = data.depth;
-				engineMaxDepth = data.maxDepth;
-				engineAvailable = data.candidates.length > 0;
-
-				if (data.done) {
+		const timer = setTimeout(() => {
+			getEngine()
+				.analyse({
+					fen,
+					depth,
+					numMoves: candidateCount(fen, ENGINE_MOVES),
+					timeoutMs,
+					signal: controller.signal,
+					onUpdate: (update) => showUpdate(update.moves, update.depth)
+				})
+				.then((result) => {
+					if (controller.signal.aborted) return;
+					engineAvailable = result.available;
+					if (result.moves.length > 0) showUpdate(result.moves, result.depth);
 					engineLoading = false;
-					es.close();
-				}
-			} catch {
-				// Malformed event — ignore and wait for the next one.
-			}
-		};
-
-		es.onerror = () => {
-			engineError = true;
-			engineLoading = false;
-			es.close();
-		};
+				})
+				.catch(() => {
+					if (controller.signal.aborted) return;
+					engineError = true;
+					engineLoading = false;
+				});
+		}, DEBOUNCE_MS);
 
 		return () => {
-			es.close();
+			clearTimeout(timer);
+			controller.abort();
 		};
 	});
 
 	// ── Masters fetch — local Chessmont DB, instant response ─────────────────
 	// Fetches move statistics from the local chessmont_moves table when the
-	// Masters tab is active. No debounce or rate limiting needed — the query
-	// hits the local PostgreSQL database directly.
+	// Masters tab is active. Debounced to avoid burning rate limits.
 	$effect(() => {
 		const fen = currentFen;
 		const tab = activeTab;
@@ -368,28 +384,36 @@
 		mastersError = false;
 		mastersMoves = [];
 
-		fetch(`/api/masters?fen=${encodeURIComponent(fen)}`, {
-			signal: controller.signal
-		})
-			.then((res) => {
-				if (!res.ok) throw new Error('Masters fetch failed');
-				return res.json();
+		const timer = setTimeout(() => {
+			fetch(`/api/masters?fen=${encodeURIComponent(fen)}`, {
+				signal: controller.signal
 			})
-			.then((data) => {
-				mastersMoves = data.moves ?? [];
-				// Auto-cascade to stars if masters also empty and user hasn't clicked.
-				if (mastersMoves.length === 0 && !userClickedTab) {
-					activeTab = 'stars';
-				}
-			})
-			.catch((err) => {
-				if (err.name !== 'AbortError') mastersError = true;
-			})
-			.finally(() => {
-				if (!controller.signal.aborted) mastersLoading = false;
-			});
+				.then((res) => {
+					if (res.status === 429) {
+						rateLimited = true;
+						throw new Error('Rate limited');
+					}
+					rateLimited = false;
+					if (!res.ok) throw new Error('Masters fetch failed');
+					return res.json();
+				})
+				.then((data) => {
+					mastersMoves = data.moves ?? [];
+					// Auto-cascade to stars if masters also empty and user hasn't clicked.
+					if (mastersMoves.length === 0 && !userClickedTab) {
+						activeTab = 'stars';
+					}
+				})
+				.catch((err) => {
+					if (err.name !== 'AbortError') mastersError = true;
+				})
+				.finally(() => {
+					if (!controller.signal.aborted) mastersLoading = false;
+				});
+		}, DEBOUNCE_MS);
 
 		return () => {
+			clearTimeout(timer);
 			controller.abort();
 		};
 	});
@@ -397,6 +421,7 @@
 	// ── Players fetch — local Lichess DB, instant response ───────────────────
 	// Fetches move statistics from the local lichess_moves table when the
 	// Players tab is active. Re-fetches when the rating bracket changes.
+	// Debounced to avoid burning rate limits.
 	$effect(() => {
 		const fen = currentFen;
 		const tab = activeTab;
@@ -416,28 +441,36 @@
 		playersError = false;
 		playersMoves = [];
 
-		fetch(`/api/players?fen=${encodeURIComponent(fen)}&rating=${rating}`, {
-			signal: controller.signal
-		})
-			.then((res) => {
-				if (!res.ok) throw new Error('Players fetch failed');
-				return res.json();
+		const timer = setTimeout(() => {
+			fetch(`/api/players?fen=${encodeURIComponent(fen)}&rating=${rating}`, {
+				signal: controller.signal
 			})
-			.then((data) => {
-				playersMoves = data.moves ?? [];
-				// Auto-cascade to engine if players also empty and user hasn't clicked.
-				if (playersMoves.length === 0 && !userClickedTab) {
-					activeTab = 'engine';
-				}
-			})
-			.catch((err) => {
-				if (err.name !== 'AbortError') playersError = true;
-			})
-			.finally(() => {
-				if (!controller.signal.aborted) playersLoading = false;
-			});
+				.then((res) => {
+					if (res.status === 429) {
+						rateLimited = true;
+						throw new Error('Rate limited');
+					}
+					rateLimited = false;
+					if (!res.ok) throw new Error('Players fetch failed');
+					return res.json();
+				})
+				.then((data) => {
+					playersMoves = data.moves ?? [];
+					// Auto-cascade to engine if players also empty and user hasn't clicked.
+					if (playersMoves.length === 0 && !userClickedTab) {
+						activeTab = 'engine';
+					}
+				})
+				.catch((err) => {
+					if (err.name !== 'AbortError') playersError = true;
+				})
+				.finally(() => {
+					if (!controller.signal.aborted) playersLoading = false;
+				});
+		}, DEBOUNCE_MS);
 
 		return () => {
+			clearTimeout(timer);
 			controller.abort();
 		};
 	});
@@ -445,6 +478,7 @@
 	// ── Stars fetch — local celebrity DB, instant response ───────────────────
 	// Fetches move statistics for a specific famous player when the Stars tab
 	// is active. Re-fetches when the selected player changes.
+	// Debounced to avoid burning rate limits.
 	$effect(() => {
 		const fen = currentFen;
 		const tab = activeTab;
@@ -472,28 +506,36 @@
 		starsError = false;
 		starsMoves = [];
 
-		fetch(`/api/stars?fen=${encodeURIComponent(fen)}&player=${encodeURIComponent(player)}`, {
-			signal: controller.signal
-		})
-			.then((res) => {
-				if (!res.ok) throw new Error('Stars fetch failed');
-				return res.json();
+		const timer = setTimeout(() => {
+			fetch(`/api/stars?fen=${encodeURIComponent(fen)}&player=${encodeURIComponent(player)}`, {
+				signal: controller.signal
 			})
-			.then((data) => {
-				starsMoves = data.moves ?? [];
-				// Auto-cascade to players if stars also empty and user hasn't clicked.
-				if (starsMoves.length === 0 && !userClickedTab) {
-					activeTab = 'players';
-				}
-			})
-			.catch((err) => {
-				if (err.name !== 'AbortError') starsError = true;
-			})
-			.finally(() => {
-				if (!controller.signal.aborted) starsLoading = false;
-			});
+				.then((res) => {
+					if (res.status === 429) {
+						rateLimited = true;
+						throw new Error('Rate limited');
+					}
+					rateLimited = false;
+					if (!res.ok) throw new Error('Stars fetch failed');
+					return res.json();
+				})
+				.then((data) => {
+					starsMoves = data.moves ?? [];
+					// Auto-cascade to players if stars also empty and user hasn't clicked.
+					if (starsMoves.length === 0 && !userClickedTab) {
+						activeTab = 'players';
+					}
+				})
+				.catch((err) => {
+					if (err.name !== 'AbortError') starsError = true;
+				})
+				.finally(() => {
+					if (!controller.signal.aborted) starsLoading = false;
+				});
+		}, DEBOUNCE_MS);
 
 		return () => {
+			clearTimeout(timer);
 			controller.abort();
 		};
 	});
@@ -629,7 +671,9 @@
 		{#if bookLoading}
 			<div class="loading">Loading book…</div>
 		{:else if bookError}
-			<p class="empty-hint">Could not load book moves.</p>
+			<p class="empty-hint">
+				{rateLimited ? 'Too many requests — please wait a moment.' : 'Could not load book moves.'}
+			</p>
 		{:else if bookCandidates.length === 0}
 			<p class="empty-hint">No book moves at this position.</p>
 		{:else}
@@ -666,7 +710,11 @@
 		{#if mastersLoading}
 			<div class="loading">Loading masters…</div>
 		{:else if mastersError}
-			<p class="empty-hint">Masters database unavailable.</p>
+			<p class="empty-hint">
+				{rateLimited
+					? 'Too many requests — please wait a moment.'
+					: 'Masters database unavailable.'}
+			</p>
 		{:else if mastersMoves.length === 0}
 			<p class="empty-hint">No master games from this position.</p>
 		{:else}
@@ -702,7 +750,9 @@
 		{#if starsLoading}
 			<div class="loading">Loading stars…</div>
 		{:else if starsError}
-			<p class="empty-hint">Stars database unavailable.</p>
+			<p class="empty-hint">
+				{rateLimited ? 'Too many requests — please wait a moment.' : 'Stars database unavailable.'}
+			</p>
 		{:else if starsPlayers.length === 0}
 			<p class="empty-hint">No player data imported yet.</p>
 		{:else if starsMoves.length === 0}
@@ -734,7 +784,11 @@
 		{#if playersLoading}
 			<div class="loading">Loading players…</div>
 		{:else if playersError}
-			<p class="empty-hint">Players database unavailable.</p>
+			<p class="empty-hint">
+				{rateLimited
+					? 'Too many requests — please wait a moment.'
+					: 'Players database unavailable.'}
+			</p>
 		{:else if playersMoves.length === 0}
 			<p class="empty-hint">No player games from this position.</p>
 		{:else}
@@ -747,7 +801,11 @@
 
 		<!-- ── Engine tab content ────────────────────────────────────────────── -->
 	{:else if engineError}
-		<p class="empty-hint">Could not load engine suggestions.</p>
+		<p class="empty-hint">
+			{rateLimited
+				? 'Too many requests — please wait a moment.'
+				: 'Could not load engine suggestions.'}
+		</p>
 	{:else if engineLoading && engineCandidates.length === 0}
 		<div class="loading">Analysing…</div>
 	{:else if !engineLoading && engineCandidates.length === 0}

@@ -1,0 +1,1654 @@
+{
+	"id": "05722f6a-e9b0-458a-ad71-ba1bca343508",
+	"prevId": "caa80578-957a-473f-a73c-ffeb3ab42b5d",
+	"version": "7",
+	"dialect": "postgresql",
+	"tables": {
+		"public.audit_log": {
+			"name": "audit_log",
+			"schema": "",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "serial",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"admin_user_id": {
+					"name": "admin_user_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"action": {
+					"name": "action",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"target_user_id": {
+					"name": "target_user_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"details": {
+					"name": "details",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"created_at": {
+					"name": "created_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.book_move": {
+			"name": "book_move",
+			"schema": "",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "serial",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"from_fen": {
+					"name": "from_fen",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"to_fen": {
+					"name": "to_fen",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"san": {
+					"name": "san",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"annotation": {
+					"name": "annotation",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"contributor": {
+					"name": "contributor",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				}
+			},
+			"indexes": {
+				"idx_book_move_from_fen": {
+					"name": "idx_book_move_from_fen",
+					"columns": [
+						{
+							"expression": "from_fen",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						}
+					],
+					"isUnique": false,
+					"concurrently": false,
+					"method": "btree",
+					"with": {}
+				}
+			},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {
+				"book_move_from_fen_san_unique": {
+					"name": "book_move_from_fen_san_unique",
+					"nullsNotDistinct": false,
+					"columns": ["from_fen", "san"]
+				}
+			},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.book_position": {
+			"name": "book_position",
+			"schema": "",
+			"columns": {
+				"fen": {
+					"name": "fen",
+					"type": "text",
+					"primaryKey": true,
+					"notNull": true
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.chessmont_moves": {
+			"name": "chessmont_moves",
+			"schema": "",
+			"columns": {
+				"position_fen": {
+					"name": "position_fen",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"move_san": {
+					"name": "move_san",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"resulting_fen": {
+					"name": "resulting_fen",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"games_played": {
+					"name": "games_played",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"default": 0
+				},
+				"white_wins": {
+					"name": "white_wins",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"default": 0
+				},
+				"black_wins": {
+					"name": "black_wins",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"default": 0
+				},
+				"draws": {
+					"name": "draws",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"default": 0
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {
+				"chessmont_moves_position_fen_move_san_pk": {
+					"name": "chessmont_moves_position_fen_move_san_pk",
+					"columns": ["position_fen", "move_san"]
+				}
+			},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.drill_session": {
+			"name": "drill_session",
+			"schema": "",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "serial",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"user_id": {
+					"name": "user_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"repertoire_id": {
+					"name": "repertoire_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"cards_reviewed": {
+					"name": "cards_reviewed",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"default": 0
+				},
+				"cards_correct": {
+					"name": "cards_correct",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"default": 0
+				},
+				"started_at": {
+					"name": "started_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"completed_at": {
+					"name": "completed_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": false
+				}
+			},
+			"indexes": {
+				"idx_drill_session_repertoire_id": {
+					"name": "idx_drill_session_repertoire_id",
+					"columns": [
+						{
+							"expression": "repertoire_id",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						}
+					],
+					"isUnique": false,
+					"concurrently": false,
+					"method": "btree",
+					"with": {}
+				}
+			},
+			"foreignKeys": {
+				"drill_session_user_id_user_id_fk": {
+					"name": "drill_session_user_id_user_id_fk",
+					"tableFrom": "drill_session",
+					"tableTo": "user",
+					"columnsFrom": ["user_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				},
+				"drill_session_repertoire_id_repertoire_id_fk": {
+					"name": "drill_session_repertoire_id_repertoire_id_fk",
+					"tableFrom": "drill_session",
+					"tableTo": "repertoire",
+					"columnsFrom": ["repertoire_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.eco_opening": {
+			"name": "eco_opening",
+			"schema": "",
+			"columns": {
+				"fen": {
+					"name": "fen",
+					"type": "text",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"code": {
+					"name": "code",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"name": {
+					"name": "name",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.imported_game": {
+			"name": "imported_game",
+			"schema": "",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "serial",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"user_id": {
+					"name": "user_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"pgn": {
+					"name": "pgn",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"source": {
+					"name": "source",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"external_game_id": {
+					"name": "external_game_id",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"player_color": {
+					"name": "player_color",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"opponent_name": {
+					"name": "opponent_name",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"opponent_rating": {
+					"name": "opponent_rating",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"player_rating": {
+					"name": "player_rating",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"time_control": {
+					"name": "time_control",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"result": {
+					"name": "result",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"played_at": {
+					"name": "played_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"imported_at": {
+					"name": "imported_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"status": {
+					"name": "status",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"default": "'pending'"
+				},
+				"reviewed_game_id": {
+					"name": "reviewed_game_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": false
+				}
+			},
+			"indexes": {
+				"idx_imported_game_user_status": {
+					"name": "idx_imported_game_user_status",
+					"columns": [
+						{
+							"expression": "user_id",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						},
+						{
+							"expression": "status",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						}
+					],
+					"isUnique": false,
+					"concurrently": false,
+					"method": "btree",
+					"with": {}
+				},
+				"idx_imported_game_user_played_at": {
+					"name": "idx_imported_game_user_played_at",
+					"columns": [
+						{
+							"expression": "user_id",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						},
+						{
+							"expression": "played_at",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						}
+					],
+					"isUnique": false,
+					"concurrently": false,
+					"method": "btree",
+					"with": {}
+				}
+			},
+			"foreignKeys": {
+				"imported_game_user_id_user_id_fk": {
+					"name": "imported_game_user_id_user_id_fk",
+					"tableFrom": "imported_game",
+					"tableTo": "user",
+					"columnsFrom": ["user_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				},
+				"imported_game_reviewed_game_id_reviewed_game_id_fk": {
+					"name": "imported_game_reviewed_game_id_reviewed_game_id_fk",
+					"tableFrom": "imported_game",
+					"tableTo": "reviewed_game",
+					"columnsFrom": ["reviewed_game_id"],
+					"columnsTo": ["id"],
+					"onDelete": "set null",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {
+				"imported_game_user_id_source_external_game_id_unique": {
+					"name": "imported_game_user_id_source_external_game_id_unique",
+					"nullsNotDistinct": false,
+					"columns": ["user_id", "source", "external_game_id"]
+				}
+			},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.password_reset_token": {
+			"name": "password_reset_token",
+			"schema": "",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "serial",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"user_id": {
+					"name": "user_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"token_hash": {
+					"name": "token_hash",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"expires_at": {
+					"name": "expires_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"used_at": {
+					"name": "used_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"created_at": {
+					"name": "created_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {
+				"password_reset_token_user_id_user_id_fk": {
+					"name": "password_reset_token_user_id_user_id_fk",
+					"tableFrom": "password_reset_token",
+					"tableTo": "user",
+					"columnsFrom": ["user_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.puzzle": {
+			"name": "puzzle",
+			"schema": "",
+			"columns": {
+				"puzzle_id": {
+					"name": "puzzle_id",
+					"type": "text",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"fen": {
+					"name": "fen",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"moves": {
+					"name": "moves",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"rating": {
+					"name": "rating",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"rating_deviation": {
+					"name": "rating_deviation",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"popularity": {
+					"name": "popularity",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"nb_plays": {
+					"name": "nb_plays",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"themes": {
+					"name": "themes",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"game_url": {
+					"name": "game_url",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"opening_tags": {
+					"name": "opening_tags",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"opening_family": {
+					"name": "opening_family",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				}
+			},
+			"indexes": {
+				"idx_puzzle_opening_family": {
+					"name": "idx_puzzle_opening_family",
+					"columns": [
+						{
+							"expression": "opening_family",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						}
+					],
+					"isUnique": false,
+					"concurrently": false,
+					"method": "btree",
+					"with": {}
+				},
+				"idx_puzzle_rating": {
+					"name": "idx_puzzle_rating",
+					"columns": [
+						{
+							"expression": "rating",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						}
+					],
+					"isUnique": false,
+					"concurrently": false,
+					"method": "btree",
+					"with": {}
+				}
+			},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.puzzle_attempt": {
+			"name": "puzzle_attempt",
+			"schema": "",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "serial",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"user_id": {
+					"name": "user_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"puzzle_id": {
+					"name": "puzzle_id",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"solved": {
+					"name": "solved",
+					"type": "boolean",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"time_ms": {
+					"name": "time_ms",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"attempted_at": {
+					"name": "attempted_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				}
+			},
+			"indexes": {
+				"idx_puzzle_attempt_user_puzzle": {
+					"name": "idx_puzzle_attempt_user_puzzle",
+					"columns": [
+						{
+							"expression": "user_id",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						},
+						{
+							"expression": "puzzle_id",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						}
+					],
+					"isUnique": false,
+					"concurrently": false,
+					"method": "btree",
+					"with": {}
+				}
+			},
+			"foreignKeys": {
+				"puzzle_attempt_user_id_user_id_fk": {
+					"name": "puzzle_attempt_user_id_user_id_fk",
+					"tableFrom": "puzzle_attempt",
+					"tableTo": "user",
+					"columnsFrom": ["user_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				},
+				"puzzle_attempt_puzzle_id_puzzle_puzzle_id_fk": {
+					"name": "puzzle_attempt_puzzle_id_puzzle_puzzle_id_fk",
+					"tableFrom": "puzzle_attempt",
+					"tableTo": "puzzle",
+					"columnsFrom": ["puzzle_id"],
+					"columnsTo": ["puzzle_id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.rate_limit": {
+			"name": "rate_limit",
+			"schema": "",
+			"columns": {
+				"key": {
+					"name": "key",
+					"type": "text",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"count": {
+					"name": "count",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"default": 1
+				},
+				"window_start": {
+					"name": "window_start",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.repertoire": {
+			"name": "repertoire",
+			"schema": "",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "serial",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"user_id": {
+					"name": "user_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"name": {
+					"name": "name",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"color": {
+					"name": "color",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"start_fen": {
+					"name": "start_fen",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"created_at": {
+					"name": "created_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {
+				"repertoire_user_id_user_id_fk": {
+					"name": "repertoire_user_id_user_id_fk",
+					"tableFrom": "repertoire",
+					"tableTo": "user",
+					"columnsFrom": ["user_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.reviewed_game": {
+			"name": "reviewed_game",
+			"schema": "",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "serial",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"user_id": {
+					"name": "user_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"repertoire_id": {
+					"name": "repertoire_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"pgn": {
+					"name": "pgn",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"source": {
+					"name": "source",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"lichess_game_id": {
+					"name": "lichess_game_id",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"deviation_fen": {
+					"name": "deviation_fen",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"played_at": {
+					"name": "played_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"reviewed_at": {
+					"name": "reviewed_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"notes": {
+					"name": "notes",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				}
+			},
+			"indexes": {
+				"idx_reviewed_game_repertoire_id": {
+					"name": "idx_reviewed_game_repertoire_id",
+					"columns": [
+						{
+							"expression": "repertoire_id",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						}
+					],
+					"isUnique": false,
+					"concurrently": false,
+					"method": "btree",
+					"with": {}
+				}
+			},
+			"foreignKeys": {
+				"reviewed_game_user_id_user_id_fk": {
+					"name": "reviewed_game_user_id_user_id_fk",
+					"tableFrom": "reviewed_game",
+					"tableTo": "user",
+					"columnsFrom": ["user_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				},
+				"reviewed_game_repertoire_id_repertoire_id_fk": {
+					"name": "reviewed_game_repertoire_id_repertoire_id_fk",
+					"tableFrom": "reviewed_game",
+					"tableTo": "repertoire",
+					"columnsFrom": ["repertoire_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.session": {
+			"name": "session",
+			"schema": "",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "text",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"user_id": {
+					"name": "user_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"expires_at": {
+					"name": "expires_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				}
+			},
+			"indexes": {
+				"idx_session_user_id": {
+					"name": "idx_session_user_id",
+					"columns": [
+						{
+							"expression": "user_id",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						}
+					],
+					"isUnique": false,
+					"concurrently": false,
+					"method": "btree",
+					"with": {}
+				}
+			},
+			"foreignKeys": {
+				"session_user_id_user_id_fk": {
+					"name": "session_user_id_user_id_fk",
+					"tableFrom": "session",
+					"tableTo": "user",
+					"columnsFrom": ["user_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.subscription": {
+			"name": "subscription",
+			"schema": "",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "serial",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"user_id": {
+					"name": "user_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"tier": {
+					"name": "tier",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"default": "'free'"
+				},
+				"stripe_subscription_id": {
+					"name": "stripe_subscription_id",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"stripe_price_id": {
+					"name": "stripe_price_id",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"status": {
+					"name": "status",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"default": "'active'"
+				},
+				"current_period_end": {
+					"name": "current_period_end",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"cancel_at_period_end": {
+					"name": "cancel_at_period_end",
+					"type": "boolean",
+					"primaryKey": false,
+					"notNull": true,
+					"default": false
+				},
+				"created_at": {
+					"name": "created_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"updated_at": {
+					"name": "updated_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {
+				"subscription_user_id_user_id_fk": {
+					"name": "subscription_user_id_user_id_fk",
+					"tableFrom": "subscription",
+					"tableTo": "user",
+					"columnsFrom": ["user_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {
+				"subscription_stripe_subscription_id_unique": {
+					"name": "subscription_stripe_subscription_id_unique",
+					"nullsNotDistinct": false,
+					"columns": ["stripe_subscription_id"]
+				},
+				"idx_subscription_user_id": {
+					"name": "idx_subscription_user_id",
+					"nullsNotDistinct": false,
+					"columns": ["user_id"]
+				}
+			},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.user": {
+			"name": "user",
+			"schema": "",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "serial",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"username": {
+					"name": "username",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"password_hash": {
+					"name": "password_hash",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"role": {
+					"name": "role",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"default": "'user'"
+				},
+				"enabled": {
+					"name": "enabled",
+					"type": "boolean",
+					"primaryKey": false,
+					"notNull": true,
+					"default": true
+				},
+				"email": {
+					"name": "email",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"stripe_customer_id": {
+					"name": "stripe_customer_id",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"created_at": {
+					"name": "created_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {
+				"user_username_unique": {
+					"name": "user_username_unique",
+					"nullsNotDistinct": false,
+					"columns": ["username"]
+				},
+				"user_email_unique": {
+					"name": "user_email_unique",
+					"nullsNotDistinct": false,
+					"columns": ["email"]
+				},
+				"user_stripe_customer_id_unique": {
+					"name": "user_stripe_customer_id_unique",
+					"nullsNotDistinct": false,
+					"columns": ["stripe_customer_id"]
+				}
+			},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.user_move": {
+			"name": "user_move",
+			"schema": "",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "serial",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"user_id": {
+					"name": "user_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"repertoire_id": {
+					"name": "repertoire_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"from_fen": {
+					"name": "from_fen",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"to_fen": {
+					"name": "to_fen",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"san": {
+					"name": "san",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"source": {
+					"name": "source",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"notes": {
+					"name": "notes",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"created_at": {
+					"name": "created_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				}
+			},
+			"indexes": {
+				"idx_user_move_repertoire_id": {
+					"name": "idx_user_move_repertoire_id",
+					"columns": [
+						{
+							"expression": "repertoire_id",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						}
+					],
+					"isUnique": false,
+					"concurrently": false,
+					"method": "btree",
+					"with": {}
+				},
+				"idx_user_move_from_fen": {
+					"name": "idx_user_move_from_fen",
+					"columns": [
+						{
+							"expression": "from_fen",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						}
+					],
+					"isUnique": false,
+					"concurrently": false,
+					"method": "btree",
+					"with": {}
+				}
+			},
+			"foreignKeys": {
+				"user_move_user_id_user_id_fk": {
+					"name": "user_move_user_id_user_id_fk",
+					"tableFrom": "user_move",
+					"tableTo": "user",
+					"columnsFrom": ["user_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				},
+				"user_move_repertoire_id_repertoire_id_fk": {
+					"name": "user_move_repertoire_id_repertoire_id_fk",
+					"tableFrom": "user_move",
+					"tableTo": "repertoire",
+					"columnsFrom": ["repertoire_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.user_repertoire_move": {
+			"name": "user_repertoire_move",
+			"schema": "",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "serial",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"user_id": {
+					"name": "user_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"repertoire_id": {
+					"name": "repertoire_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"from_fen": {
+					"name": "from_fen",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"san": {
+					"name": "san",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"due": {
+					"name": "due",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"stability": {
+					"name": "stability",
+					"type": "double precision",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"difficulty": {
+					"name": "difficulty",
+					"type": "double precision",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"elapsed_days": {
+					"name": "elapsed_days",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"scheduled_days": {
+					"name": "scheduled_days",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"reps": {
+					"name": "reps",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"lapses": {
+					"name": "lapses",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"state": {
+					"name": "state",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"last_review": {
+					"name": "last_review",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"learning_steps": {
+					"name": "learning_steps",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"default": 0
+				}
+			},
+			"indexes": {
+				"idx_user_repertoire_move_repertoire_id": {
+					"name": "idx_user_repertoire_move_repertoire_id",
+					"columns": [
+						{
+							"expression": "repertoire_id",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						}
+					],
+					"isUnique": false,
+					"concurrently": false,
+					"method": "btree",
+					"with": {}
+				},
+				"idx_user_repertoire_move_from_fen": {
+					"name": "idx_user_repertoire_move_from_fen",
+					"columns": [
+						{
+							"expression": "from_fen",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						}
+					],
+					"isUnique": false,
+					"concurrently": false,
+					"method": "btree",
+					"with": {}
+				},
+				"idx_user_repertoire_move_due": {
+					"name": "idx_user_repertoire_move_due",
+					"columns": [
+						{
+							"expression": "due",
+							"isExpression": false,
+							"asc": true,
+							"nulls": "last"
+						}
+					],
+					"isUnique": false,
+					"concurrently": false,
+					"method": "btree",
+					"with": {}
+				}
+			},
+			"foreignKeys": {
+				"user_repertoire_move_user_id_user_id_fk": {
+					"name": "user_repertoire_move_user_id_user_id_fk",
+					"tableFrom": "user_repertoire_move",
+					"tableTo": "user",
+					"columnsFrom": ["user_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				},
+				"user_repertoire_move_repertoire_id_repertoire_id_fk": {
+					"name": "user_repertoire_move_repertoire_id_repertoire_id_fk",
+					"tableFrom": "user_repertoire_move",
+					"tableTo": "repertoire",
+					"columnsFrom": ["repertoire_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		},
+		"public.user_settings": {
+			"name": "user_settings",
+			"schema": "",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "serial",
+					"primaryKey": true,
+					"notNull": true
+				},
+				"user_id": {
+					"name": "user_id",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true
+				},
+				"stockfish_depth": {
+					"name": "stockfish_depth",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"default": 15
+				},
+				"stockfish_timeout": {
+					"name": "stockfish_timeout",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"default": 10
+				},
+				"board_theme": {
+					"name": "board_theme",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"default": "'blue'"
+				},
+				"piece_set": {
+					"name": "piece_set",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"default": "'cburnett'"
+				},
+				"sound_enabled": {
+					"name": "sound_enabled",
+					"type": "boolean",
+					"primaryKey": false,
+					"notNull": true,
+					"default": true
+				},
+				"lichess_username": {
+					"name": "lichess_username",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"chesscom_username": {
+					"name": "chesscom_username",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"last_lichess_import": {
+					"name": "last_lichess_import",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"last_chesscom_import": {
+					"name": "last_chesscom_import",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"puzzle_goal_count": {
+					"name": "puzzle_goal_count",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"puzzle_goal_frequency": {
+					"name": "puzzle_goal_frequency",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"tempo_enabled": {
+					"name": "tempo_enabled",
+					"type": "boolean",
+					"primaryKey": false,
+					"notNull": true,
+					"default": false
+				},
+				"tempo_seconds": {
+					"name": "tempo_seconds",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"default": 10
+				},
+				"playback_speed": {
+					"name": "playback_speed",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"default": 500
+				},
+				"app_theme": {
+					"name": "app_theme",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"default": "'dark'"
+				},
+				"gap_min_games": {
+					"name": "gap_min_games",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"default": 1000
+				},
+				"board_size": {
+					"name": "board_size",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"default": 0
+				},
+				"tutorial_step": {
+					"name": "tutorial_step",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": false
+				},
+				"updated_at": {
+					"name": "updated_at",
+					"type": "timestamp",
+					"primaryKey": false,
+					"notNull": true
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {
+				"user_settings_user_id_user_id_fk": {
+					"name": "user_settings_user_id_user_id_fk",
+					"tableFrom": "user_settings",
+					"tableTo": "user",
+					"columnsFrom": ["user_id"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"policies": {},
+			"checkConstraints": {},
+			"isRLSEnabled": false
+		}
+	},
+	"enums": {},
+	"schemas": {},
+	"sequences": {},
+	"roles": {},
+	"policies": {},
+	"views": {},
+	"_meta": {
+		"columns": {},
+		"schemas": {},
+		"tables": {}
+	}
+}

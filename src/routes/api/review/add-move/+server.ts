@@ -20,26 +20,19 @@ import { db } from '$lib/db';
 import { repertoire, userMove, userRepertoireMove } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { fenKey } from '$lib/fen';
+import { isRepertoireLocked } from '$lib/stripe/tiers.server';
+import { requireAuth } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { reviewAddMoveSchema } from '$lib/server/schemas/review';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
-	const user = locals.user;
+	const user = requireAuth(locals);
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
-	const { repertoireId, san, forceReplace = false } = body;
-
-	if (typeof repertoireId !== 'number') throw error(400, 'repertoireId must be a number');
-	if (!body.fromFen || typeof body.fromFen !== 'string') throw error(400, 'fromFen is required');
-	if (body.fromFen.length > 100) throw error(400, 'fromFen is too long');
+	const body = await parseBody(request, reviewAddMoveSchema);
+	const { repertoireId, san, forceReplace } = body;
 
 	// Normalize to 4-field FEN so transpositions always match.
 	const fromFen = fenKey(body.fromFen);
-	if (!san || typeof san !== 'string') throw error(400, 'san is required');
 
 	// Verify the repertoire belongs to this user.
 	const [rep] = await db
@@ -47,6 +40,10 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		.from(repertoire)
 		.where(and(eq(repertoire.id, repertoireId), eq(repertoire.userId, user.id)));
 	if (!rep) throw error(404, 'Repertoire not found');
+
+	if (await isRepertoireLocked(user.id, repertoireId, user.tier ?? 'free')) {
+		throw error(403, 'This repertoire is read-only. Upgrade your plan to edit it.');
+	}
 
 	// Compute toFen server-side (never accepted from the client — prevents crafted
 	// requests from corrupting the move tree with arbitrary FENs).

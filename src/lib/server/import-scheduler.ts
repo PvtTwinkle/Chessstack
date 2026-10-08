@@ -8,13 +8,19 @@
 // This module is imported and started from hooks.server.ts — it only runs
 // at runtime on the actual server, never during vite build.
 
-import { db } from '$lib/db';
+import { db, getRawSql } from '$lib/db';
 import { userSettings, importedGame } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { fetchLichessGames } from '$lib/lichess';
 import { fetchChesscomGames } from '$lib/chesscom';
+import { log } from '$lib/server/log';
 
+const STARTUP_DELAY_MS = 5000;
 const DELAY_BETWEEN_USERS_MS = 2000;
+
+// Advisory lock key — arbitrary 64-bit integer unique to the import scheduler.
+// Prevents multiple app instances from running the import cycle simultaneously.
+const IMPORT_LOCK_KEY = 42001;
 
 let started = false;
 
@@ -28,20 +34,32 @@ export function startImportScheduler(): void {
 
 	const intervalMinutes = parseInt(process.env.GAME_IMPORT_INTERVAL_MINUTES ?? '0');
 	if (intervalMinutes <= 0) {
-		console.log('[chessstack] Auto-import disabled (GAME_IMPORT_INTERVAL_MINUTES=0).');
+		log.info('Auto-import disabled (GAME_IMPORT_INTERVAL_MINUTES=0).');
 		return;
 	}
 
-	console.log(`[chessstack] Auto-import enabled: checking every ${intervalMinutes} minutes.`);
+	log.info('Auto-import enabled', { intervalMinutes });
 
 	// Run once on startup (after a short delay to let the app finish initialising),
 	// then at the configured interval.
-	setTimeout(runImportCycle, 5000);
+	setTimeout(runImportCycle, STARTUP_DELAY_MS);
 	setInterval(runImportCycle, intervalMinutes * 60 * 1000);
 }
 
 async function runImportCycle(): Promise<void> {
-	console.log('[chessstack] Starting auto-import cycle...');
+	// Try to acquire a PostgreSQL advisory lock. If another instance already
+	// holds this lock, skip this cycle entirely. pg_try_advisory_lock is
+	// non-blocking — it returns false immediately instead of waiting.
+	const sql = getRawSql();
+	const [{ acquired }] = await sql<[{ acquired: boolean }]>`
+		SELECT pg_try_advisory_lock(${IMPORT_LOCK_KEY}) AS acquired
+	`;
+	if (!acquired) {
+		log.info('Auto-import skipped — another instance holds the lock.');
+		return;
+	}
+
+	log.info('Starting auto-import cycle');
 
 	try {
 		// Find all users with at least one platform username configured.
@@ -69,10 +87,11 @@ async function runImportCycle(): Promise<void> {
 					);
 					totalImported += count;
 				} catch (e) {
-					console.error(
-						`[chessstack] Lichess import failed for user ${settings.userId}:`,
-						e instanceof Error ? e.message : String(e)
-					);
+					// Usually an outage or rate limit on Lichess's side: logged, not reported to Sentry.
+					log.error('Lichess import failed', {
+						userId: settings.userId,
+						reason: e instanceof Error ? e.message : String(e)
+					});
 				}
 				await sleep(DELAY_BETWEEN_USERS_MS);
 			}
@@ -88,23 +107,21 @@ async function runImportCycle(): Promise<void> {
 					);
 					totalImported += count;
 				} catch (e) {
-					console.error(
-						`[chessstack] Chess.com import failed for user ${settings.userId}:`,
-						e instanceof Error ? e.message : String(e)
-					);
+					log.error('Chess.com import failed', {
+						userId: settings.userId,
+						reason: e instanceof Error ? e.message : String(e)
+					});
 				}
 				await sleep(DELAY_BETWEEN_USERS_MS);
 			}
 		}
 
-		console.log(
-			`[chessstack] Auto-import cycle complete. ${totalImported} new game${totalImported !== 1 ? 's' : ''} imported.`
-		);
+		log.info('Auto-import cycle complete', { imported: totalImported });
 	} catch (e) {
-		console.error(
-			'[chessstack] Auto-import cycle error:',
-			e instanceof Error ? e.message : String(e)
-		);
+		log.error('Auto-import cycle error', { err: e });
+	} finally {
+		// Release the advisory lock so the next cycle (on any instance) can acquire it.
+		await sql`SELECT pg_advisory_unlock(${IMPORT_LOCK_KEY})`;
 	}
 }
 
@@ -158,8 +175,8 @@ async function importGamesForUser(
 			if (game.playedAt && (!latestPlayedAt || game.playedAt > latestPlayedAt)) {
 				latestPlayedAt = game.playedAt;
 			}
-		} catch {
-			// Skip individual game insertion failures.
+		} catch (err) {
+			log.warn('Skipping game insertion failure', { err });
 		}
 	}
 
@@ -177,7 +194,7 @@ async function importGamesForUser(
 	}
 
 	if (imported > 0) {
-		console.log(`[chessstack] Imported ${imported} ${source} games for user ${userId}.`);
+		log.info('Imported games', { source, userId, imported });
 	}
 
 	return imported;

@@ -39,7 +39,7 @@ shows candidate moves from multiple sources to help you choose your lines:
 - Master game statistics from 8.8 million+ games (ELO 2500+)
 - Famous player lines (legends, super-GMs, streamers)
 - Crowd-sourced Lichess data broken down by rating bracket
-- Stockfish engine evaluations
+- Stockfish engine evaluations, computed in your browser
 
 You can annotate any move with notes, bulk-import variations from PGN files, and
 export your full repertoire as PGN.
@@ -49,6 +49,9 @@ export your full repertoire as PGN.
 The drill system uses the FSRS spaced repetition algorithm to schedule your reviews.
 The board auto-plays your opponent's moves, you respond, and the algorithm adjusts
 the schedule based on how well you know each position.
+
+The opening trainer plays out your openings against a computer that picks its moves
+from real game statistics, and tracks an Elo-style trainer rating.
 
 Puzzles are pulled from the Lichess puzzle database, filtered to match the openings
 in your repertoire. You can also filter by rating, theme, and opening family.
@@ -166,15 +169,19 @@ entirely.
 
 ## Configuration
 
-| Variable                       | Required  | Description                                                                                                                           |
-| ------------------------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                 | Yes       | PostgreSQL connection string. Default points to the `postgres` container on the internal Docker network.                              |
-| `ORIGIN`                       | Yes       | The URL you use to access the app. Change this if using a reverse proxy (e.g. `https://chess.yourdomain.com`). Required for security. |
-| `DEFAULT_USERNAME`             | First run | Username created when the database is empty. Ignored after first run.                                                                 |
-| `DEFAULT_PASSWORD`             | First run | Password created when the database is empty. **Change this before first run.** Ignored after first run.                               |
-| `STOCKFISH_BIN`                | No        | Path to the Stockfish binary. Default: `/usr/games/stockfish` (pre-installed in the Docker image).                                    |
-| `REGISTRATION_MODE`            | No        | `invite` (admin creates users) or `open` (anyone can register at `/register`). Default: `invite`.                                     |
-| `GAME_IMPORT_INTERVAL_MINUTES` | No        | How often (in minutes) the app syncs games from Lichess & Chess.com for review. `0` = manual only. Default: `0`.                      |
+| Variable                       | Required  | Description                                                                                                                             |
+| ------------------------------ | --------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                 | Yes       | PostgreSQL connection string. Default points to the `postgres` container on the internal Docker network.                                |
+| `ORIGIN`                       | Yes       | The URL you use to access the app. Change this if using a reverse proxy (e.g. `https://chess.yourdomain.com`). Required for security.   |
+| `DEFAULT_USERNAME`             | First run | Username created when the database is empty. Ignored after first run.                                                                   |
+| `DEFAULT_PASSWORD`             | First run | Password created when the database is empty. **Change this before first run.** Ignored after first run.                                 |
+| `REGISTRATION_MODE`            | No        | `invite` (admin creates users) or `open` (anyone can register at `/register`). Default: `invite`.                                       |
+| `GAME_IMPORT_INTERVAL_MINUTES` | No        | How often (in minutes) the app syncs games from Lichess & Chess.com for review. `0` = manual only. Default: `0`.                        |
+| `ADDRESS_HEADER` / `XFF_DEPTH` | No        | Behind a reverse proxy: the header carrying the client IP, so login rate limits apply per visitor. See [Reverse Proxy](#reverse-proxy). |
+
+[`.env.example`](.env.example) lists every variable with comments, including log format, rate
+limits and CORS. Optional email (Loops) and error reporting (Sentry) stay switched off unless you
+set their variables; nothing is sent anywhere by default.
 
 ---
 
@@ -183,6 +190,9 @@ entirely.
 ```bash
 docker compose pull && docker compose up -d
 ```
+
+Database changes are applied automatically on startup, including when upgrading from any 1.x
+release. Take a backup first (see below).
 
 ---
 
@@ -216,17 +226,25 @@ SvelteKit uses the `ORIGIN` value to validate requests and prevent cross-site
 attacks. When `ORIGIN` starts with `https://`, cookies are automatically marked
 as secure.
 
+Login attempts are rate-limited per client IP. Behind a proxy the app only sees
+the proxy's IP, so tell it which header carries the real one:
+
+```yaml
+- ADDRESS_HEADER=X-Forwarded-For
+- XFF_DEPTH=1 # the number of proxies in front of the app
+```
+
 ---
 
 ## Health Check
 
-```
-GET /api/health
-```
+| Endpoint                | Returns                                                                      |
+| ----------------------- | ---------------------------------------------------------------------------- |
+| `GET /api/health`       | `{"status":"ok"}` once the app has started (used by the Docker health check) |
+| `GET /api/health/ready` | `{"status":"ok","db":"ok"}`, or HTTP 503 when the database is unreachable    |
 
-Returns `{ "status": "ok", "db": "ok" }` when the app and database are running.
-No authentication required. Compatible with
-[Uptime Kuma](https://github.com/louislam/uptime-kuma) and other monitoring tools.
+No authentication required. Point [Uptime Kuma](https://github.com/louislam/uptime-kuma)
+or other monitoring tools at `/api/health/ready`.
 
 ---
 
@@ -241,6 +259,13 @@ No authentication required. Compatible with
 | [Stockfish](https://stockfishchess.org/)                     | Chess engine analysis           |
 | [ts-fsrs](https://github.com/open-spaced-repetition/ts-fsrs) | Spaced repetition algorithm     |
 | [Drizzle ORM](https://orm.drizzle.team/)                     | TypeScript ORM                  |
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and tests, and
+[SECURITY.md](SECURITY.md) for reporting a vulnerability privately.
 
 ---
 

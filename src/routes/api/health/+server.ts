@@ -1,12 +1,10 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/db';
-import { user } from '$lib/db/schema';
-import { count } from 'drizzle-orm';
 
+// Lightweight liveness check — no database query. Cloud load balancers and
+// Kubernetes probes hit this frequently; querying the DB on every probe adds
+// unnecessary load. The app only reaches this point if it booted successfully
+// (dbReady resolved in hooks.server.ts before any requests are served).
 export const GET: RequestHandler = async () => {
-	// Verify the database is reachable by running a trivial query.
-	// This will throw if the database is unreachable or migrations failed.
-	const [result] = await db.select({ count: count() }).from(user);
-	return json({ status: 'ok', db: result !== undefined ? 'ok' : 'error' });
+	return json({ status: 'ok' });
 };

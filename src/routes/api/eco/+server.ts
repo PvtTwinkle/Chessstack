@@ -16,46 +16,27 @@
 //   user is on move 10 in the Najdorf). Passing the full history lets the
 //   server walk backwards and find the most specific recognised name.
 
-import { json, error } from '@sveltejs/kit';
+import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { lookupEco } from '$lib/eco';
+import { isRateLimited } from '$lib/auth/rate-limit';
+import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
+import { requireAuth } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { ecoLookupSchema } from '$lib/server/schemas/engine';
 
 export const POST: RequestHandler = async ({ request, locals }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	let body: unknown;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
+	if (await isRateLimited(String(user.id), RATE_LIMITS.eco)) {
+		return json({ error: 'Too many requests. Please try again later.' }, { status: 429 });
 	}
 
-	if (
-		typeof body !== 'object' ||
-		body === null ||
-		!Array.isArray((body as Record<string, unknown>).fens)
-	) {
-		throw error(400, 'Request body must be { fens: string[] }');
-	}
+	// The schema drops entries that don't look like FENs and keeps at most 50.
+	const { fens } = await parseBody(request, ecoLookupSchema);
 
-	const { fens } = body as { fens: unknown[] };
-
-	// Validate that every element is a non-empty string with valid FEN structure.
-	// This is user-supplied data coming from the board position — sanitise it.
-	const PIECE_PLACEMENT = /^[1-8pnbrqkPNBRQK/]+$/;
-	const fenList = fens.filter((f): f is string => {
-		if (typeof f !== 'string' || f.length === 0 || f.length > 100) return false;
-		const parts = f.split(' ');
-		if (parts.length < 4 || parts.length > 6) return false;
-		if (!PIECE_PLACEMENT.test(parts[0])) return false;
-		if (parts[1] !== 'w' && parts[1] !== 'b') return false;
-		return true;
-	});
-
-	// Cap at 50 FENs — a typical opening is 15–20 moves deep, so this is
-	// generous while preventing abuse of the IN clause.
-	const result = await lookupEco(db, fenList.slice(0, 50));
+	const result = await lookupEco(db, fens);
 
 	return json(result);
 };

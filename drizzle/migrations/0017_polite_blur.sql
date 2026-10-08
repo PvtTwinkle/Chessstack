@@ -1,0 +1,3 @@
+-- This migration was auto-generated as a full schema snapshot during the
+-- Drizzle journal v6 → v7 upgrade. All tables already exist from migrations
+-- 0000–0016, so the redundant CREATE statements have been removed.

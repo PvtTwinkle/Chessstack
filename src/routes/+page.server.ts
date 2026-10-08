@@ -17,6 +17,7 @@ import { eq, and, gt, gte, desc, count } from 'drizzle-orm';
 import { fenKey, loadGapData } from '$lib/gaps';
 import type { Gap } from '$lib/gaps';
 import { getEffectiveStartFens, buildInScopeFens } from '$lib/repertoire';
+import { loadLanding } from '$lib/landing/landing.server';
 
 /** Shape of a trouble-spot card returned to the page. */
 export interface TroubleSpot {
@@ -51,7 +52,13 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 		healthScore: 0
 	};
 
-	if (!activeRepertoireId || repertoires.length === 0 || !locals.user) {
+	// Logged-out visitors see the landing page (cloud edition only; self-hosted
+	// instances send them to /login before this runs).
+	if (!locals.user) {
+		return { ...emptyStats, ...loadLanding() };
+	}
+
+	if (!activeRepertoireId || repertoires.length === 0) {
 		return emptyStats;
 	}
 

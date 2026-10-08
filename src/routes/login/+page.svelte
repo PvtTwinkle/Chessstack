@@ -1,22 +1,31 @@
 <script lang="ts">
+	import Seo from '$lib/components/Seo.svelte';
 	// `form` is automatically populated by SvelteKit after a form action runs.
 	// If the login fails, the action returns { error: '...' } via fail(),
 	// and SvelteKit puts that in `form` so we can display the error message.
 	import type { ActionData, PageData } from './$types';
 	import { base } from '$app/paths';
-	import favicon from '$lib/assets/favicon.svg';
+	import logoIcon from '$lib/assets/logo-icon.svg';
 
 	let { form, data }: { form: ActionData; data: PageData } = $props();
+
+	// Keep the visitor's destination if they create an account instead.
+	let redirectQuery = $derived(
+		data.redirectTo ? `?redirectTo=${encodeURIComponent(data.redirectTo)}` : ''
+	);
 </script>
 
-<svelte:head>
-	<title>Sign In — Chessstack</title>
-</svelte:head>
+<Seo
+	title="Sign In | Chessstack"
+	description="Sign in to Chessstack to build and drill your chess opening repertoire, review your games and prepare for your next opponent."
+	path="/login"
+	noindex={data.edition !== 'cloud'}
+/>
 
 <div class="login-page">
 	<div class="login-card">
 		<div class="logo">
-			<img class="logo-icon" src={favicon} alt="Chessstack logo" />
+			<img class="logo-icon" src={logoIcon} alt="Chessstack logo" />
 			<span class="logo-text">Chessstack</span>
 		</div>
 		<h1>Sign in</h1>
@@ -28,6 +37,10 @@
 		<form method="POST">
 			{#if form?.error}
 				<p class="error" role="alert">{form.error}</p>
+			{/if}
+
+			{#if data.redirectTo}
+				<input type="hidden" name="redirectTo" value={data.redirectTo} />
 			{/if}
 
 			<div class="field">
@@ -46,11 +59,17 @@
 				/>
 			</div>
 
+			{#if data.passwordResetEnabled}
+				<a class="forgot-link" href="{base}/forgot-password">Forgot password?</a>
+			{/if}
+
 			<button type="submit">Sign in</button>
 		</form>
 
 		{#if data.registrationOpen}
-			<p class="register-link">No account? <a href="{base}/register">Create one</a></p>
+			<p class="register-link">
+				No account? <a href="{base}/register{redirectQuery}">Create one</a>
+			</p>
 		{/if}
 	</div>
 </div>
@@ -84,6 +103,9 @@
 	.logo-icon {
 		width: 32px;
 		height: 32px;
+		border-radius: 6px;
+		background: var(--color-logo-bg);
+		padding: 1px;
 	}
 
 	.logo-text {
@@ -112,7 +134,7 @@
 		font-weight: 500;
 		text-transform: uppercase;
 		letter-spacing: 0.1em;
-		color: var(--color-text-muted);
+		color: var(--color-text-secondary);
 		margin-bottom: var(--space-2);
 	}
 
@@ -169,6 +191,20 @@
 
 	button:active {
 		transform: scale(0.97);
+	}
+
+	.forgot-link {
+		display: block;
+		text-align: right;
+		font-size: 13px;
+		color: var(--color-accent);
+		text-decoration: none;
+		margin-top: calc(-1 * var(--space-3));
+		margin-bottom: var(--space-2);
+	}
+
+	.forgot-link:hover {
+		text-decoration: underline;
 	}
 
 	.register-link {

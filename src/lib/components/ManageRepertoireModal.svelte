@@ -15,6 +15,8 @@
 	import { invalidateAll } from '$app/navigation';
 	import { onDestroy } from 'svelte';
 	import { downloadTextFile } from '$lib/download';
+	import { TIER_LIMITS } from '$lib/stripe/tiers';
+	import type { Tier } from '$lib/stripe/tiers';
 
 	interface Repertoire {
 		id: number;
@@ -27,12 +29,23 @@
 	let {
 		open = $bindable(false),
 		repertoires = [],
-		onchange = () => {}
+		onchange = () => {},
+		tier = 'free' as Tier,
+		lockedRepertoireIds = []
 	}: {
 		open: boolean;
 		repertoires: Repertoire[];
 		onchange?: () => void;
+		tier?: Tier;
+		lockedRepertoireIds?: number[];
 	} = $props();
+
+	const lockedSet = $derived(new Set(lockedRepertoireIds));
+
+	const atLimit = $derived(
+		TIER_LIMITS[tier].maxRepertoires !== Infinity &&
+			repertoires.length >= TIER_LIMITS[tier].maxRepertoires
+	);
 
 	// ── Create form state ────────────────────────────────────────────────────────
 	let newName = $state('');
@@ -253,6 +266,9 @@
 							<!-- Normal row -->
 							<span class="row-icon"><span class={colorDotClass(rep.color)}></span></span>
 							<span class="row-name">{rep.name}</span>
+							{#if lockedSet.has(rep.id)}
+								<span class="locked-badge">Read-only</span>
+							{/if}
 							<span
 								class="color-badge"
 								class:badge-white={rep.color === 'WHITE'}
@@ -268,7 +284,9 @@
 								>
 									{exportingId === rep.id ? 'Exporting…' : 'Export'}
 								</button>
-								<button class="btn-ghost" onclick={() => startEdit(rep)}>Rename</button>
+								{#if !lockedSet.has(rep.id)}
+									<button class="btn-ghost" onclick={() => startEdit(rep)}>Rename</button>
+								{/if}
 								<button class="btn-ghost btn-ghost--danger" onclick={() => askDelete(rep.id)}>
 									Delete
 								</button>
@@ -282,6 +300,13 @@
 				{/if}
 			</div>
 
+			{#if lockedRepertoireIds.length > 0}
+				<p class="upgrade-hint">
+					<a href="/settings#subscription" onclick={() => (open = false)}>Upgrade</a> to unlock {lockedRepertoireIds.length}
+					read-only repertoire{lockedRepertoireIds.length > 1 ? 's' : ''}.
+				</p>
+			{/if}
+
 			{#if errorMsg}
 				<p class="error-msg">{errorMsg}</p>
 			{/if}
@@ -294,36 +319,43 @@
 			<div class="create-section">
 				<h3>Create New Repertoire</h3>
 
-				<div class="form-row">
-					<input
-						class="text-input"
-						type="text"
-						placeholder="e.g. White — e4 lines or Black vs d4"
-						bind:value={newName}
-						onkeydown={(e) => {
-							if (e.key === 'Enter') createRepertoire();
-						}}
-					/>
-				</div>
+				{#if atLimit}
+					<p class="upgrade-hint">
+						<a href="/settings#subscription" onclick={() => (open = false)}>Upgrade</a> to create additional
+						repertoires.
+					</p>
+				{:else}
+					<div class="form-row">
+						<input
+							class="text-input"
+							type="text"
+							placeholder="e.g. White — e4 lines or Black vs d4"
+							bind:value={newName}
+							onkeydown={(e) => {
+								if (e.key === 'Enter') createRepertoire();
+							}}
+						/>
+					</div>
 
-				<div class="color-row">
-					<label class="color-label">
-						<input type="radio" name="rep-color" value="WHITE" bind:group={newColor} />
-						<span class="color-opt"><span class="color-dot color-dot--white"></span> White</span>
-					</label>
-					<label class="color-label">
-						<input type="radio" name="rep-color" value="BLACK" bind:group={newColor} />
-						<span class="color-opt"><span class="color-dot color-dot--black"></span> Black</span>
-					</label>
-				</div>
+					<div class="color-row">
+						<label class="color-label">
+							<input type="radio" name="rep-color" value="WHITE" bind:group={newColor} />
+							<span class="color-opt"><span class="color-dot color-dot--white"></span> White</span>
+						</label>
+						<label class="color-label">
+							<input type="radio" name="rep-color" value="BLACK" bind:group={newColor} />
+							<span class="color-opt"><span class="color-dot color-dot--black"></span> Black</span>
+						</label>
+					</div>
 
-				<button
-					class="btn-primary btn-create"
-					onclick={createRepertoire}
-					disabled={!newName.trim() || busy}
-				>
-					{busy ? 'Creating…' : 'Create Repertoire'}
-				</button>
+					<button
+						class="btn-primary btn-create"
+						onclick={createRepertoire}
+						disabled={!newName.trim() || busy}
+					>
+						{busy ? 'Creating…' : 'Create Repertoire'}
+					</button>
+				{/if}
 			</div>
 		</div>
 	</div>
@@ -445,6 +477,19 @@
 		border: 1px solid var(--color-border);
 	}
 
+	.locked-badge {
+		flex-shrink: 0;
+		font-size: 10px;
+		padding: 2px var(--space-2);
+		border-radius: var(--radius-sm);
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		background: rgba(248, 113, 113, 0.1);
+		color: var(--color-danger);
+		border: 1px solid rgba(248, 113, 113, 0.2);
+	}
+
 	.row-actions {
 		display: flex;
 		gap: var(--space-1);
@@ -491,6 +536,19 @@
 	}
 
 	/* ── Empty state ────────────────────────────────────────────────────────── */
+
+	.upgrade-hint {
+		color: var(--color-text-muted);
+		font-size: 0.875rem;
+		text-align: center;
+		padding: var(--space-4);
+		margin: 0;
+	}
+
+	.upgrade-hint a {
+		color: var(--color-accent);
+		text-decoration: underline;
+	}
 
 	.empty-hint {
 		color: var(--color-text-muted);

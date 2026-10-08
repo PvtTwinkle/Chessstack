@@ -7,6 +7,8 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { opponentPreps, opponentMoves, prepMoves } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
+import { parseBody } from '$lib/server/validation';
+import { updatePrepSchema } from '$lib/server/schemas/prep';
 
 // ── GET ──────────────────────────────────────────────────────────────────────
 
@@ -40,12 +42,7 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 	const prepId = parseInt(params.id);
 	if (isNaN(prepId)) throw error(400, 'Invalid prep ID');
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
-	}
+	const body = await parseBody(request, updatePrepSchema);
 
 	// Verify ownership
 	const [prep] = await db
@@ -55,22 +52,9 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 
 	if (!prep) throw error(404, 'Prep not found');
 
-	const updates: Record<string, unknown> = {};
-
-	if (typeof body.minGames === 'number') {
-		updates.minGames = Math.max(1, Math.min(100, body.minGames));
-	}
-
-	if (Array.isArray(body.excludedMoves)) {
-		// Validate: each entry should be a string
-		const valid = body.excludedMoves.every((e: unknown) => typeof e === 'string');
-		if (!valid) throw error(400, 'excludedMoves must be an array of strings');
-		updates.excludedMoves = JSON.stringify(body.excludedMoves);
-	}
-
-	if (Object.keys(updates).length === 0) {
-		throw error(400, 'No valid fields to update');
-	}
+	const updates: Partial<typeof opponentPreps.$inferInsert> = {};
+	if (body.minGames !== undefined) updates.minGames = body.minGames;
+	if (body.excludedMoves !== undefined) updates.excludedMoves = JSON.stringify(body.excludedMoves);
 
 	await db.update(opponentPreps).set(updates).where(eq(opponentPreps.id, prepId));
 

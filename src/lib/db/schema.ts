@@ -11,6 +11,7 @@
 import {
 	boolean,
 	doublePrecision,
+	foreignKey,
 	index,
 	integer,
 	pgTable,
@@ -18,7 +19,8 @@ import {
 	serial,
 	text,
 	timestamp,
-	unique
+	unique,
+	uniqueIndex
 } from 'drizzle-orm/pg-core';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -49,7 +51,7 @@ export const bookMove = pgTable(
 		contributor: text('contributor') // name of the person who contributed this move
 	},
 	(table) => ({
-		uniqueFromSan: unique().on(table.fromFen, table.san),
+		uniqueFromSan: unique('book_move_new_from_fen_san_key').on(table.fromFen, table.san),
 		// Dedicated single-column index for "all moves from this position" lookups.
 		fromFenIdx: index('idx_book_move_from_fen').on(table.fromFen)
 	})
@@ -87,7 +89,7 @@ export const chessmontMoves = pgTable(
 		draws: integer('draws').notNull().default(0)
 	},
 	(table) => ({
-		pk: primaryKey({ columns: [table.positionFen, table.moveSan] })
+		pk: primaryKey({ name: 'chessmont_moves_pkey', columns: [table.positionFen, table.moveSan] })
 	})
 );
 
@@ -112,7 +114,10 @@ export const lichessMoves = pgTable(
 		draws: integer('draws').notNull().default(0)
 	},
 	(table) => ({
-		pk: primaryKey({ columns: [table.positionFen, table.moveSan, table.ratingBracket] }),
+		pk: primaryKey({
+			name: 'lichess_moves_pkey',
+			columns: [table.positionFen, table.moveSan, table.ratingBracket]
+		}),
 		positionBracketIdx: index('idx_lichess_position_bracket').on(
 			table.positionFen,
 			table.ratingBracket
@@ -145,7 +150,10 @@ export const celebrityMoves = pgTable(
 		draws: integer('draws').notNull().default(0)
 	},
 	(table) => ({
-		pk: primaryKey({ columns: [table.positionFen, table.moveSan, table.playerSlug] }),
+		pk: primaryKey({
+			name: 'celebrity_moves_pkey',
+			columns: [table.positionFen, table.moveSan, table.playerSlug]
+		}),
 		positionPlayerIdx: index('idx_celebrity_position_player').on(
 			table.positionFen,
 			table.playerSlug
@@ -185,79 +193,119 @@ export const puzzle = pgTable(
 // ─────────────────────────────────────────────────────────────────────────────
 
 // The login account. One row per user.
-export const user = pgTable('user', {
-	id: serial('id').primaryKey(),
-	username: text('username').notNull().unique(),
-	passwordHash: text('password_hash').notNull(), // bcrypt hash — plain text is never stored
-	role: text('role').notNull().default('user'), // 'admin' or 'user'
-	enabled: boolean('enabled').notNull().default(true), // disabled users cannot log in
-	createdAt: timestamp('created_at').notNull()
-});
+export const user = pgTable(
+	'user',
+	{
+		id: serial('id').primaryKey(),
+		username: text('username').notNull().unique('user_username_key'),
+		passwordHash: text('password_hash').notNull(), // bcrypt hash — plain text is never stored
+		role: text('role').notNull().default('user'), // 'admin' or 'user'
+		enabled: boolean('enabled').notNull().default(true), // disabled users cannot log in
+		email: text('email'), // for password reset + transactional emails
+		emailVerified: boolean('email_verified').notNull().default(false), // must verify via email link
+		stripeCustomerId: text('stripe_customer_id'), // links user to Stripe
+		referralCode: text('referral_code').unique('user_referral_code_key'),
+		referredByUserId: integer('referred_by_user_id'),
+		createdAt: timestamp('created_at').notNull()
+	},
+	(table) => ({
+		emailIdx: uniqueIndex('idx_user_email').on(table.email),
+		stripeCustomerIdIdx: uniqueIndex('idx_user_stripe_customer_id').on(table.stripeCustomerId),
+		// Redundant with the unique constraint above, but it exists in the database (migration 0033).
+		referralCodeIdx: index('idx_user_referral_code').on(table.referralCode),
+		referredByUserIdFk: foreignKey({
+			name: 'user_referred_by_user_id_fkey',
+			columns: [table.referredByUserId],
+			foreignColumns: [table.id]
+		}).onDelete('set null')
+	})
+);
 
 // Active login sessions. One row per logged-in browser session.
 // The `id` (a random UUID) is stored as a cookie in the browser.
 // On every request, the server reads the cookie, looks it up here,
 // and retrieves the associated user_id to identify who is logged in.
-// Sessions expire after 30 days. Logging out deletes the row immediately.
+// Sessions expire after 14 days. Logging out deletes the row immediately.
 export const session = pgTable(
 	'session',
 	{
 		id: text('id').primaryKey(), // random UUID — this is what goes in the cookie
-		userId: integer('user_id')
-			.notNull()
-			.references(() => user.id, { onDelete: 'cascade' }),
-		expiresAt: timestamp('expires_at').notNull() // 30 days from login
+		userId: integer('user_id').notNull(),
+		expiresAt: timestamp('expires_at').notNull() // 14 days from login
 	},
 	(table) => ({
 		// Looked up on every authenticated request to fetch the session owner.
-		userIdIdx: index('idx_session_user_id').on(table.userId)
+		userIdIdx: index('idx_session_user_id').on(table.userId),
+		userIdFk: foreignKey({
+			name: 'session_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade')
 	})
 );
 
 // Per-user configuration. One row per user.
-export const userSettings = pgTable('user_settings', {
-	id: serial('id').primaryKey(),
-	userId: integer('user_id')
-		.notNull()
-		.references(() => user.id, { onDelete: 'cascade' }),
-	stockfishDepth: integer('stockfish_depth').notNull().default(15), // higher = stronger but slower
-	stockfishTimeout: integer('stockfish_timeout').notNull().default(10), // analysis timeout in seconds (3–30)
-	boardTheme: text('board_theme').notNull().default('blue'), // e.g. "blue", "green", "brown"
-	pieceSet: text('piece_set').notNull().default('cburnett'), // e.g. "cburnett", "merida", "alpha"
-	soundEnabled: boolean('sound_enabled').notNull().default(true),
-	lichessUsername: text('lichess_username'), // Lichess username for game import
-	chesscomUsername: text('chesscom_username'), // Chess.com username for game import
-	lastLichessImport: timestamp('last_lichess_import'), // watermark: playedAt of most recent Lichess import
-	lastChesscomImport: timestamp('last_chesscom_import'), // watermark: playedAt of most recent Chess.com import
-	puzzleGoalCount: integer('puzzle_goal_count'), // target number of solved puzzles per period (null = no goal)
-	puzzleGoalFrequency: text('puzzle_goal_frequency'), // 'daily' | 'weekly' | 'monthly' (null = no goal)
-	tempoEnabled: boolean('tempo_enabled').notNull().default(false), // countdown timer during drill
-	tempoSeconds: integer('tempo_seconds').notNull().default(10), // seconds per move (3–30)
-	playbackSpeed: integer('playback_speed').notNull().default(500), // auto-play delay in ms (200–1000)
-	appTheme: text('app_theme').notNull().default('dark'), // 'dark' | 'light'
-	gapMinGames: integer('gap_min_games').notNull().default(10000), // min master games for gap finder (10|100|1000|10000)
-	boardSize: integer('board_size').notNull().default(0), // 0 = auto (fill container), >0 = pixel width (320–800)
-	playersRatingBracket: integer('players_rating_bracket').notNull().default(3), // 0–7 bracket ID for Players tab (3 = 1401–1600)
-	starsPlayerSlug: text('stars_player_slug'), // last-selected player slug for Stars tab (null = first available)
-	tutorialStep: integer('tutorial_step'), // null = done/skipped, 0-10 = active tutorial step
-	fsrsDesiredRetention: doublePrecision('fsrs_desired_retention').notNull().default(0.9), // target recall probability (0.70–0.97)
-	fsrsMaximumInterval: integer('fsrs_maximum_interval').notNull().default(365), // max days between reviews (30–3650)
-	fsrsRelearningMinutes: integer('fsrs_relearning_minutes').notNull().default(10), // minutes before forgotten card reappears (1–60)
-	trainerRating: integer('trainer_rating'), // opening trainer mode Elo rating (null = not set yet, first-visit prompt)
-	updatedAt: timestamp('updated_at').notNull()
-});
+export const userSettings = pgTable(
+	'user_settings',
+	{
+		id: serial('id').primaryKey(),
+		userId: integer('user_id').notNull(),
+		stockfishDepth: integer('stockfish_depth').notNull().default(15), // higher = stronger but slower
+		stockfishTimeout: integer('stockfish_timeout').notNull().default(10), // analysis timeout in seconds (3–30)
+		boardTheme: text('board_theme').notNull().default('blue'), // e.g. "blue", "green", "brown"
+		pieceSet: text('piece_set').notNull().default('cburnett'), // e.g. "cburnett", "merida", "alpha"
+		soundEnabled: boolean('sound_enabled').notNull().default(true),
+		lichessUsername: text('lichess_username'), // Lichess username for game import
+		chesscomUsername: text('chesscom_username'), // Chess.com username for game import
+		lastLichessImport: timestamp('last_lichess_import'), // watermark: playedAt of most recent Lichess import
+		lastChesscomImport: timestamp('last_chesscom_import'), // watermark: playedAt of most recent Chess.com import
+		puzzleGoalCount: integer('puzzle_goal_count'), // target number of solved puzzles per period (null = no goal)
+		puzzleGoalFrequency: text('puzzle_goal_frequency'), // 'daily' | 'weekly' | 'monthly' (null = no goal)
+		tempoEnabled: boolean('tempo_enabled').notNull().default(false), // countdown timer during drill
+		tempoSeconds: integer('tempo_seconds').notNull().default(10), // seconds per move (3–30)
+		playbackSpeed: integer('playback_speed').notNull().default(500), // auto-play delay in ms (200–1000)
+		appTheme: text('app_theme').notNull().default('dark'), // 'dark' | 'light'
+		gapMinGames: integer('gap_min_games').notNull().default(10000), // min master games for gap finder (10|100|1000|10000)
+		boardSize: integer('board_size').notNull().default(0), // 0 = auto (fill container), >0 = pixel width (320–800)
+		playersRatingBracket: integer('players_rating_bracket').notNull().default(3), // 0–7 bracket ID for Players tab (3 = 1401–1600)
+		starsPlayerSlug: text('stars_player_slug'), // last-selected player slug for Stars tab (null = first available)
+		tutorialStep: integer('tutorial_step'), // null = done/skipped, 0-10 = active tutorial step
+		fsrsDesiredRetention: doublePrecision('fsrs_desired_retention').notNull().default(0.9), // target recall probability (0.70–0.97)
+		fsrsMaximumInterval: integer('fsrs_maximum_interval').notNull().default(365), // max days between reviews (30–3650)
+		fsrsRelearningMinutes: integer('fsrs_relearning_minutes').notNull().default(10), // minutes before forgotten card reappears (1–60)
+		trainerRating: integer('trainer_rating'), // opening trainer mode Elo rating (null = not set yet, first-visit prompt)
+		updatedAt: timestamp('updated_at').notNull()
+	},
+	(table) => ({
+		userIdIdx: index('idx_user_settings_user_id').on(table.userId),
+		userIdFk: foreignKey({
+			name: 'user_settings_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade')
+	})
+);
 
 // A named opening repertoire. Users can have multiple (e.g. "White - e4", "Black vs d4").
-export const repertoire = pgTable('repertoire', {
-	id: serial('id').primaryKey(),
-	userId: integer('user_id')
-		.notNull()
-		.references(() => user.id, { onDelete: 'cascade' }),
-	name: text('name').notNull(), // e.g. "White - e4 lines"
-	color: text('color').notNull(), // "WHITE" or "BLACK" — which side the user plays
-	startFen: text('start_fen'), // custom start position FEN — null means "after user's first move" (default)
-	createdAt: timestamp('created_at').notNull()
-});
+export const repertoire = pgTable(
+	'repertoire',
+	{
+		id: serial('id').primaryKey(),
+		userId: integer('user_id').notNull(),
+		name: text('name').notNull(), // e.g. "White - e4 lines"
+		color: text('color').notNull(), // "WHITE" or "BLACK" — which side the user plays
+		startFen: text('start_fen'), // custom start position FEN — null means "after user's first move" (default)
+		createdAt: timestamp('created_at').notNull()
+	},
+	(table) => ({
+		userIdIdx: index('idx_repertoire_user_id').on(table.userId),
+		userIdFk: foreignKey({
+			name: 'repertoire_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade')
+	})
+);
 
 // Every move the user has added to a repertoire.
 // This is the raw move record — what move was played and how it was sourced.
@@ -266,12 +314,8 @@ export const userMove = pgTable(
 	'user_move',
 	{
 		id: serial('id').primaryKey(),
-		userId: integer('user_id')
-			.notNull()
-			.references(() => user.id, { onDelete: 'cascade' }),
-		repertoireId: integer('repertoire_id')
-			.notNull()
-			.references(() => repertoire.id, { onDelete: 'cascade' }),
+		userId: integer('user_id').notNull(),
+		repertoireId: integer('repertoire_id').notNull(),
 		fromFen: text('from_fen').notNull(), // position before the move
 		toFen: text('to_fen').notNull(), // position after the move
 		san: text('san').notNull(), // move in Standard Algebraic Notation
@@ -281,7 +325,18 @@ export const userMove = pgTable(
 	},
 	(table) => ({
 		repertoireIdIdx: index('idx_user_move_repertoire_id').on(table.repertoireId),
-		fromFenIdx: index('idx_user_move_from_fen').on(table.fromFen)
+		fromFenIdx: index('idx_user_move_from_fen').on(table.fromFen),
+		userIdIdx: index('idx_user_move_user_id').on(table.userId),
+		userIdFk: foreignKey({
+			name: 'user_move_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade'),
+		repertoireIdFk: foreignKey({
+			name: 'user_move_repertoire_id_fkey',
+			columns: [table.repertoireId],
+			foreignColumns: [repertoire.id]
+		}).onDelete('cascade')
 	})
 );
 
@@ -293,12 +348,8 @@ export const userRepertoireMove = pgTable(
 	'user_repertoire_move',
 	{
 		id: serial('id').primaryKey(),
-		userId: integer('user_id')
-			.notNull()
-			.references(() => user.id, { onDelete: 'cascade' }),
-		repertoireId: integer('repertoire_id')
-			.notNull()
-			.references(() => repertoire.id, { onDelete: 'cascade' }),
+		userId: integer('user_id').notNull(),
+		repertoireId: integer('repertoire_id').notNull(),
 		fromFen: text('from_fen').notNull(), // the position the user must respond to
 		san: text('san').notNull(), // the correct move
 
@@ -319,7 +370,18 @@ export const userRepertoireMove = pgTable(
 		repertoireIdIdx: index('idx_user_repertoire_move_repertoire_id').on(table.repertoireId),
 		fromFenIdx: index('idx_user_repertoire_move_from_fen').on(table.fromFen),
 		// due is the primary sort key when the FSRS scheduler fetches cards due for review.
-		dueIdx: index('idx_user_repertoire_move_due').on(table.due)
+		dueIdx: index('idx_user_repertoire_move_due').on(table.due),
+		userIdIdx: index('idx_user_repertoire_move_user_id').on(table.userId),
+		userIdFk: foreignKey({
+			name: 'user_repertoire_move_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade'),
+		repertoireIdFk: foreignKey({
+			name: 'user_repertoire_move_repertoire_id_fkey',
+			columns: [table.repertoireId],
+			foreignColumns: [repertoire.id]
+		}).onDelete('cascade')
 	})
 );
 
@@ -328,12 +390,8 @@ export const reviewedGame = pgTable(
 	'reviewed_game',
 	{
 		id: serial('id').primaryKey(),
-		userId: integer('user_id')
-			.notNull()
-			.references(() => user.id, { onDelete: 'cascade' }),
-		repertoireId: integer('repertoire_id')
-			.notNull()
-			.references(() => repertoire.id, { onDelete: 'cascade' }),
+		userId: integer('user_id').notNull(),
+		repertoireId: integer('repertoire_id').notNull(),
 		pgn: text('pgn').notNull(), // full PGN of the reviewed game
 		source: text('source').notNull(), // "MANUAL" (pasted) or "LICHESS" (imported)
 		lichessGameId: text('lichess_game_id'), // Lichess game ID, used to prevent duplicate imports
@@ -343,7 +401,18 @@ export const reviewedGame = pgTable(
 		notes: text('notes')
 	},
 	(table) => ({
-		repertoireIdIdx: index('idx_reviewed_game_repertoire_id').on(table.repertoireId)
+		repertoireIdIdx: index('idx_reviewed_game_repertoire_id').on(table.repertoireId),
+		userIdIdx: index('idx_reviewed_game_user_id').on(table.userId),
+		userIdFk: foreignKey({
+			name: 'reviewed_game_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade'),
+		repertoireIdFk: foreignKey({
+			name: 'reviewed_game_repertoire_id_fkey',
+			columns: [table.repertoireId],
+			foreignColumns: [repertoire.id]
+		}).onDelete('cascade')
 	})
 );
 
@@ -356,9 +425,7 @@ export const importedGame = pgTable(
 	'imported_game',
 	{
 		id: serial('id').primaryKey(),
-		userId: integer('user_id')
-			.notNull()
-			.references(() => user.id, { onDelete: 'cascade' }),
+		userId: integer('user_id').notNull(),
 		pgn: text('pgn').notNull(), // full PGN from the platform
 		source: text('source').notNull(), // 'LICHESS' or 'CHESSCOM'
 		externalGameId: text('external_game_id').notNull(), // Lichess game ID or Chess.com game URL
@@ -371,14 +438,26 @@ export const importedGame = pgTable(
 		playedAt: timestamp('played_at'), // when the game was played on the platform
 		importedAt: timestamp('imported_at').notNull(), // when we fetched it
 		status: text('status').notNull().default('pending'), // 'pending', 'reviewed', 'skipped'
-		reviewedGameId: integer('reviewed_game_id').references(() => reviewedGame.id, {
-			onDelete: 'set null'
-		}) // set when review is saved
+		reviewedGameId: integer('reviewed_game_id') // set when review is saved
 	},
 	(table) => ({
-		uniqueUserSourceGame: unique().on(table.userId, table.source, table.externalGameId),
+		uniqueUserSourceGame: unique('imported_game_user_id_source_external_game_id_key').on(
+			table.userId,
+			table.source,
+			table.externalGameId
+		),
 		userStatusIdx: index('idx_imported_game_user_status').on(table.userId, table.status),
-		userPlayedAtIdx: index('idx_imported_game_user_played_at').on(table.userId, table.playedAt)
+		userPlayedAtIdx: index('idx_imported_game_user_played_at').on(table.userId, table.playedAt),
+		userIdFk: foreignKey({
+			name: 'imported_game_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade'),
+		reviewedGameIdFk: foreignKey({
+			name: 'imported_game_reviewed_game_id_fkey',
+			columns: [table.reviewedGameId],
+			foreignColumns: [reviewedGame.id]
+		}).onDelete('set null')
 	})
 );
 
@@ -387,19 +466,26 @@ export const drillSession = pgTable(
 	'drill_session',
 	{
 		id: serial('id').primaryKey(),
-		userId: integer('user_id')
-			.notNull()
-			.references(() => user.id, { onDelete: 'cascade' }),
-		repertoireId: integer('repertoire_id')
-			.notNull()
-			.references(() => repertoire.id, { onDelete: 'cascade' }),
+		userId: integer('user_id').notNull(),
+		repertoireId: integer('repertoire_id').notNull(),
 		cardsReviewed: integer('cards_reviewed').notNull().default(0),
 		cardsCorrect: integer('cards_correct').notNull().default(0),
 		startedAt: timestamp('started_at').notNull(),
 		completedAt: timestamp('completed_at') // null if session was abandoned
 	},
 	(table) => ({
-		repertoireIdIdx: index('idx_drill_session_repertoire_id').on(table.repertoireId)
+		repertoireIdIdx: index('idx_drill_session_repertoire_id').on(table.repertoireId),
+		userIdIdx: index('idx_drill_session_user_id').on(table.userId),
+		userIdFk: foreignKey({
+			name: 'drill_session_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade'),
+		repertoireIdFk: foreignKey({
+			name: 'drill_session_repertoire_id_fkey',
+			columns: [table.repertoireId],
+			foreignColumns: [repertoire.id]
+		}).onDelete('cascade')
 	})
 );
 
@@ -409,18 +495,128 @@ export const puzzleAttempt = pgTable(
 	'puzzle_attempt',
 	{
 		id: serial('id').primaryKey(),
-		userId: integer('user_id')
-			.notNull()
-			.references(() => user.id, { onDelete: 'cascade' }),
-		puzzleId: text('puzzle_id')
-			.notNull()
-			.references(() => puzzle.puzzleId, { onDelete: 'cascade' }),
+		userId: integer('user_id').notNull(),
+		puzzleId: text('puzzle_id').notNull(),
 		solved: boolean('solved').notNull(), // true if the user found all correct moves
 		timeMs: integer('time_ms'), // how long the attempt took in milliseconds
 		attemptedAt: timestamp('attempted_at').notNull()
 	},
 	(table) => ({
-		userPuzzleIdx: index('idx_puzzle_attempt_user_puzzle').on(table.userId, table.puzzleId)
+		userPuzzleIdx: index('idx_puzzle_attempt_user_puzzle').on(table.userId, table.puzzleId),
+		// Counts recent attempts for the puzzle goal.
+		userDateIdx: index('idx_puzzle_attempt_user_date').on(table.userId, table.attemptedAt),
+		userIdFk: foreignKey({
+			name: 'puzzle_attempt_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade'),
+		puzzleIdFk: foreignKey({
+			name: 'puzzle_attempt_puzzle_id_fkey',
+			columns: [table.puzzleId],
+			foreignColumns: [puzzle.puzzleId]
+		}).onDelete('cascade')
+	})
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUBSCRIPTION / BILLING TABLES
+// ─────────────────────────────────────────────────────────────────────────────
+
+// One subscription per user. Tracks the user's tier ('free' or 'paid') and
+// links to the Stripe subscription for billing management.
+export const subscription = pgTable(
+	'subscription',
+	{
+		id: serial('id').primaryKey(),
+		userId: integer('user_id').notNull(),
+		tier: text('tier').notNull().default('free'), // 'free' or 'paid'
+		stripeSubscriptionId: text('stripe_subscription_id'), // Stripe sub ID
+		stripePriceId: text('stripe_price_id'), // monthly vs annual price
+		status: text('status').notNull().default('active'), // 'active', 'past_due', 'canceled'
+		currentPeriodEnd: timestamp('current_period_end'), // billing period end
+		cancelAtPeriodEnd: boolean('cancel_at_period_end').notNull().default(false),
+		giftExpiry: timestamp('gift_expiry'), // null = no gift; date = gift active until then; 9999-12-31 = lifetime
+		referralDiscountActive: boolean('referral_discount_active').notNull().default(false),
+		// Set when the referral coupon is actually applied (at checkout or to an existing
+		// subscription). The discount is single-use: once set, it is never applied again.
+		referralDiscountUsedAt: timestamp('referral_discount_used_at'),
+		createdAt: timestamp('created_at').notNull(),
+		updatedAt: timestamp('updated_at').notNull()
+	},
+	(table) => ({
+		userIdIdx: uniqueIndex('idx_subscription_user_id').on(table.userId),
+		stripeSubscriptionIdIdx: uniqueIndex('idx_subscription_stripe_subscription_id').on(
+			table.stripeSubscriptionId
+		),
+		userIdFk: foreignKey({
+			name: 'subscription_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade')
+	})
+);
+
+// Rate limiting state — shared across all app instances via the database.
+// Each row tracks attempts for a unique key (e.g. "login:192.168.1.1")
+// within a sliding time window.
+export const rateLimit = pgTable('rate_limit', {
+	key: text('key').primaryKey(), // e.g. "login:192.168.1.1" or "register:10.0.0.5"
+	count: integer('count').notNull().default(1),
+	windowStart: timestamp('window_start').notNull()
+});
+
+// Audit log for admin actions — tracks who did what to whom.
+export const auditLog = pgTable('audit_log', {
+	id: serial('id').primaryKey(),
+	adminUserId: integer('admin_user_id').notNull(), // the admin who performed the action
+	action: text('action').notNull(), // e.g. "create_user", "delete_user", "reset_password"
+	targetUserId: integer('target_user_id'), // the user affected (null for non-user actions)
+	details: text('details'), // JSON or free-text with extra context
+	createdAt: timestamp('created_at').notNull()
+});
+
+// Password reset tokens. Each token is single-use and expires after 1 hour.
+export const passwordResetToken = pgTable(
+	'password_reset_token',
+	{
+		id: serial('id').primaryKey(),
+		userId: integer('user_id').notNull(),
+		tokenHash: text('token_hash').notNull(), // SHA-256 hex hash of the reset token
+		expiresAt: timestamp('expires_at').notNull(), // 1 hour from creation
+		usedAt: timestamp('used_at'), // set on use to prevent reuse
+		createdAt: timestamp('created_at').notNull()
+	},
+	(table) => ({
+		userIdIdx: index('idx_password_reset_token_user_id').on(table.userId),
+		tokenHashIdx: uniqueIndex('idx_password_reset_token_hash').on(table.tokenHash),
+		userIdFk: foreignKey({
+			name: 'password_reset_token_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade')
+	})
+);
+
+// Email verification tokens. Each token is single-use and expires after 24 hours.
+// Sent via Loops transactional email when a user registers or an admin-created user first logs in.
+export const emailVerificationToken = pgTable(
+	'email_verification_token',
+	{
+		id: serial('id').primaryKey(),
+		userId: integer('user_id').notNull(),
+		tokenHash: text('token_hash').notNull(), // SHA-256 hex hash of the verification token
+		expiresAt: timestamp('expires_at').notNull(), // 24 hours from creation
+		usedAt: timestamp('used_at'), // set on use to prevent reuse
+		createdAt: timestamp('created_at').notNull()
+	},
+	(table) => ({
+		userIdIdx: index('idx_email_verification_token_user_id').on(table.userId),
+		tokenHashIdx: uniqueIndex('idx_email_verification_token_hash').on(table.tokenHash),
+		userIdFk: foreignKey({
+			name: 'email_verification_token_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade')
 	})
 );
 
@@ -435,12 +631,8 @@ export const trainerSession = pgTable(
 	'trainer_session',
 	{
 		id: serial('id').primaryKey(),
-		userId: integer('user_id')
-			.notNull()
-			.references(() => user.id, { onDelete: 'cascade' }),
-		repertoireId: integer('repertoire_id')
-			.notNull()
-			.references(() => repertoire.id, { onDelete: 'cascade' }),
+		userId: integer('user_id').notNull(),
+		repertoireId: integer('repertoire_id').notNull(),
 		startFen: text('start_fen').notNull(), // position training started from
 		pgn: text('pgn').notNull(), // full PGN of the training game
 		movesPlayed: integer('moves_played').notNull(), // half-moves the user played
@@ -452,7 +644,17 @@ export const trainerSession = pgTable(
 		completedAt: timestamp('completed_at').notNull()
 	},
 	(table) => ({
-		userIdIdx: index('idx_trainer_session_user_id').on(table.userId)
+		userIdIdx: index('idx_trainer_session_user_id').on(table.userId),
+		userIdFk: foreignKey({
+			name: 'trainer_session_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade'),
+		repertoireIdFk: foreignKey({
+			name: 'trainer_session_repertoire_id_fkey',
+			columns: [table.repertoireId],
+			foreignColumns: [repertoire.id]
+		}).onDelete('cascade')
 	})
 );
 
@@ -461,17 +663,20 @@ export const trainerSavedPosition = pgTable(
 	'trainer_saved_position',
 	{
 		id: serial('id').primaryKey(),
-		userId: integer('user_id')
-			.notNull()
-			.references(() => user.id, { onDelete: 'cascade' }),
+		userId: integer('user_id').notNull(),
 		fen: text('fen').notNull(), // 4-field normalized FEN
 		name: text('name').notNull(), // user label, e.g. "Najdorf after 6.Be3"
 		leadInMoves: text('lead_in_moves'), // JSON array of SAN strings from standard position to this FEN
 		createdAt: timestamp('created_at').notNull()
 	},
 	(table) => ({
-		uniqueUserFen: unique().on(table.userId, table.fen),
-		userIdIdx: index('idx_trainer_saved_position_user_id').on(table.userId)
+		uniqueUserFen: unique('trainer_saved_position_user_id_fen_key').on(table.userId, table.fen),
+		userIdIdx: index('idx_trainer_saved_position_user_id').on(table.userId),
+		userIdFk: foreignKey({
+			name: 'trainer_saved_position_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade')
 	})
 );
 
@@ -488,9 +693,7 @@ export const opponentPreps = pgTable(
 	'opponent_preps',
 	{
 		id: serial('id').primaryKey(),
-		userId: integer('user_id')
-			.notNull()
-			.references(() => user.id, { onDelete: 'cascade' }),
+		userId: integer('user_id').notNull(),
 		opponentName: text('opponent_name').notNull(), // display name shown in the UI
 		platform: text('platform').notNull(), // 'LICHESS' or 'CHESSCOM'
 		platformUsername: text('platform_username').notNull(), // exact username used for API calls
@@ -503,7 +706,12 @@ export const opponentPreps = pgTable(
 		excludedMoves: text('excluded_moves') // JSON array of "fen|san" strings to hide from prep view
 	},
 	(table) => ({
-		userIdIdx: index('idx_opponent_preps_user_id').on(table.userId)
+		userIdIdx: index('idx_opponent_preps_user_id').on(table.userId),
+		userIdFk: foreignKey({
+			name: 'opponent_preps_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade')
 	})
 );
 
@@ -516,9 +724,7 @@ export const opponentPreps = pgTable(
 export const opponentMoves = pgTable(
 	'opponent_moves',
 	{
-		prepId: integer('prep_id')
-			.notNull()
-			.references(() => opponentPreps.id, { onDelete: 'cascade' }),
+		prepId: integer('prep_id').notNull(),
 		positionFen: text('position_fen').notNull(), // 4-field normalized FEN
 		moveSan: text('move_san').notNull(),
 		opponentColor: text('opponent_color').notNull(), // 'w' or 'b' — which color the opponent was playing
@@ -530,13 +736,19 @@ export const opponentMoves = pgTable(
 	},
 	(table) => ({
 		pk: primaryKey({
+			name: 'opponent_moves_pkey',
 			columns: [table.prepId, table.positionFen, table.moveSan, table.opponentColor]
 		}),
 		positionColorIdx: index('idx_opponent_moves_position_color').on(
 			table.prepId,
 			table.positionFen,
 			table.opponentColor
-		)
+		),
+		prepIdFk: foreignKey({
+			name: 'opponent_moves_prep_id_fkey',
+			columns: [table.prepId],
+			foreignColumns: [opponentPreps.id]
+		}).onDelete('cascade')
 	})
 );
 
@@ -546,12 +758,8 @@ export const prepMoves = pgTable(
 	'prep_moves',
 	{
 		id: serial('id').primaryKey(),
-		prepId: integer('prep_id')
-			.notNull()
-			.references(() => opponentPreps.id, { onDelete: 'cascade' }),
-		userId: integer('user_id')
-			.notNull()
-			.references(() => user.id, { onDelete: 'cascade' }),
+		prepId: integer('prep_id').notNull(),
+		userId: integer('user_id').notNull(),
 		fromFen: text('from_fen').notNull(), // position before the move
 		toFen: text('to_fen').notNull(), // position after the move (computed server-side)
 		san: text('san').notNull(), // move in Standard Algebraic Notation
@@ -559,6 +767,16 @@ export const prepMoves = pgTable(
 		createdAt: timestamp('created_at').notNull()
 	},
 	(table) => ({
-		prepFromFenIdx: index('idx_prep_moves_prep_from_fen').on(table.prepId, table.fromFen)
+		prepFromFenIdx: index('idx_prep_moves_prep_from_fen').on(table.prepId, table.fromFen),
+		prepIdFk: foreignKey({
+			name: 'prep_moves_prep_id_fkey',
+			columns: [table.prepId],
+			foreignColumns: [opponentPreps.id]
+		}).onDelete('cascade'),
+		userIdFk: foreignKey({
+			name: 'prep_moves_user_id_fkey',
+			columns: [table.userId],
+			foreignColumns: [user.id]
+		}).onDelete('cascade')
 	})
 );

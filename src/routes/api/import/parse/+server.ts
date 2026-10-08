@@ -16,22 +16,20 @@ import { repertoire, userMove } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { parseVariationPgn } from '$lib/pgn/parseVariations';
 import { detectConflicts } from '$lib/pgn/detectConflicts';
+import { requireAuth } from '$lib/server/api-helpers';
+import { parseBody } from '$lib/server/validation';
+import { parseImportSchema } from '$lib/server/schemas/import';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
-	const user = locals.user;
+	const user = requireAuth(locals);
 
-	let body;
-	try {
-		body = await request.json();
-	} catch {
-		throw error(400, 'Invalid JSON body');
+	const { repertoireId, pgn } = await parseBody(request, parseImportSchema);
+
+	// Reject oversized PGN to prevent CPU/memory abuse during parsing
+	const MAX_PGN_BYTES = 1_048_576; // 1 MB
+	if (new TextEncoder().encode(pgn).byteLength > MAX_PGN_BYTES) {
+		throw error(413, 'PGN is too large — maximum size is 1 MB');
 	}
-
-	const { repertoireId, pgn } = body;
-
-	if (typeof repertoireId !== 'number') throw error(400, 'repertoireId must be a number');
-	if (!pgn || typeof pgn !== 'string') throw error(400, 'pgn is required');
 
 	// Verify repertoire ownership
 	const [rep] = await db
