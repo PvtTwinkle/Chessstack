@@ -14,6 +14,8 @@ export const STRIPE_PRICE_ID_ANNUAL = process.env.STRIPE_PRICE_ID_ANNUAL ?? '';
 export const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET ?? '';
 export const STRIPE_REFERRAL_COUPON_ID = process.env.STRIPE_REFERRAL_COUPON_ID ?? '';
 
+const STRIPE_TIMEOUT_MS = 15_000;
+
 let _stripe: Stripe | null = null;
 let _checked = false;
 
@@ -22,8 +24,17 @@ export function getStripe(): Stripe | null {
 		_checked = true;
 		const key = process.env.STRIPE_SECRET_KEY;
 		if (key) {
-			_stripe = new Stripe(key);
+			// The SDK's default is 80 s; a checkout click shouldn't hang that long.
+			_stripe = new Stripe(key, { timeout: STRIPE_TIMEOUT_MS });
 		}
 	}
 	return _stripe;
+}
+
+/**
+ * Checkout needs the key and both prices. With only some of them set, the
+ * plan cards would show and answer 503, so billing counts as off.
+ */
+export function isBillingEnabled(): boolean {
+	return !!process.env.STRIPE_SECRET_KEY && !!STRIPE_PRICE_ID_MONTHLY && !!STRIPE_PRICE_ID_ANNUAL;
 }

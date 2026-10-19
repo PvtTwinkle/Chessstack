@@ -13,7 +13,7 @@ import { user } from '$lib/db/schema';
 import { eq, count } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 import { generateReferralCode } from '$lib/auth/referral-code';
-import { createSession, SESSION_COOKIE_NAME, SECURE_COOKIE } from '$lib/auth';
+import { createSession, setSessionCookie, SECURE_COOKIE } from '$lib/auth';
 import { isRateLimited } from '$lib/auth/rate-limit';
 import { REGISTER_RATE_LIMIT } from '$lib/auth/rate-limit-config';
 import { validatePassword } from '$lib/auth/password';
@@ -22,6 +22,8 @@ import { isEmailVerificationEnabled, createContact } from '$lib/loops';
 import { createAndSendVerification } from '$lib/auth/email-verification';
 import { POST_VERIFY_REDIRECT_COOKIE, safeRedirectPath } from '$lib/auth/redirect';
 import { log } from '$lib/server/log';
+import { isUniqueViolation } from '$lib/server/db-errors';
+import { usernameMatches } from '$lib/auth/username';
 import { IS_CLOUD } from '$lib/server/edition';
 
 const REGISTRATION_MODE = process.env.REGISTRATION_MODE ?? 'invite';
@@ -86,11 +88,12 @@ export const actions: Actions = {
 			return fail(400, { error: 'Passwords do not match.' });
 		}
 
-		// Check for duplicate username
+		// Check for duplicate username, ignoring case so "Kevin" and "kevin"
+		// can't both exist.
 		const [existingUsername] = await db
 			.select({ id: user.id })
 			.from(user)
-			.where(eq(user.username, username));
+			.where(usernameMatches(username));
 		if (existingUsername) {
 			return fail(400, { error: 'That username is already taken.' });
 		}
@@ -124,46 +127,43 @@ export const actions: Actions = {
 
 		// Create user
 		const passwordHash = await bcrypt.hash(password, 10);
-		const [newUser] = await db
-			.insert(user)
-			.values({
-				username,
-				email,
-				passwordHash,
-				role,
-				enabled: true,
-				referralCode: generateReferralCode(),
-				referredByUserId,
-				createdAt: new Date()
-			})
-			.returning({ id: user.id });
+		let newUser: { id: number };
+		try {
+			[newUser] = await db
+				.insert(user)
+				.values({
+					username,
+					email,
+					passwordHash,
+					role,
+					enabled: true,
+					referralCode: generateReferralCode(),
+					referredByUserId,
+					createdAt: new Date()
+				})
+				.returning({ id: user.id });
+		} catch (e) {
+			// Someone registered the same username or email since the checks above.
+			if (isUniqueViolation(e)) {
+				return fail(400, { error: 'That username or email address is already in use.' });
+			}
+			throw e;
+		}
 
 		// Create session and set cookie
-		const token = await createSession(newUser.id);
-		cookies.set(SESSION_COOKIE_NAME, token, {
-			path: '/',
-			httpOnly: true,
-			sameSite: 'lax',
-			secure: SECURE_COOKIE,
-			maxAge: 60 * 60 * 24 * 14
-		});
+		setSessionCookie(cookies, await createSession(newUser.id));
 
-		// Create contact in Loops for self-registered users.
-		// Errors are caught — this is non-critical.
+		// Create the user's Loops contact in the background: it is non-critical,
+		// so registration doesn't wait on Loops.
 		if (email) {
-			try {
-				await createContact({
-					email,
-					username
-				});
-			} catch (e) {
-				log.error('Failed to create Loops contact', {
+			const userId = newUser.id;
+			createContact({ email, username }).catch((e) => {
+				log.warn('Failed to create Loops contact', {
 					tag: 'LOOPS_CONTACT_FAILURE',
-					userId: newUser.id,
-					email,
-					err: e
+					userId,
+					reason: e instanceof Error ? e.message : String(e)
 				});
-			}
+			});
 		}
 
 		// Send verification email if Loops is configured.
@@ -177,7 +177,6 @@ export const actions: Actions = {
 				log.error('Registration verification email failed', {
 					tag: 'EMAIL_SEND_FAILURE',
 					userId: newUser.id,
-					email,
 					err: e
 				});
 			}

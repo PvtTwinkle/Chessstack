@@ -1,5 +1,6 @@
 // POST   /api/prep/:id/moves — add a user's prep response move
-// DELETE /api/prep/:id/moves — remove a prep move by ID
+// DELETE /api/prep/:id/moves — remove a prep move by ID, with the prep moves
+//                               after it that no other line reaches
 //
 // Prep moves are sandboxed — they live in prep_moves, completely separate
 // from the user's real repertoire moves. No SR cards are created.
@@ -8,19 +9,21 @@ import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { Chess } from 'chess.js';
 import { db } from '$lib/db';
-import { opponentPreps, prepMoves } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
-import { fenKey } from '$lib/fen';
+import { opponentPreps, opponentMoves, prepMoves } from '$lib/db/schema';
+import { eq, and, inArray } from 'drizzle-orm';
+import { fenKey, STARTING_FEN } from '$lib/fen';
+import { prepSubtreeIds } from '$lib/prep/subtree';
+import { walkableEdges } from '$lib/server/prep-connect';
 import { parseBody } from '$lib/server/validation';
 import { addPrepMoveSchema, deletePrepMoveSchema } from '$lib/server/schemas/prep';
+import { requireAuth, parseIntParam } from '$lib/server/api-helpers';
 
 // ── POST ─────────────────────────────────────────────────────────────────────
 
 export const POST: RequestHandler = async ({ locals, params, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	const prepId = parseInt(params.id);
-	if (isNaN(prepId)) throw error(400, 'Invalid prep ID');
+	const prepId = parseIntParam(params.id, 'prep ID');
 
 	const body = await parseBody(request, addPrepMoveSchema);
 	const { san, color } = body;
@@ -30,7 +33,7 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 	const [prep] = await db
 		.select({ id: opponentPreps.id })
 		.from(opponentPreps)
-		.where(and(eq(opponentPreps.id, prepId), eq(opponentPreps.userId, locals.user.id)));
+		.where(and(eq(opponentPreps.id, prepId), eq(opponentPreps.userId, user.id)));
 
 	if (!prep) throw error(404, 'Prep not found');
 
@@ -72,7 +75,10 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 				}
 				// Different move — conflict, signal 409
 				return json(
-					{ error: 'A prep move already exists from this position', existing: existingAtPosition },
+					{
+						message: 'A prep move already exists from this position',
+						existing: existingAtPosition
+					},
 					{ status: 409 }
 				);
 			}
@@ -81,7 +87,9 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 		// If FEN is invalid for Chess.js, fall through to the insert
 	}
 
-	// Check-and-insert in a transaction to prevent duplicate race conditions
+	// Check, then insert. There is no unique index on prep_moves, so two
+	// requests racing past this check can still both insert; the cost is a
+	// duplicate row in a sandboxed prep, which the client tolerates.
 	const result = await db.transaction(async (tx) => {
 		const [existing] = await tx
 			.select()
@@ -101,7 +109,7 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 			.insert(prepMoves)
 			.values({
 				prepId,
-				userId: locals.user!.id,
+				userId: user.id,
 				fromFen,
 				toFen,
 				san,
@@ -119,7 +127,7 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 // ── DELETE ───────────────────────────────────────────────────────────────────
 
 export const DELETE: RequestHandler = async ({ locals, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
 	const { moveId } = await parseBody(request, deletePrepMoveSchema);
 
@@ -127,11 +135,30 @@ export const DELETE: RequestHandler = async ({ locals, request }) => {
 	const [move] = await db
 		.select()
 		.from(prepMoves)
-		.where(and(eq(prepMoves.id, moveId), eq(prepMoves.userId, locals.user.id)));
+		.where(and(eq(prepMoves.id, moveId), eq(prepMoves.userId, user.id)));
 
 	if (!move) throw error(404, 'Prep move not found');
 
-	await db.delete(prepMoves).where(eq(prepMoves.id, moveId));
+	// The moves after it go too, unless another line on the prep board still
+	// reaches them; left behind they'd be copied into repertoires by export
+	// and add-to-repertoire where nothing leads to them.
+	const [sameColor, oppMoves] = await Promise.all([
+		db
+			.select()
+			.from(prepMoves)
+			.where(and(eq(prepMoves.prepId, move.prepId), eq(prepMoves.color, move.color))),
+		db.select().from(opponentMoves).where(eq(opponentMoves.prepId, move.prepId))
+	]);
+	const walkable = await walkableEdges(
+		user.id,
+		move.color === 'white' ? 'WHITE' : 'BLACK',
+		oppMoves
+	);
+	const ids = prepSubtreeIds(STARTING_FEN, sameColor, walkable, moveId);
 
-	return json({ deleted: true });
+	await db
+		.delete(prepMoves)
+		.where(and(eq(prepMoves.prepId, move.prepId), inArray(prepMoves.id, ids)));
+
+	return json({ deleted: true, ids });
 };

@@ -15,9 +15,9 @@ import { eq, and, isNull, gt } from 'drizzle-orm';
 import { hashToken } from '$lib/auth/token-hash';
 import { sendVerificationEmail } from '$lib/loops';
 import { log } from '$lib/server/log';
+import { ORIGIN } from '$lib/server/origin';
 
 const TOKEN_EXPIRY_HOURS = 24;
-const ORIGIN = process.env.ORIGIN ?? 'http://localhost:3000';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // createAndSendVerification(userId, email)

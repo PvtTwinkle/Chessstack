@@ -3,7 +3,7 @@
 import type { PageServerLoad } from './$types';
 import { db } from '$lib/db';
 import { opponentPreps } from '$lib/db/schema';
-import { eq, desc } from 'drizzle-orm';
+import { and, eq, desc, isNull } from 'drizzle-orm';
 
 export const load: PageServerLoad = async ({ locals }) => {
 	if (!locals.user) return { preps: [] };
@@ -11,7 +11,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 	const preps = await db
 		.select()
 		.from(opponentPreps)
-		.where(eq(opponentPreps.userId, locals.user.id))
+		.where(and(eq(opponentPreps.userId, locals.user.id), isNull(opponentPreps.pendingSince)))
 		.orderBy(desc(opponentPreps.createdAt));
 
 	return { preps };

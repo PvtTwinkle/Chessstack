@@ -8,6 +8,7 @@
 		drillType,
 		totalReviewed,
 		correctCount,
+		practiceCount = 0,
 		linesDrilled,
 		nextDueAt,
 		onRestart
@@ -15,6 +16,8 @@
 		drillType: 'card' | 'line';
 		totalReviewed: number;
 		correctCount: number;
+		/** How many of the reviewed were practice (not due, not graded). */
+		practiceCount?: number;
 		linesDrilled: number;
 		nextDueAt: string | null;
 		onRestart: () => void;
@@ -37,6 +40,12 @@
 				{/if}
 			</span>
 		</div>
+		{#if practiceCount > 0}
+			<div class="stat-row">
+				<span class="stat-label">Practice, not graded</span>
+				<span class="stat-value">{practiceCount}</span>
+			</div>
+		{/if}
 		{#if drillType === 'line'}
 			<div class="stat-row">
 				<span class="stat-label">Lines drilled</span>

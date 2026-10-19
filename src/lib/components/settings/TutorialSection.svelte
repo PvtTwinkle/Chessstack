@@ -4,6 +4,7 @@
 <script lang="ts">
 	import SettingsSection from './SettingsSection.svelte';
 	import type { SettingsState } from './settingsState.svelte';
+	import StatusMessage from './StatusMessage.svelte';
 
 	let { settings }: { settings: SettingsState } = $props();
 </script>
@@ -12,8 +13,8 @@
 	<div class="setting-row">
 		<span class="setting-label">Guided Walkthrough</span>
 		<p class="setting-hint">
-			Replay the first-time tutorial that walks through Build, Drill, Puzzles, Review, Prep, and
-			Dashboard.
+			Replay the first-time tutorial that walks through Build, Drill, Train, Puzzles, Review, Prep,
+			and the Dashboard.
 		</p>
 		<button
 			class="btn-primary"
@@ -22,5 +23,6 @@
 		>
 			{settings.restartingTutorial ? 'Restarting...' : 'Restart Tutorial'}
 		</button>
+		<StatusMessage status={settings.tutorialStatus} />
 	</div>
 </SettingsSection>

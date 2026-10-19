@@ -105,12 +105,15 @@ export function quizzableFens(
  * Transposition cycles are cut, and at most MAX_LINES lines are returned.
  *
  * With `quizzable` (from quizzableFens), the user's moves from positions outside
- * it are auto-played like the opponent's instead of being quizzed.
+ * it are auto-played like the opponent's instead of being quizzed. With
+ * `include`, only lines it accepts are returned, and only they count toward
+ * the cap.
  */
 export function enumerateLines(
 	moves: RepertoireMove[],
 	color: 'WHITE' | 'BLACK',
-	quizzable: ReadonlySet<string> | null = null
+	quizzable: ReadonlySet<string> | null = null,
+	include: (line: LineStep[]) => boolean = () => true
 ): LineStep[][] {
 	const adj = new Map<string, RepertoireMove[]>();
 	for (const m of moves) {
@@ -133,7 +136,7 @@ export function enumerateLines(
 		const children = adj.get(fenKey(fen)) ?? [];
 		if (children.length === 0) {
 			// Leaf — only record if path has at least one user move.
-			if (path.some((s) => s.isUserMove)) {
+			if (path.some((s) => s.isUserMove) && include(path)) {
 				lines.push([...path]);
 			}
 			return;
@@ -162,41 +165,40 @@ export function enumerateLines(
 	return lines;
 }
 
+/** Lookup keys for cards, for lineHasCard; build once, check many lines. */
+export function cardKeys(cards: DueCard[]): Set<string> {
+	return new Set(cards.map((c) => fenKey(c.fromFen) + ':' + c.san));
+}
+
 /**
  * Whether any of the user's moves along a line has a card in `cards`. The page
  * receives only due cards (or every card for "Drill all"), so this keeps a
  * normal line session to the lines with something due.
  */
-export function lineHasCard(line: LineStep[], cards: DueCard[]): boolean {
-	const keys = new Set(cards.map((c) => fenKey(c.fromFen) + ':' + c.san));
+export function lineHasCard(line: LineStep[], cards: DueCard[] | ReadonlySet<string>): boolean {
+	const keys = Array.isArray(cards) ? cardKeys(cards) : cards;
 	return line.some((s) => s.isUserMove && keys.has(fenKey(s.fromFen) + ':' + s.san));
 }
 
 /**
- * Urgency score of a line: +3 for each of the user's moves that is a due card.
- *
- * NOTE: there is also a +1 branch for lapsed (previously forgotten) cards, but
- * it can never fire: both lookups are built from the same list of *due* cards,
- * so every card it could match already scored +3. Making it work needs the
- * page to receive non-due cards too.
+ * Urgency score of a line: +3 for each of the user's moves that is a due card,
+ * +1 for one that isn't due but was forgotten before (lapses > 0). Only
+ * "Drill all" loads cards that aren't due, so there it puts the lines with
+ * something due first and the shaky ones after them.
  */
-export function scoreLine(line: LineStep[], dueCards: DueCard[]): number {
-	const dueSet = new Set(dueCards.map((c) => fenKey(c.fromFen) + ':' + c.san));
+export function scoreLine(line: LineStep[], cards: DueCard[]): number {
 	const cardMap = new Map<string, DueCard>();
-	for (const c of dueCards) {
+	for (const c of cards) {
 		cardMap.set(fenKey(c.fromFen) + ':' + c.san, c);
 	}
 
 	let score = 0;
 	for (const step of line) {
 		if (!step.isUserMove) continue;
-		const key = fenKey(step.fromFen) + ':' + step.san;
-		if (dueSet.has(key)) {
-			score += 3;
-		} else {
-			const card = cardMap.get(key);
-			if (card && (card.lapses ?? 0) > 0) score += 1;
-		}
+		const card = cardMap.get(fenKey(step.fromFen) + ':' + step.san);
+		if (!card) continue;
+		if (card.isDue !== false) score += 3;
+		else if ((card.lapses ?? 0) > 0) score += 1;
 	}
 	return score;
 }

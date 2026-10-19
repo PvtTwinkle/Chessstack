@@ -5,35 +5,29 @@
 // selecting a move is proportional to its gamesPlayed count — moves that are
 // played more often in real games are chosen more frequently.
 
-import { json, error } from '@sveltejs/kit';
+import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { lichessMoves, chessmontMoves } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { fenKey } from '$lib/fen';
+import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
+import { rateLimitResponse, requireAuth } from '$lib/server/api-helpers';
+import { parseQuery } from '$lib/server/validation';
+import { computerMoveQuerySchema } from '$lib/server/schemas/lookups';
 
 export const GET: RequestHandler = async ({ url, locals }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	const fen = url.searchParams.get('fen');
-	if (!fen) throw error(400, 'fen query parameter is required');
-	if (fen.length > 100) throw error(400, 'fen is too long');
+	const limited = await rateLimitResponse(user.id, RATE_LIMITS.computerMove);
+	if (limited) return limited;
 
-	const source = url.searchParams.get('source') ?? 'players';
-	if (source !== 'players' && source !== 'masters') {
-		throw error(400, 'source must be "players" or "masters"');
-	}
-
-	const normalizedFen = fenKey(fen);
+	const query = parseQuery(url, computerMoveQuerySchema);
+	const normalizedFen = fenKey(query.fen);
 
 	let rows: { moveSan: string; resultingFen: string; gamesPlayed: number }[];
 
-	if (source === 'players') {
-		const ratingParam = url.searchParams.get('rating');
-		if (ratingParam === null) throw error(400, 'rating query parameter is required for players');
-		const rating = parseInt(ratingParam, 10);
-		if (isNaN(rating) || rating < 0 || rating > 7) throw error(400, 'rating must be 0-7');
-
+	if (query.source === 'players') {
 		rows = await db
 			.select({
 				moveSan: lichessMoves.moveSan,
@@ -42,7 +36,10 @@ export const GET: RequestHandler = async ({ url, locals }) => {
 			})
 			.from(lichessMoves)
 			.where(
-				and(eq(lichessMoves.positionFen, normalizedFen), eq(lichessMoves.ratingBracket, rating))
+				and(
+					eq(lichessMoves.positionFen, normalizedFen),
+					eq(lichessMoves.ratingBracket, query.rating)
+				)
 			);
 	} else {
 		rows = await db

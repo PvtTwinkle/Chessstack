@@ -7,7 +7,6 @@ const fail = (message: string) => ({ success: false, message });
 
 describe('trainerEvaluateSchema', () => {
 	const game = {
-		fen: FEN,
 		rated: true,
 		repertoireId: 1,
 		pgn: '1. e4',
@@ -36,7 +35,11 @@ describe('trainerEvaluateSchema', () => {
 	it.each([
 		[{ evalCp: '35' }, 'evalCp must be a number'],
 		[{ evalMate: 1.5 }, 'evalMate must be an integer'],
-		[{ fen: undefined }, 'fen is required'],
+		[{ pgn: 'x'.repeat(1024 * 1024 + 1) }, 'pgn must be at most 1048576 characters'],
+		[{ movesPlayed: 501 }, 'movesPlayed must be at most 500'],
+		[{ ratingBracket: 8 }, 'ratingBracket must be at most 7'],
+		[{ repertoireId: 2 ** 31 }, 'repertoireId must be at most 2147483647'],
+		[{ repertoireId: 0 }, 'repertoireId must be at least 1'],
 		[{ pgn: '' }, 'pgn must not be empty'],
 		[{ movesPlayed: '3' }, 'movesPlayed must be a number'],
 		[{ startFen: undefined }, 'startFen is required'],
@@ -53,6 +56,13 @@ describe('savePositionSchema', () => {
 		expect(
 			validate(savePositionSchema, { fen: ` ${FEN} `, name: ' Open game ', leadInMoves: ['e4'] })
 		).toEqual({ success: true, data: { fen: FEN, name: 'Open game', leadInMoves: ['e4'] } });
+	});
+
+	it('caps the lead-in moves', () => {
+		const leadInMoves = Array(101).fill('e4');
+		expect(validate(savePositionSchema, { fen: FEN, name: 'x', leadInMoves })).toEqual(
+			fail('leadInMoves must have at most 100 items')
+		);
 	});
 
 	it.each([

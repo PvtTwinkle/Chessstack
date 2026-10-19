@@ -1,7 +1,7 @@
 <!--
 	ManageRepertoireModal.svelte
 	────────────────────────────
-	Full-screen modal overlay for creating, renaming, and deleting repertoires.
+	Modal for creating, renaming, and deleting repertoires.
 	Extracted from RepertoireSelector so each component has a single job.
 
 	Props:
@@ -12,6 +12,7 @@
 -->
 
 <script lang="ts">
+	import Modal from '$lib/components/Modal.svelte';
 	import { invalidateAll } from '$app/navigation';
 	import { onDestroy } from 'svelte';
 	import { downloadTextFile } from '$lib/download';
@@ -211,215 +212,152 @@
 	});
 </script>
 
-{#if open}
-	<!-- svelte-ignore a11y_click_events_have_key_events -->
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div
-		class="backdrop"
-		onclick={(e) => {
-			if (e.target === e.currentTarget) open = false;
-		}}
-	>
-		<div class="modal" role="dialog" aria-modal="true" aria-label="Manage repertoires">
-			<!-- Header -->
-			<div class="modal-header">
-				<h2>Manage Repertoires</h2>
-				<button class="close-btn" onclick={() => (open = false)} aria-label="Close">✕</button>
-			</div>
-
-			<!-- Existing repertoires list -->
-			<div class="rep-list">
-				{#each repertoires as rep (rep.id)}
-					<div class="rep-row">
-						{#if confirmDeleteId === rep.id}
-							<!-- Delete confirmation banner replaces the row content -->
-							<div class="confirm-zone">
-								<span class="confirm-msg">
-									Delete "<strong>{rep.name}</strong>"? This removes all moves and review history.
-								</span>
-								<div class="confirm-actions">
-									<button class="btn-danger" onclick={() => confirmDelete(rep.id)} disabled={busy}>
-										Delete forever
-									</button>
-									<button class="btn-ghost" onclick={cancelDelete} disabled={busy}>Cancel</button>
-								</div>
-							</div>
-						{:else if editingId === rep.id}
-							<!-- Inline rename input replaces the name label -->
-							<span class="row-icon"><span class={colorDotClass(rep.color)}></span></span>
-							<input
-								class="rename-input"
-								type="text"
-								bind:value={editingName}
-								onkeydown={(e) => {
-									if (e.key === 'Enter') saveRename(rep.id);
-									if (e.key === 'Escape') cancelEdit();
-								}}
-							/>
-							<div class="row-actions">
-								<button class="btn-primary" onclick={() => saveRename(rep.id)} disabled={busy}>
-									Save
-								</button>
-								<button class="btn-ghost" onclick={cancelEdit} disabled={busy}>Cancel</button>
-							</div>
-						{:else}
-							<!-- Normal row -->
-							<span class="row-icon"><span class={colorDotClass(rep.color)}></span></span>
-							<span class="row-name">{rep.name}</span>
-							{#if lockedSet.has(rep.id)}
-								<span class="locked-badge">Read-only</span>
-							{/if}
-							<span
-								class="color-badge"
-								class:badge-white={rep.color === 'WHITE'}
-								class:badge-black={rep.color === 'BLACK'}
+<Modal bind:open title="Manage Repertoires" width="540px">
+	<!-- Existing repertoires list -->
+	<div class="rep-list">
+		{#each repertoires as rep (rep.id)}
+			<div class="rep-row">
+				{#if confirmDeleteId === rep.id}
+					<!-- Delete confirmation banner replaces the row content -->
+					<div class="confirm-zone">
+						<span class="confirm-msg">
+							Delete "<strong>{rep.name}</strong>"? This removes all moves and review history.
+						</span>
+						<div class="confirm-actions">
+							<button
+								class="modal-btn modal-btn--danger"
+								onclick={() => confirmDelete(rep.id)}
+								disabled={busy}
 							>
-								{rep.color === 'WHITE' ? 'White' : 'Black'}
-							</span>
-							<div class="row-actions">
-								<button
-									class="btn-ghost"
-									onclick={() => handleExport(rep.id)}
-									disabled={exportingId === rep.id}
-								>
-									{exportingId === rep.id ? 'Exporting…' : 'Export'}
-								</button>
-								{#if !lockedSet.has(rep.id)}
-									<button class="btn-ghost" onclick={() => startEdit(rep)}>Rename</button>
-								{/if}
-								<button class="btn-ghost btn-ghost--danger" onclick={() => askDelete(rep.id)}>
-									Delete
-								</button>
-							</div>
-						{/if}
+								Delete forever
+							</button>
+							<button class="btn-ghost" onclick={cancelDelete} disabled={busy}>Cancel</button>
+						</div>
 					</div>
-				{/each}
-
-				{#if repertoires.length === 0}
-					<p class="empty-hint">No repertoires yet — create one below.</p>
-				{/if}
-			</div>
-
-			{#if lockedRepertoireIds.length > 0}
-				<p class="upgrade-hint">
-					<a href="/settings#subscription" onclick={() => (open = false)}>Upgrade</a> to unlock {lockedRepertoireIds.length}
-					read-only repertoire{lockedRepertoireIds.length > 1 ? 's' : ''}.
-				</p>
-			{/if}
-
-			{#if errorMsg}
-				<p class="error-msg">{errorMsg}</p>
-			{/if}
-
-			{#if exportMsg}
-				<p class="export-msg">{exportMsg}</p>
-			{/if}
-
-			<!-- Create new repertoire form -->
-			<div class="create-section">
-				<h3>Create New Repertoire</h3>
-
-				{#if atLimit}
-					<p class="upgrade-hint">
-						<a href="/settings#subscription" onclick={() => (open = false)}>Upgrade</a> to create additional
-						repertoires.
-					</p>
+				{:else if editingId === rep.id}
+					<!-- Inline rename input replaces the name label -->
+					<span class="row-icon"><span class={colorDotClass(rep.color)}></span></span>
+					<input
+						class="rename-input"
+						type="text"
+						bind:value={editingName}
+						onkeydown={(e) => {
+							if (e.key === 'Enter') saveRename(rep.id);
+							if (e.key === 'Escape') {
+								// Cancel the rename only, not the whole dialog.
+								e.preventDefault();
+								cancelEdit();
+							}
+						}}
+					/>
+					<div class="row-actions">
+						<button
+							class="modal-btn modal-btn--primary"
+							onclick={() => saveRename(rep.id)}
+							disabled={busy}
+						>
+							Save
+						</button>
+						<button class="btn-ghost" onclick={cancelEdit} disabled={busy}>Cancel</button>
+					</div>
 				{:else}
-					<div class="form-row">
-						<input
-							class="text-input"
-							type="text"
-							placeholder="e.g. White — e4 lines or Black vs d4"
-							bind:value={newName}
-							onkeydown={(e) => {
-								if (e.key === 'Enter') createRepertoire();
-							}}
-						/>
-					</div>
-
-					<div class="color-row">
-						<label class="color-label">
-							<input type="radio" name="rep-color" value="WHITE" bind:group={newColor} />
-							<span class="color-opt"><span class="color-dot color-dot--white"></span> White</span>
-						</label>
-						<label class="color-label">
-							<input type="radio" name="rep-color" value="BLACK" bind:group={newColor} />
-							<span class="color-opt"><span class="color-dot color-dot--black"></span> Black</span>
-						</label>
-					</div>
-
-					<button
-						class="btn-primary btn-create"
-						onclick={createRepertoire}
-						disabled={!newName.trim() || busy}
+					<!-- Normal row -->
+					<span class="row-icon"><span class={colorDotClass(rep.color)}></span></span>
+					<span class="row-name">{rep.name}</span>
+					{#if lockedSet.has(rep.id)}
+						<span class="locked-badge">Read-only</span>
+					{/if}
+					<span
+						class="color-badge"
+						class:badge-white={rep.color === 'WHITE'}
+						class:badge-black={rep.color === 'BLACK'}
 					>
-						{busy ? 'Creating…' : 'Create Repertoire'}
-					</button>
+						{rep.color === 'WHITE' ? 'White' : 'Black'}
+					</span>
+					<div class="row-actions">
+						<button
+							class="btn-ghost"
+							onclick={() => handleExport(rep.id)}
+							disabled={exportingId === rep.id}
+						>
+							{exportingId === rep.id ? 'Exporting…' : 'Export'}
+						</button>
+						{#if !lockedSet.has(rep.id)}
+							<button class="btn-ghost" onclick={() => startEdit(rep)}>Rename</button>
+						{/if}
+						<button class="btn-ghost btn-ghost--danger" onclick={() => askDelete(rep.id)}>
+							Delete
+						</button>
+					</div>
 				{/if}
 			</div>
-		</div>
+		{/each}
+
+		{#if repertoires.length === 0}
+			<p class="empty-hint">No repertoires yet — create one below.</p>
+		{/if}
 	</div>
-{/if}
+
+	{#if lockedRepertoireIds.length > 0}
+		<p class="upgrade-hint">
+			<a href="/settings#subscription" onclick={() => (open = false)}>Upgrade</a> to unlock {lockedRepertoireIds.length}
+			read-only repertoire{lockedRepertoireIds.length > 1 ? 's' : ''}.
+		</p>
+	{/if}
+
+	{#if errorMsg}
+		<p class="modal-error" role="alert">{errorMsg}</p>
+	{/if}
+
+	{#if exportMsg}
+		<p class="export-msg" role="status">{exportMsg}</p>
+	{/if}
+
+	<!-- Create new repertoire form -->
+	<div class="create-section">
+		<h3>Create New Repertoire</h3>
+
+		{#if atLimit}
+			<p class="upgrade-hint">
+				<a href="/settings#subscription" onclick={() => (open = false)}>Upgrade</a> to create additional
+				repertoires.
+			</p>
+		{:else}
+			<div class="form-row">
+				<input
+					class="text-input"
+					type="text"
+					placeholder="e.g. White — e4 lines or Black vs d4"
+					bind:value={newName}
+					onkeydown={(e) => {
+						if (e.key === 'Enter') createRepertoire();
+					}}
+				/>
+			</div>
+
+			<div class="color-row">
+				<label class="color-label">
+					<input type="radio" name="rep-color" value="WHITE" bind:group={newColor} />
+					<span class="color-opt"><span class="color-dot color-dot--white"></span> White</span>
+				</label>
+				<label class="color-label">
+					<input type="radio" name="rep-color" value="BLACK" bind:group={newColor} />
+					<span class="color-opt"><span class="color-dot color-dot--black"></span> Black</span>
+				</label>
+			</div>
+
+			<button
+				class="modal-btn modal-btn--primary btn-create"
+				onclick={createRepertoire}
+				disabled={!newName.trim() || busy}
+			>
+				{busy ? 'Creating…' : 'Create Repertoire'}
+			</button>
+		{/if}
+	</div>
+</Modal>
 
 <style>
-	/* ── Modal backdrop + panel ─────────────────────────────────────────────── */
-
-	.backdrop {
-		position: fixed;
-		inset: 0;
-		background: rgba(0, 0, 0, 0.6);
-		display: flex;
-		justify-content: center;
-		overflow-y: auto;
-		z-index: 1000;
-	}
-
-	.modal {
-		background: var(--color-surface);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-lg);
-		width: 540px;
-		max-width: calc(100vw - var(--space-8));
-		max-height: calc(100vh - var(--space-16));
-		overflow-y: auto;
-		padding: var(--space-6);
-		box-shadow: var(--shadow-elevated);
-		/* margin: auto centers vertically when shorter than viewport,
-		   and scrolls naturally from the top when taller. */
-		margin: auto;
-	}
-
-	.modal-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		margin-bottom: var(--space-5);
-	}
-
-	.modal-header h2 {
-		margin: 0;
-		font-family: var(--font-body);
-		font-size: 1.1rem;
-		color: var(--color-text-primary);
-		font-weight: 600;
-	}
-
-	.close-btn {
-		background: none;
-		border: none;
-		color: var(--color-text-muted);
-		font-size: 1rem;
-		cursor: pointer;
-		padding: var(--space-1) var(--space-2);
-		border-radius: var(--radius-sm);
-		transition: color var(--dur-fast) var(--ease-snap);
-		line-height: 1;
-	}
-
-	.close-btn:hover {
-		color: var(--color-text-primary);
-	}
-
 	/* ── Repertoire list ────────────────────────────────────────────────────── */
 
 	.rep-list {
@@ -616,36 +554,14 @@
 		cursor: pointer;
 	}
 
-	.btn-create {
+	/* Specific enough to beat Modal.svelte's shared .modal-btn padding. */
+	:global(.modal-panel) .modal-btn.btn-create {
 		width: 100%;
 		padding: var(--space-3);
 		font-size: 0.9rem;
 	}
 
-	/* ── Shared button styles ───────────────────────────────────────────────── */
-
-	.btn-primary {
-		padding: var(--space-2) var(--space-4);
-		background: var(--color-accent);
-		border: none;
-		border-radius: var(--radius-md);
-		color: var(--color-base);
-		font-family: var(--font-body);
-		font-size: 0.875rem;
-		font-weight: 600;
-		cursor: pointer;
-		transition: opacity var(--dur-fast) var(--ease-snap);
-	}
-
-	.btn-primary:hover:not(:disabled) {
-		opacity: 0.88;
-		box-shadow: var(--glow-accent);
-	}
-
-	.btn-primary:disabled {
-		opacity: 0.45;
-		cursor: default;
-	}
+	/* Small row buttons; the dialog's main buttons use Modal.svelte's shared styles. */
 
 	.btn-ghost {
 		padding: var(--space-2) var(--space-3);
@@ -676,35 +592,6 @@
 		cursor: default;
 	}
 
-	.btn-danger {
-		padding: var(--space-2) var(--space-3);
-		background: rgba(248, 113, 113, 0.1);
-		border: none;
-		border-radius: var(--radius-md);
-		color: var(--color-danger);
-		font-family: var(--font-body);
-		font-size: 0.875rem;
-		font-weight: 600;
-		cursor: pointer;
-		transition: background var(--dur-fast) var(--ease-snap);
-	}
-
-	.btn-danger:hover:not(:disabled) {
-		background: rgba(248, 113, 113, 0.2);
-	}
-
-	.btn-danger:disabled {
-		opacity: 0.45;
-		cursor: default;
-	}
-
-	.error-msg {
-		font-size: 0.8rem;
-		color: var(--color-danger);
-		text-align: center;
-		margin: 0 0 var(--space-3);
-	}
-
 	.export-msg {
 		font-size: 0.8rem;
 		color: var(--color-success);
@@ -718,22 +605,6 @@
 			min-height: 44px;
 		}
 
-		.btn-primary {
-			min-height: 44px;
-		}
-
-		.btn-danger {
-			min-height: 44px;
-		}
-
-		.close-btn {
-			min-width: 44px;
-			min-height: 44px;
-			display: flex;
-			align-items: center;
-			justify-content: center;
-		}
-
 		.rep-row {
 			flex-wrap: wrap;
 		}
@@ -741,19 +612,6 @@
 		.row-actions {
 			width: 100%;
 			justify-content: flex-end;
-		}
-	}
-
-	/* ── Full-screen modal on narrow phones ── --bp-sm */
-	@media (max-width: 479px) {
-		.modal {
-			position: fixed;
-			inset: 0;
-			width: 100%;
-			max-width: 100%;
-			max-height: 100%;
-			border-radius: 0;
-			padding-top: var(--space-8);
 		}
 	}
 </style>

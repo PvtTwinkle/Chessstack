@@ -4,7 +4,8 @@
 // SR cards for drilling. By default only due cards (due <= now) are loaded.
 //
 // URL params alter behaviour:
-//   ?mode=all          — load ALL cards regardless of due date
+//   ?mode=all          — load ALL cards regardless of due date (cards that
+//                        aren't due are practice: shown but not graded)
 //   ?fromFen=<fen>     — scope cards to the subtree rooted at that position
 //
 // Cards for "lead-in" moves (before the repertoire's start position) are
@@ -88,8 +89,11 @@ export const load: PageServerLoad = async ({ locals, parent, url }) => {
 
 	// Pre-compute interval labels for each card so the drill buttons
 	// can show "Forgot · 10 min", "Unsure · 2 days", etc.
+	// isDue marks the cards that are really due: in "Drill all" the others are
+	// practice and the client doesn't grade them.
 	const cardsWithLabels = dueCards.map((card) => ({
 		...card,
+		isDue: card.due !== null && card.due <= now,
 		intervalLabels: intervalLabels(card, now, fsrsConfig)
 	}));
 

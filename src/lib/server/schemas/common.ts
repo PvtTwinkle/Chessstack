@@ -1,10 +1,13 @@
 // Building blocks shared by the per-route request schemas.
 
 import { z } from 'zod';
-import { FEN_MAX_LENGTH } from '$lib/validation-limits';
+import { FEN_MAX_LENGTH, MAX_DB_ID, SAN_MAX_LENGTH } from '$lib/validation-limits';
 
-/** A database row id sent in a JSON body. */
-export const id = z.number().int();
+/** A database row id sent in a JSON body: a positive int4. */
+export const id = z.number().int().min(1).max(MAX_DB_ID);
+
+/** A move in Standard Algebraic Notation. */
+export const san = z.string().trim().min(1).max(SAN_MAX_LENGTH);
 
 /** A FEN string as sent by the client (normalise it with fenKey before storing). */
 export const fen = z.string().trim().min(1).max(FEN_MAX_LENGTH);

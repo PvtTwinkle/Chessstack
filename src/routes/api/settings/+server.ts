@@ -13,6 +13,7 @@ import { eq } from 'drizzle-orm';
 import { requireAuth } from '$lib/server/api-helpers';
 import { parseBody } from '$lib/server/validation';
 import { updateSettingsSchema } from '$lib/server/schemas/settings';
+import { watermarkResets } from '$lib/server/game-import';
 
 export const PATCH: RequestHandler = async ({ locals, request }) => {
 	const user = requireAuth(locals);
@@ -27,18 +28,27 @@ export const PATCH: RequestHandler = async ({ locals, request }) => {
 		updates.puzzleGoalFrequency = null;
 	}
 
+	// A new platform username starts its import from scratch: the old
+	// account's watermark would skip the new one's earlier games.
+	if (body.lichessUsername !== undefined || body.chesscomUsername !== undefined) {
+		const [current] = await db
+			.select({
+				lichessUsername: userSettings.lichessUsername,
+				chesscomUsername: userSettings.chesscomUsername
+			})
+			.from(userSettings)
+			.where(eq(userSettings.userId, user.id));
+		Object.assign(updates, watermarkResets(current, body));
+	}
+
 	updates.updatedAt = new Date();
 
-	// Upsert: update if a row exists, insert a defaults row first if not.
-	const [existing] = await db.select().from(userSettings).where(eq(userSettings.userId, user.id));
-
-	if (existing) {
-		await db.update(userSettings).set(updates).where(eq(userSettings.userId, user.id));
-	} else {
-		// updatedAt is required on insert but lives in the partial `updates` object.
-		// Provide it explicitly so Drizzle's types are satisfied.
-		await db.insert(userSettings).values({ userId: user.id, updatedAt: new Date(), ...updates });
-	}
+	// One row per user (unique index), so two first saves arriving together
+	// can't create a second row.
+	await db
+		.insert(userSettings)
+		.values({ userId: user.id, updatedAt: new Date(), ...updates })
+		.onConflictDoUpdate({ target: userSettings.userId, set: updates });
 
 	const [updated] = await db.select().from(userSettings).where(eq(userSettings.userId, user.id));
 

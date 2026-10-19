@@ -26,18 +26,19 @@
  */
 
 import { SvelteMap } from 'svelte/reactivity';
-import { get } from 'svelte/store';
 import { Chess } from 'chess.js';
 import type { DrawShape } from '@lichess-org/chessground/draw';
 import type { Key } from '@lichess-org/chessground/types';
 import { fenKey, STARTING_FEN } from '$lib/fen';
 import { playMove, playCapture, playCorrect, playIncorrect } from '$lib/sounds';
-import { tutorialStep } from '$lib/stores/tutorial';
+import { tutorial } from '$lib/stores/tutorial.svelte';
+import { patchSettings } from '$lib/settings-client';
 import { reconstructPath } from '$lib/repertoire';
 import { getHintSquare, getMoveSquares } from '$lib/chess/squares';
 import {
 	computePlyDepths,
 	enumerateLines,
+	cardKeys,
 	getSection,
 	lineHasCard,
 	quizzableFens,
@@ -57,6 +58,9 @@ export type DrillType = 'card' | 'line';
 
 /** The parts of the page's server data that the drill state reads. */
 export interface DrillData {
+	// What the cards were loaded for (repertoire, due or all, subtree). A reload
+	// with the same scope mid-session keeps the session going.
+	scope: string;
 	moves: RepertoireMove[];
 	dueCards: DueCard[];
 	settings?: {
@@ -136,24 +140,52 @@ export function createDrillState(params: CreateDrillStateParams) {
 	// instead of auto-advancing, giving them time to read the move note.
 	let awaitingNext = $state(false);
 
-	// Session stats (accumulated across all cards in this session).
+	// Session stats (accumulated across all cards in this session). Practice
+	// cards ("Drill all" cards that aren't due) count here but aren't graded;
+	// practiceCount says how many there were.
 	let totalReviewed = $state(0);
 	let correctCount = $state(0);
+	let practiceCount = $state(0);
 
-	// ID of the drill_session row created when the user grades the first card.
-	// Null until the first grade, then set for the rest of the session.
+	// ID of the drill_session row, created when drilling starts. Each grade
+	// carries it, and the server adds the grade to the session's counts.
 	let sessionId = $state<number | null>(null);
 
 	// ISO timestamp of the next due card after this session completes.
 	// Set by the finalize PATCH — displayed on the end screen.
 	let nextDueAt = $state<string | null>(null);
 
-	// Incrementing this forces ChessBoard to remount, snapping pieces back.
-	let boardKey = $state(0);
-
 	// Timer handle for auto-play. Kept outside reactive state so it doesn't
 	// trigger re-renders when set/cleared.
 	let autoPlayTimer: ReturnType<typeof setTimeout> | undefined;
+
+	// Other delayed steps (flash fade, line-mode pauses). resetBoard() and
+	// destroy() cancel them so none fires into the next card, mode or page.
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- bookkeeping, never rendered
+	const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
+
+	// True during line mode's pause after a move, while the answer is shown:
+	// the board takes no moves until the line carries on.
+	let pausing = $state(false);
+
+	// Shown when a grade couldn't be saved. Card mode keeps the card on screen
+	// so the same button retries it; line mode retries before the next line.
+	let gradeError = $state<string | null>(null);
+	let failedLineGrades: { cardId: number; rating: number }[] = [];
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- bookkeeping, never rendered
+	const inFlightGrades = new Set<Promise<unknown>>();
+
+	// Cards already graded this session. Lines share their opening moves, so
+	// line mode grades each card only on its first appearance.
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- bookkeeping, never rendered
+	const gradedThisSession = new Set<number>();
+
+	// The drill_session POST, shared so grades sent before it returns don't
+	// each create a session.
+	let sessionRequest: Promise<void> | null = null;
+
+	// Scope of the data the session was started on (see DrillData.scope).
+	let loadedScope: string | null = null;
 
 	// Whether sound effects are enabled. Initialised from server settings,
 	// can be toggled in-session via the mute button (persisted to the DB).
@@ -225,6 +257,10 @@ export function createDrillState(params: CreateDrillStateParams) {
 	// The card being drilled right now.
 	const currentCard = $derived(filteredCards[currentCardIdx] ?? null);
 
+	// A card that isn't due ("Drill all"): practised, not graded.
+	const isPractice = (card: DueCard) => card.isDue === false;
+	const currentIsPractice = $derived(currentCard ? isPractice(currentCard) : false);
+
 	// Line mode's candidate lines: those with a card on one of the user's moves,
 	// which means a due card unless the page loaded every card ("Drill all").
 	// Enumerated only on the Lines tab so card mode doesn't pay for it.
@@ -232,8 +268,15 @@ export function createDrillState(params: CreateDrillStateParams) {
 		if (drillType !== 'line') return { total: 0, lines: [] as LineStep[][] };
 		const color = params.getRepertoireColor() as 'WHITE' | 'BLACK';
 		const startFen = params.getRepertoireStartFen?.() ?? null;
-		const all = enumerateLines(allMoves, color, quizzableFens(startFen, allMoves, color));
-		return { total: all.length, lines: all.filter((l) => lineHasCard(l, allDueCards)) };
+		const quizzable = quizzableFens(startFen, allMoves, color);
+		// The cap applies to lines with a card only, so a big repertoire's due
+		// lines aren't crowded out by lines with nothing to drill.
+		const keys = cardKeys(allDueCards);
+		const lines = enumerateLines(allMoves, color, quizzable, (l) => lineHasCard(l, keys));
+		// "No lines at all" needs the unfiltered count, but only when none qualify.
+		const total =
+			lines.length > 0 ? lines.length : enumerateLines(allMoves, color, quizzable).length;
+		return { total, lines };
 	});
 
 	// How many cards or lines a session started now would drill.
@@ -301,22 +344,41 @@ export function createDrillState(params: CreateDrillStateParams) {
 	// ── Sync from server data ──────────────────────────────────────────────────
 
 	// Called by the page on mount and again whenever the server data changes
-	// (e.g. invalidateAll). The page wraps the board reset in untrack() — see
-	// restartFromData() — so this effect doesn't depend on filteredCards.
-	function syncFromData(data: DrillData): void {
-		allMoves = data.moves;
-		allDueCards = data.dueCards;
+	// (e.g. invalidateAll). Returns whether the session was reset, in which case
+	// the page calls restartFromData() inside untrack() so this effect doesn't
+	// depend on filteredCards.
+	//
+	// Other parts of the app reload the page data in the middle of a session
+	// (the tutorial overlay, the tutorial step after two grades). Fresh data for
+	// the same scope only updates the settings: the session goes on with the
+	// cards it started with instead of losing its progress.
+	function syncFromData(data: DrillData): boolean {
 		soundEnabled = data.settings?.soundEnabled ?? true;
 		tempoEnabled = data.settings?.tempoEnabled ?? false;
 		tempoSeconds = data.settings?.tempoSeconds ?? 10;
 		playbackSpeed = data.settings?.playbackSpeed ?? 500;
 
-		// Reset session.
+		if (started && phase !== 'complete' && data.scope === loadedScope) return false;
+
+		loadedScope = data.scope;
+		allMoves = data.moves;
+		allDueCards = data.dueCards;
+		resetSessionStats();
+		currentCardIdx = 0;
+		return true;
+	}
+
+	// Start a fresh session record and fresh stats; the next grade creates the row.
+	function resetSessionStats(): void {
 		totalReviewed = 0;
 		correctCount = 0;
-		currentCardIdx = 0;
+		practiceCount = 0;
 		sessionId = null;
+		sessionRequest = null;
 		nextDueAt = null;
+		gradeError = null;
+		failedLineGrades = [];
+		gradedThisSession.clear();
 	}
 
 	// Second half of the data sync: reset the board and, if the user already
@@ -369,18 +431,18 @@ export function createDrillState(params: CreateDrillStateParams) {
 		if (phase !== 'waiting' || !currentCard) return;
 
 		// Treat timeout exactly like an incorrect move.
-		boardKey++;
 		phase = 'incorrect';
 		flashColor = 'red';
 		playIncorrect();
 		revealedSan = currentCard.san;
-		setTimeout(() => (flashColor = null), 600);
+		later(() => (flashColor = null), 600);
 	}
 
 	// Stop both timers. Called by the page when it unmounts.
 	function destroy(): void {
 		stopAutoPlay();
 		stopTempoTimer();
+		clearPendingTimers();
 	}
 
 	// ── Blindfold ─────────────────────────────────────────────────────────────
@@ -458,10 +520,7 @@ export function createDrillState(params: CreateDrillStateParams) {
 		if (section === selectedSection) return;
 		selectedSection = section;
 		currentCardIdx = 0;
-		totalReviewed = 0;
-		correctCount = 0;
-		sessionId = null;
-		nextDueAt = null;
+		resetSessionStats();
 		resetBoard();
 		if (started) startNextCard();
 	}
@@ -480,6 +539,8 @@ export function createDrillState(params: CreateDrillStateParams) {
 	function resetBoard(): void {
 		stopAutoPlay();
 		stopTempoTimer();
+		clearPendingTimers();
+		pausing = false;
 		navHistory = [];
 		currentFen = STARTING_FEN;
 		lastMove = undefined;
@@ -488,7 +549,6 @@ export function createDrillState(params: CreateDrillStateParams) {
 		hintUsed = false;
 		hintSquare = null;
 		awaitingNext = false;
-		boardKey++;
 	}
 
 	// Stop any running auto-play timer.
@@ -497,6 +557,20 @@ export function createDrillState(params: CreateDrillStateParams) {
 			clearTimeout(autoPlayTimer);
 			autoPlayTimer = undefined;
 		}
+	}
+
+	// setTimeout that resetBoard() and destroy() cancel.
+	function later(fn: () => void, ms: number): void {
+		const timer = setTimeout(() => {
+			pendingTimers.delete(timer);
+			fn();
+		}, ms);
+		pendingTimers.add(timer);
+	}
+
+	function clearPendingTimers(): void {
+		for (const timer of pendingTimers) clearTimeout(timer);
+		pendingTimers.clear();
 	}
 
 	// ── Card loading and auto-play ─────────────────────────────────────────────
@@ -593,7 +667,7 @@ export function createDrillState(params: CreateDrillStateParams) {
 		newFen: string,
 		isCapture: boolean
 	): void {
-		if (phase !== 'waiting') return;
+		if (phase !== 'waiting' || pausing) return;
 
 		// Line mode: check against the current line step.
 		if (drillType === 'line') {
@@ -617,101 +691,149 @@ export function createDrillState(params: CreateDrillStateParams) {
 			currentFen = newFen;
 			lastMove = [from, to];
 			flashColor = 'green';
-			setTimeout(() => (flashColor = null), 600);
+			later(() => (flashColor = null), 600);
 			if (isCapture) playCapture();
 			else playMove();
 
 			phase = 'correct';
 			if (!hintUsed) playCorrect();
+			// A practice card has no grade to choose: straight to Next.
+			if (currentIsPractice && !hintUsed) void submitGrade(3);
 		} else {
-			// Wrong move — snap the board back and show the correct move.
-			boardKey++;
+			// Wrong move — the position stays, so the board puts the piece back.
+			// Show the correct move.
 			phase = 'incorrect';
 			flashColor = 'red';
 			playIncorrect();
 			revealedSan = currentCard.san;
-			setTimeout(() => (flashColor = null), 600);
+			later(() => (flashColor = null), 600);
 		}
 	}
 
 	// ── Grading ────────────────────────────────────────────────────────────────
 
-	// Submit the grade for the current card to the server and update stats.
-	// Does NOT advance to the next card — call advanceToNext() separately.
-	async function submitGrade(rating: number): Promise<void> {
-		if (grading || !currentCard) return;
-		grading = true;
+	// Why the last grade failed, for the error message.
+	let gradeErrorReason: 'signed-out' | null = null;
 
-		const wasCorrect = phase === 'correct';
-
-		// Snapshot the card's current FSRS state before we overwrite it,
-		// so the user can undo if they picked the wrong grade.
-		// Only for user-chosen grades (correct phase, no hint) — not auto-grades.
-		if (wasCorrect && !hintUsed) {
-			undoSnapshot = {
-				cardId: currentCard.id,
-				wasCorrect,
-				previousState: {
-					due: currentCard.due,
-					stability: currentCard.stability,
-					difficulty: currentCard.difficulty,
-					elapsedDays: currentCard.elapsedDays,
-					scheduledDays: currentCard.scheduledDays,
-					reps: currentCard.reps,
-					lapses: currentCard.lapses,
-					state: currentCard.state,
-					lastReview: currentCard.lastReview,
-					learningSteps: currentCard.learningSteps
-				}
-			};
-		} else {
-			undoSnapshot = null;
-		}
-
-		// Create the session record the first time a card is graded.
-		// Non-critical: if this fails we still let the user continue drilling.
-		if (sessionId === null) {
-			try {
-				const sessRes = await fetch('/api/drill/session', {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ repertoireId: params.getRepertoireId() })
-				});
-				if (sessRes.ok) {
-					const sessData = await sessRes.json();
-					sessionId = sessData.sessionId;
-				}
-			} catch {
-				// Non-critical — session tracking is best-effort.
-			}
-		}
-
+	// The card's grade request. Resolves to the grade's reviewedAt once the
+	// server saved it (undo sends it back), or null when it didn't.
+	async function sendGrade(cardId: number, rating: number): Promise<string | null> {
 		try {
 			const res = await fetch('/api/drill/grade', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ cardId: currentCard.id, rating })
+				body: JSON.stringify({ cardId, rating, sessionId })
 			});
-			if (!res.ok) throw new Error(`Grade failed: ${res.status}`);
-		} catch (err) {
-			console.error('Failed to grade card:', err);
-			// Don't block the user from continuing on a network error.
+			if (res.status === 401) gradeErrorReason = 'signed-out';
+			if (!res.ok) return null;
+			const body = (await res.json().catch(() => null)) as { reviewedAt?: string } | null;
+			return body?.reviewedAt ?? '';
+		} catch {
+			return null;
+		}
+	}
+
+	function showGradeError(): void {
+		gradeError =
+			gradeErrorReason === 'signed-out'
+				? 'You were signed out, so your grade wasn’t saved. Sign in again in another tab, then retry.'
+				: 'Your grade wasn’t saved. Check your connection and try again.';
+		gradeErrorReason = null;
+	}
+
+	// Create the session record when drilling starts. Non-critical: if it
+	// fails the user keeps drilling, and the next grade tries again.
+	async function ensureSession(): Promise<void> {
+		if (sessionId !== null) return;
+		if (!sessionRequest) {
+			const request = fetch('/api/drill/session', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ repertoireId: params.getRepertoireId() })
+			})
+				.then((res) => (res.ok ? res.json() : null))
+				.then((d) => {
+					if (d && sessionRequest === request) sessionId = d.sessionId;
+				})
+				.catch(() => {})
+				.finally(() => {
+					if (sessionRequest === request && sessionId === null) sessionRequest = null;
+				});
+			sessionRequest = request;
+		}
+		await sessionRequest;
+	}
+
+	// Submit the grade for the current card to the server and update stats.
+	// Does NOT advance to the next card — call advanceToNext() separately.
+	// Resolves to whether the grade was saved; when it wasn't, the card stays
+	// on screen with an error so the same button retries it.
+	async function submitGrade(rating: number): Promise<boolean> {
+		if (grading || !currentCard) return false;
+		// The card is fixed before any await, so nothing that changes the
+		// current card meanwhile can send this grade to another card.
+		const card = currentCard;
+		// A hinted answer is graded Forgot, so it doesn't count as correct.
+		const wasCorrect = phase === 'correct' && !hintUsed;
+		gradeError = null;
+
+		if (isPractice(card)) {
+			// Not due: nothing is sent, the card's schedule stays as it is.
+			undoSnapshot = null;
+			countReviewed(card.id, wasCorrect, true);
+			awaitingNext = true;
+			return true;
 		}
 
-		totalReviewed++;
-		if (wasCorrect) correctCount++;
-
+		grading = true;
+		await ensureSession();
+		const reviewedAt = await sendGrade(card.id, rating);
 		grading = false;
+
+		if (reviewedAt === null) {
+			showGradeError();
+			return false;
+		}
+
+		// Snapshot the card's FSRS state from before the grade so the user can
+		// undo a grade they picked by mistake. Only for user-chosen grades
+		// (correct phase, no hint), not for the automatic Forgot.
+		undoSnapshot = wasCorrect
+			? {
+					cardId: card.id,
+					wasCorrect,
+					reviewedAt,
+					previousState: {
+						due: card.due,
+						stability: card.stability,
+						difficulty: card.difficulty,
+						elapsedDays: card.elapsedDays,
+						scheduledDays: card.scheduledDays,
+						reps: card.reps,
+						lapses: card.lapses,
+						state: card.state,
+						lastReview: card.lastReview,
+						learningSteps: card.learningSteps
+					}
+				}
+			: null;
+
+		countReviewed(card.id, wasCorrect, false);
 		awaitingNext = true;
 
-		// Tutorial: after grading 2+ cards, advance to step 5 (drill options)
-		if (get(tutorialStep) === 4 && totalReviewed >= 2) {
-			fetch('/api/settings', {
-				method: 'PATCH',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ tutorialStep: 5 })
-			}).then(() => params.reload());
+		// Tutorial: after grading 2+ cards, move on to the drill options step.
+		// The step changes locally, so the session carries on undisturbed.
+		if (tutorial.isAt('drill-first-cards') && totalReviewed >= 2) {
+			void tutorial.goTo('drill-options');
 		}
+		return true;
+	}
+
+	function countReviewed(cardId: number, correct: boolean, practice: boolean): void {
+		gradedThisSession.add(cardId);
+		totalReviewed++;
+		if (correct) correctCount++;
+		if (practice) practiceCount++;
 	}
 
 	// Undo the last grade — restore the card's FSRS state and re-show grade buttons.
@@ -725,34 +847,46 @@ export function createDrillState(params: CreateDrillStateParams) {
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					cardId: undoSnapshot.cardId,
+					reviewedAt: undoSnapshot.reviewedAt,
+					sessionId,
 					previousState: undoSnapshot.previousState
 				})
 			});
+			if (res.status === 409) {
+				// Graded again since (another tab): the grade can't be undone any more.
+				undoSnapshot = null;
+				return;
+			}
 			if (!res.ok) throw new Error(`Undo failed: ${res.status}`);
 
 			// Roll back local session stats.
 			totalReviewed--;
 			if (undoSnapshot.wasCorrect) correctCount--;
+			gradedThisSession.delete(undoSnapshot.cardId);
 
 			// Re-show the grade buttons.
 			awaitingNext = false;
 			undoSnapshot = null;
-		} catch (err) {
-			console.error('Failed to undo grade:', err);
+		} catch {
+			// The grade stands; the Undo button stays for another try.
+		} finally {
+			undoing = false;
 		}
-
-		undoing = false;
 	}
 
 	// Finalize the session record and retrieve the next-due timestamp to show
 	// on the end screen. Non-critical: the end screen works without it.
 	async function finalizeSession(): Promise<void> {
+		// Line-mode grades may still be on their way; each adds to the session's
+		// counts on the server, so wait for them before closing it.
+		await Promise.allSettled([...inFlightGrades]);
+		if (sessionRequest) await sessionRequest;
 		if (sessionId === null) return;
 		try {
 			const finalRes = await fetch(`/api/drill/session/${sessionId}`, {
 				method: 'PATCH',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ cardsReviewed: totalReviewed, cardsCorrect: correctCount })
+				body: '{}'
 			});
 			if (finalRes.ok) {
 				const finalData = await finalRes.json();
@@ -766,6 +900,7 @@ export function createDrillState(params: CreateDrillStateParams) {
 	// Advance to the next card after the user clicks "Next".
 	async function advanceToNext(): Promise<void> {
 		undoSnapshot = null; // Undo window closes when moving to the next card.
+		gradeError = null;
 		currentCardIdx++;
 		resetBoard();
 
@@ -778,13 +913,32 @@ export function createDrillState(params: CreateDrillStateParams) {
 	}
 
 	// Called by the "Next" button. For incorrect/hint cases, grades as Again
-	// first; for already-graded correct answers, just advances.
+	// first; for already-graded correct answers, just advances. Ignored while a
+	// grade is in flight, so a double press or a held Space can't skip a card.
 	async function handleNext(): Promise<void> {
+		if (grading) return;
 		if (!awaitingNext) {
 			// Not yet graded — this is an incorrect or hint-used card.
-			await submitGrade(1); // Rating.Again
+			if (!(await submitGrade(1))) return; // Rating.Again; error shown, Next retries
 		}
 		await advanceToNext();
+	}
+
+	// Move on although grades failed to save. Those cards stay due.
+	async function skipFailedGrades(): Promise<void> {
+		if (grading) return;
+		gradeError = null;
+		if (drillType === 'line') {
+			for (const g of failedLineGrades) {
+				totalReviewed--;
+				if (g.rating >= 3) correctCount--;
+				gradedThisSession.delete(g.cardId);
+			}
+			failedLineGrades = [];
+			await advanceToNextLine();
+		} else {
+			await advanceToNext();
+		}
 	}
 
 	// ── Line-mode functions ───────────────────────────────────────────────────
@@ -797,33 +951,35 @@ export function createDrillState(params: CreateDrillStateParams) {
 		);
 	}
 
-	// Auto-grade a line step's SR card (fire-and-forget, doesn't block the flow).
+	// Auto-grade a line step's SR card without blocking the line. A card that
+	// opens several lines is graded on its first appearance only; grading it
+	// again in every line would push it through its learning steps in one
+	// sitting. Grades that fail are retried before the next line.
 	function autoGradeStep(step: LineStep, rating: number): void {
 		const card = findCardForStep(step);
-		if (!card) return; // no SR card for this move (might not exist)
+		if (!card || gradedThisSession.has(card.id)) return;
+		countReviewed(card.id, rating >= 3, isPractice(card));
+		if (isPractice(card)) return; // not due: practice, nothing to send
 
-		// Create session on first grade (same as card mode).
-		if (sessionId === null) {
-			fetch('/api/drill/session', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ repertoireId: params.getRepertoireId() })
+		const request: Promise<void> = ensureSession()
+			.then(() => sendGrade(card.id, rating))
+			.then((reviewedAt) => {
+				if (reviewedAt === null) failedLineGrades.push({ cardId: card.id, rating });
 			})
-				.then((res) => (res.ok ? res.json() : null))
-				.then((d) => {
-					if (d) sessionId = d.sessionId;
-				})
-				.catch(() => {});
+			.finally(() => inFlightGrades.delete(request));
+		inFlightGrades.add(request);
+	}
+
+	// Wait for this line's grades and resend any that failed. Resolves to
+	// whether they are all saved.
+	async function settleLineGrades(): Promise<boolean> {
+		await Promise.allSettled([...inFlightGrades]);
+		const retry = failedLineGrades;
+		failedLineGrades = [];
+		for (const g of retry) {
+			if ((await sendGrade(g.cardId, g.rating)) === null) failedLineGrades.push(g);
 		}
-
-		fetch('/api/drill/grade', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ cardId: card.id, rating })
-		}).catch((err) => console.error('Failed to auto-grade:', err));
-
-		totalReviewed++;
-		if (rating >= 3) correctCount++;
+		return failedLineGrades.length === 0;
 	}
 
 	// Initialize line mode: sort the candidate lines and start the first one.
@@ -831,10 +987,7 @@ export function createDrillState(params: CreateDrillStateParams) {
 		allLines = sortLinesByWeakness(lineScope.lines, allDueCards);
 		currentLineIdx = 0;
 		lineComplete = false;
-		totalReviewed = 0;
-		correctCount = 0;
-		sessionId = null;
-		nextDueAt = null;
+		resetSessionStats();
 		startNextLine();
 	}
 
@@ -951,7 +1104,7 @@ export function createDrillState(params: CreateDrillStateParams) {
 		currentFen = newFen;
 		lastMove = [from, to];
 		flashColor = 'green';
-		setTimeout(() => (flashColor = null), 300);
+		later(() => (flashColor = null), 300);
 		if (isCapture) playCapture();
 		else playMove();
 		playCorrect();
@@ -959,24 +1112,30 @@ export function createDrillState(params: CreateDrillStateParams) {
 		lineCorrect++;
 		autoGradeStep(step, 3); // Rating.Good
 
-		// Short pause then continue the line.
-		setTimeout(() => continueLineAfterUserMove(), 400);
+		// Short pause then continue the line. The board takes no moves meanwhile.
+		pausing = true;
+		later(() => {
+			pausing = false;
+			continueLineAfterUserMove();
+		}, 400);
 	}
 
 	// Handle an incorrect move in line mode: flash red, show correct, auto-correct, continue.
 	function handleLineMoveIncorrect(): void {
 		const step = currentLine[lineStepIdx];
 
-		boardKey++; // snap board back
 		flashColor = 'red';
 		playIncorrect();
 		revealedSan = step.san;
-		setTimeout(() => (flashColor = null), 600);
+		later(() => (flashColor = null), 600);
 
 		autoGradeStep(step, 1); // Rating.Again
 
-		// After 1.5s, auto-correct the board and continue.
-		setTimeout(() => {
+		// After 1.5s, auto-correct the board and continue. The board takes no
+		// moves meanwhile, or each one would be graded again.
+		pausing = true;
+		later(() => {
+			pausing = false;
 			revealedSan = null;
 
 			// Play the correct move on the board.
@@ -996,7 +1155,6 @@ export function createDrillState(params: CreateDrillStateParams) {
 					];
 					currentFen = chess.fen();
 					lastMove = [result.from, result.to];
-					boardKey++;
 				}
 			} catch {
 				// Shouldn't happen — the correct move should always be valid.
@@ -1008,6 +1166,19 @@ export function createDrillState(params: CreateDrillStateParams) {
 
 	// Advance to the next line after the interstitial.
 	async function advanceToNextLine(): Promise<void> {
+		if (grading) return;
+
+		// Make sure the finished line's grades are saved before moving on; if
+		// some aren't, stay on the interstitial so Next Line retries them.
+		grading = true;
+		const saved = await settleLineGrades();
+		grading = false;
+		if (!saved) {
+			showGradeError();
+			return;
+		}
+		gradeError = null;
+
 		currentLineIdx++;
 
 		if (currentLineIdx >= allLines.length) {
@@ -1036,10 +1207,7 @@ export function createDrillState(params: CreateDrillStateParams) {
 		} else {
 			// Back to card mode — reset card state.
 			currentCardIdx = 0;
-			totalReviewed = 0;
-			correctCount = 0;
-			sessionId = null;
-			nextDueAt = null;
+			resetSessionStats();
 			startNextCard();
 		}
 	}
@@ -1053,6 +1221,8 @@ export function createDrillState(params: CreateDrillStateParams) {
 		} else {
 			startNextCard();
 		}
+		// After the init above, which starts fresh session stats.
+		void ensureSession();
 	}
 
 	// ── Session restart ────────────────────────────────────────────────────────
@@ -1066,23 +1236,15 @@ export function createDrillState(params: CreateDrillStateParams) {
 		// Back to the start screen, which shows the fresh count or "All caught up"
 		// once the reload lands, instead of resuming straight into a session.
 		started = false;
-		sessionId = null;
-		nextDueAt = null;
+		resetSessionStats();
 		params.reload();
 	}
 
 	// Toggle sound on/off and persist the preference to the database.
 	async function toggleSound(): Promise<void> {
 		soundEnabled = !soundEnabled;
-		try {
-			await fetch('/api/settings', {
-				method: 'PATCH',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ soundEnabled })
-			});
-		} catch {
-			// Non-critical — the in-session toggle still works even if the save fails.
-		}
+		// Non-critical: the in-session toggle still works even if the save fails.
+		await patchSettings({ soundEnabled });
 	}
 
 	return {
@@ -1135,14 +1297,17 @@ export function createDrillState(params: CreateDrillStateParams) {
 		get correctCount() {
 			return correctCount;
 		},
+		get practiceCount() {
+			return practiceCount;
+		},
+		get currentIsPractice() {
+			return currentIsPractice;
+		},
 		get sessionId() {
 			return sessionId;
 		},
 		get nextDueAt() {
 			return nextDueAt;
-		},
-		get boardKey() {
-			return boardKey;
 		},
 		get soundEnabled() {
 			return soundEnabled;
@@ -1152,6 +1317,13 @@ export function createDrillState(params: CreateDrillStateParams) {
 		},
 		get undoing() {
 			return undoing;
+		},
+		// Whether the board takes a move right now.
+		get interactive() {
+			return phase === 'waiting' && !pausing;
+		},
+		get gradeError() {
+			return gradeError;
 		},
 
 		// Line mode
@@ -1250,6 +1422,7 @@ export function createDrillState(params: CreateDrillStateParams) {
 		submitGrade,
 		undoLastGrade,
 		handleNext,
+		skipFailedGrades,
 		advanceToNextLine,
 		switchDrillType,
 		startDrilling,

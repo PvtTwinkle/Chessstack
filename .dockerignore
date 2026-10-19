@@ -35,20 +35,25 @@ CHANGELOG.md
 CONTRIBUTING.md
 SECURITY.md
 THIRD-PARTY-NOTICES.md
-chess-opening-trainer-brief-v3.md
+docs
+logos
 
 # Docker files — not needed inside the image
 Dockerfile
 Dockerfile.*
-docker-compose.yml
+docker-compose*.yml
 
 # Dev tooling configs — not needed at runtime
 scripts
+!scripts/prune-runtime-deps.mjs
 .prettierrc
 .prettierignore
 .pre-commit-config.yaml
 eslint.config.js
 drizzle.config.ts
+
+# The open-source export's configuration and replacement files
+open-source
 
 # Seed dumps are downloaded inside the Dockerfile (seeds stage) from
 # GitHub Releases — they do not need to be in the build context.

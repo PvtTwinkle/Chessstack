@@ -1,3 +1,14 @@
+# Chessstack — Docker Compose for a long-running install.
+#
+# Reads its secrets from a .env file next to this one (see .env.example) and
+# refuses to start without them, so no instance runs on a published password:
+#
+#   POSTGRES_PASSWORD=<a long random string>
+#   DEFAULT_PASSWORD=<the first admin's password>
+#   ORIGIN=https://chess.yourdomain.com
+#
+# Then: docker compose -f docker-compose.production.yml up -d
+
 services:
   app:
     image: ghcr.io/pvttwinkle/chessstack:latest
@@ -6,12 +17,15 @@ services:
     ports:
       - '3000:3000'
     environment:
-      - DATABASE_URL=postgresql://chessstack:chessstack_secret@postgres:5432/chessstack
-      - ORIGIN=http://localhost:3000
-      - DEFAULT_USERNAME=admin
-      - DEFAULT_PASSWORD=changeme
-      - REGISTRATION_MODE=invite # change to 'open' if you want anyone to be able to register an account
-      - GAME_IMPORT_INTERVAL_MINUTES=0 # How often the app fetches new games from Lichess & Chess.com.
+      - DATABASE_URL=postgresql://chessstack:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/chessstack
+      - ORIGIN=${ORIGIN:-http://localhost:3000}
+      - DEFAULT_USERNAME=${DEFAULT_USERNAME:-admin}
+      - DEFAULT_PASSWORD=${DEFAULT_PASSWORD:?set DEFAULT_PASSWORD in .env}
+      - REGISTRATION_MODE=${REGISTRATION_MODE:-invite} # 'open' lets anyone register an account
+      - GAME_IMPORT_INTERVAL_MINUTES=${GAME_IMPORT_INTERVAL_MINUTES:-0} # How often the app fetches new games from Lichess & Chess.com.
+      # Behind a reverse proxy, the header carrying the visitor's IP (see .env.example).
+      - ADDRESS_HEADER=${ADDRESS_HEADER:-}
+      - XFF_DEPTH=${XFF_DEPTH:-1}
     depends_on:
       postgres:
         condition: service_healthy
@@ -28,7 +42,7 @@ services:
     environment:
       POSTGRES_DB: chessstack
       POSTGRES_USER: chessstack
-      POSTGRES_PASSWORD: chessstack_secret
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

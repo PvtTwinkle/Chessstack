@@ -1,4 +1,3 @@
-/* eslint-disable security/detect-non-literal-fs-filename -- test writes fixture dumps into its own mkdtemp directory */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -36,6 +35,18 @@ describe('restoreGzipDump', () => {
 		await restoreGzipDump(file, DATABASE_URL);
 		const [{ count }] = await getRawSql()`SELECT count(*)::int AS count FROM seed_restore_test`;
 		expect(count).toBe(5000);
+	});
+
+	it('rejects a dump with a failing statement and rolls all of it back', async () => {
+		await getRawSql()`CREATE TABLE IF NOT EXISTS seed_restore_test (n int)`;
+		await getRawSql()`TRUNCATE seed_restore_test`;
+		const file = writeDump(
+			'failing.sql.gz',
+			'INSERT INTO seed_restore_test VALUES (1);\nSELECT 1/0;\nINSERT INTO seed_restore_test VALUES (2);\n'
+		);
+		await expect(restoreGzipDump(file, DATABASE_URL)).rejects.toThrow(/psql exited/);
+		const [{ count }] = await getRawSql()`SELECT count(*)::int AS count FROM seed_restore_test`;
+		expect(count).toBe(0);
 	});
 
 	it('rejects a corrupt archive', async () => {

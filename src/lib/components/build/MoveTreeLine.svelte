@@ -7,6 +7,7 @@
 		ply: number;
 		children: TreeNode[];
 		pathSans: string[]; // full path from STARTING_FEN for navigation
+		transposition?: boolean; // continues under another move order, shown there
 	}
 </script>
 
@@ -72,6 +73,11 @@
 			class:is-current={n.toFenKey === currentFenKey}
 			onclick={() => onNavigateToLine(n.pathSans)}>{n.san}</button
 		>
+		{#if n.transposition}
+			<span class="tree-transposition" title="Transposes: this line continues elsewhere in the tree"
+				>⇄</span
+			>
+		{/if}
 		{#if n.children.length > 1}
 			{#each n.children.slice(1) as branch (branch.toFenKey)}
 				{@const bk = branchKey(n.toFenKey, branch.san)}
@@ -105,6 +111,13 @@
 		font-size: 11px;
 		user-select: none;
 		margin-right: 1px;
+	}
+
+	.tree-transposition {
+		color: var(--color-text-muted);
+		font-size: 11px;
+		user-select: none;
+		margin-right: var(--space-1);
 	}
 
 	.tree-san {

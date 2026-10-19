@@ -9,7 +9,7 @@
 import { Chess } from 'chess.js';
 import { fenKey, toFullFen, STARTING_FEN } from '$lib/fen';
 import { bookMove, chessmontMoves, ecoOpening } from '$lib/db/schema';
-import { and, inArray, gte, desc } from 'drizzle-orm';
+import { and, gte, desc, sql, type Column, type SQL } from 'drizzle-orm';
 import { getEffectiveStartFens, buildInScopeFens } from '$lib/repertoire';
 import { sectionForMoveNumber } from '$lib/drill/drill-logic';
 import type { DrillSection } from '$lib/drill/types';
@@ -193,7 +193,7 @@ export async function loadGapData(
 		.from(chessmontMoves)
 		.where(
 			and(
-				inArray(chessmontMoves.positionFen, opponentFenKeys),
+				anyOf(chessmontMoves.positionFen, opponentFenKeys),
 				gte(chessmontMoves.gamesPlayed, minGames)
 			)
 		)
@@ -206,7 +206,7 @@ export async function loadGapData(
 	const bookFallbackFens = opponentFenKeys.filter((f) => !mastersPositions.has(f));
 	const relevantBookMoves =
 		bookFallbackFens.length > 0
-			? await database.select().from(bookMove).where(inArray(bookMove.fromFen, bookFallbackFens))
+			? await database.select().from(bookMove).where(anyOf(bookMove.fromFen, bookFallbackFens))
 			: [];
 
 	// Map masters rows to the MoveRow shape expected by computeGaps.
@@ -221,6 +221,15 @@ export async function loadGapData(
 
 	const gaps = computeGaps(moves, allOpponentMoves, repColor, startFens);
 	return attachOpeningNames(database, gaps);
+}
+
+/**
+ * `column = ANY($1)` with the whole list bound as one array parameter. inArray
+ * binds one parameter per value, and a big repertoire's position list can pass
+ * the 65,534 parameters a query may have.
+ */
+function anyOf(column: Column, values: string[]): SQL {
+	return sql`${column} = ANY(${sql.param(values)}::text[])`;
 }
 
 /**
@@ -257,7 +266,7 @@ async function attachOpeningNames(database: typeof db, gaps: Gap[]): Promise<Gap
 	const rows = await database
 		.select({ fen: ecoOpening.fen, code: ecoOpening.code, name: ecoOpening.name })
 		.from(ecoOpening)
-		.where(inArray(ecoOpening.fen, allKeys));
+		.where(anyOf(ecoOpening.fen, allKeys));
 	const byFen = new Map(rows.map((r) => [r.fen, { code: r.code, name: r.name }]));
 
 	return gaps.map((gap, i) => {

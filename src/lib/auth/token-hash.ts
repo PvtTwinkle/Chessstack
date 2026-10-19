@@ -1,4 +1,5 @@
-// Hashing for single-use emailed tokens (email verification, password reset).
+// Hashing for single-use emailed tokens (email verification, password reset)
+// and session tokens.
 //
 // These tokens are 32 random bytes (256 bits of entropy), so a slow password
 // hash like bcrypt adds no security — nobody can brute-force a 256-bit value.
@@ -9,5 +10,5 @@
 import crypto from 'crypto';
 
 export function hashToken(rawToken: string): string {
-	return crypto.createHash('sha256').update(rawToken).digest('hex');
+	return crypto.createHash('sha256').update(rawToken, 'utf8').digest('hex');
 }

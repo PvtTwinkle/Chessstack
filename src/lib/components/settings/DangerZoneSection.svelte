@@ -3,6 +3,7 @@
 	password. Any active Stripe subscription is cancelled by the API.
 -->
 <script lang="ts">
+	import Modal from '$lib/components/Modal.svelte';
 	import SettingsSection from './SettingsSection.svelte';
 
 	let showDeleteModal = $state(false);
@@ -54,52 +55,54 @@
 	</div>
 </SettingsSection>
 
-{#if showDeleteModal}
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div
-		class="modal-backdrop"
-		onkeydown={(e) => e.key === 'Escape' && (showDeleteModal = false)}
-		onclick={() => (showDeleteModal = false)}
+<Modal bind:open={showDeleteModal} title="Delete Account" danger dismissible={!deletingAccount}>
+	<p class="modal-warning">
+		This will <strong>permanently delete</strong> your account, repertoires, drill history, and all other
+		data. If you have an active subscription it will be cancelled.
+	</p>
+	<p class="modal-warning">This cannot be undone.</p>
+
+	<!-- A form, so Enter submits and password managers recognise the field. -->
+	<form
+		class="delete-form"
+		onsubmit={(e) => {
+			e.preventDefault();
+			confirmDeleteAccount();
+		}}
 	>
-		<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-		<div class="modal-content" onclick={(e) => e.stopPropagation()}>
-			<h3 class="modal-title">Delete Account</h3>
-			<p class="modal-warning">
-				This will <strong>permanently delete</strong> your account, repertoires, drill history, and all
-				other data. If you have an active subscription it will be cancelled.
-			</p>
-			<p class="modal-warning">This cannot be undone.</p>
+		<label class="modal-label" for="delete-password">Enter your password to confirm</label>
+		<input
+			id="delete-password"
+			type="password"
+			autocomplete="current-password"
+			placeholder="Password"
+			bind:value={deletePassword}
+		/>
 
-			<label class="modal-label" for="delete-password">Enter your password to confirm</label>
-			<input
-				id="delete-password"
-				type="password"
-				autocomplete="current-password"
-				placeholder="Password"
-				bind:value={deletePassword}
-				onkeydown={(e) => e.key === 'Enter' && confirmDeleteAccount()}
-			/>
+		{#if deleteError}
+			<p class="modal-error" role="alert">{deleteError}</p>
+		{/if}
 
-			{#if deleteError}
-				<p class="error-msg">{deleteError}</p>
-			{/if}
-
-			<div class="modal-actions">
-				<button class="btn-cancel" onclick={() => (showDeleteModal = false)}>Cancel</button>
-				<button class="btn-danger" onclick={confirmDeleteAccount} disabled={deletingAccount}>
-					{deletingAccount ? 'Deleting...' : 'Delete Account'}
-				</button>
-			</div>
+		<div class="modal-actions">
+			<button
+				type="button"
+				class="modal-btn modal-btn--cancel"
+				onclick={() => (showDeleteModal = false)}
+				disabled={deletingAccount}>Cancel</button
+			>
+			<button type="submit" class="modal-btn modal-btn--danger" disabled={deletingAccount}>
+				{deletingAccount ? 'Deleting...' : 'Delete Account'}
+			</button>
 		</div>
-	</div>
-{/if}
+	</form>
+</Modal>
 
 <style>
 	.btn-danger {
 		padding: var(--space-2) var(--space-4);
 		border: none;
 		border-radius: var(--radius-md);
-		background: var(--color-danger);
+		background: var(--color-danger-fill);
 		color: #fff;
 		font-family: var(--font-body);
 		font-weight: 600;
@@ -125,49 +128,26 @@
 
 	/* ── Delete account modal ─────────────────────────────────────── */
 
-	.modal-backdrop {
-		position: fixed;
-		inset: 0;
-		background: rgba(0, 0, 0, 0.6);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 1000;
-	}
-
-	.modal-content {
-		background: var(--color-surface);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-lg);
-		padding: var(--space-6);
-		max-width: 420px;
-		width: 90%;
-		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-	}
-
-	.modal-title {
-		margin: 0 0 var(--space-4);
-		font-size: 16px;
-		font-weight: 600;
-		color: var(--color-danger);
-	}
-
 	.modal-warning {
-		margin: 0 0 var(--space-3);
+		margin: 0;
 		font-size: 13px;
 		color: var(--color-text-secondary);
 		line-height: 1.5;
+	}
+
+	.delete-form {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
 	}
 
 	.modal-label {
 		display: block;
 		font-size: 12px;
 		color: var(--color-text-muted);
-		margin-bottom: var(--space-2);
-		margin-top: var(--space-4);
 	}
 
-	.modal-content input[type='password'] {
+	.delete-form input[type='password'] {
 		width: 100%;
 		padding: var(--space-3) var(--space-4);
 		border: 1px solid var(--color-border);
@@ -179,38 +159,13 @@
 		box-sizing: border-box;
 	}
 
-	.modal-content input[type='password']:focus {
+	.delete-form input[type='password']:focus {
 		outline: none;
 		border-color: var(--color-danger);
 		box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15);
 	}
 
-	.modal-actions {
-		display: flex;
-		gap: var(--space-3);
-		justify-content: flex-end;
-		margin-top: var(--space-5);
-	}
-
-	.btn-cancel {
-		padding: var(--space-2) var(--space-4);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-md);
-		background: var(--color-surface-alt);
-		color: var(--color-text-secondary);
-		font-family: var(--font-body);
-		font-size: 13px;
-		font-weight: 500;
-		cursor: pointer;
-	}
-
-	.btn-cancel:hover {
-		border-color: var(--color-text-muted);
-	}
-
-	.error-msg {
-		margin: var(--space-2) 0 0;
-		font-size: 13px;
-		color: var(--color-danger);
+	.delete-form .modal-actions {
+		margin-top: var(--space-2);
 	}
 </style>

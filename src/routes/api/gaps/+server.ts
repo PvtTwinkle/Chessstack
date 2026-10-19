@@ -9,16 +9,14 @@ import { db } from '$lib/db';
 import { repertoire, userMove, userSettings } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { loadGapData } from '$lib/gaps';
-import { isRateLimited } from '$lib/auth/rate-limit';
 import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
-import { requireAuth, parseIntParam } from '$lib/server/api-helpers';
+import { requireAuth, parseIntParam, rateLimitResponse } from '$lib/server/api-helpers';
 
 export const GET: RequestHandler = async ({ locals, url }) => {
 	const user = requireAuth(locals);
 
-	if (await isRateLimited(String(user.id), RATE_LIMITS.gaps)) {
-		return json({ error: 'Too many requests. Please try again later.' }, { status: 429 });
-	}
+	const limited = await rateLimitResponse(user.id, RATE_LIMITS.gaps);
+	if (limited) return limited;
 
 	const repertoireIdParam = url.searchParams.get('repertoireId');
 	if (!repertoireIdParam) throw error(400, 'repertoireId query parameter is required');
@@ -39,7 +37,7 @@ export const GET: RequestHandler = async ({ locals, url }) => {
 		.from(userMove)
 		.where(and(eq(userMove.repertoireId, repertoireId), eq(userMove.userId, user.id)));
 
-	// Read the user's gap threshold setting (default 1000).
+	// Read the user's gap threshold setting (default 10000, as in the schema).
 	const [userSettingsRow] = await db
 		.select({ gapMinGames: userSettings.gapMinGames })
 		.from(userSettings)

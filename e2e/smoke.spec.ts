@@ -3,6 +3,7 @@
 // client-side errors, that anonymous requests are turned away, and the
 // sign-out / sign-in / delete-account round trip.
 
+import { networkInterfaces } from 'node:os';
 import { expect, test } from '@playwright/test';
 import {
 	ANON_HOME,
@@ -36,18 +37,25 @@ test.describe('public pages', () => {
 	});
 
 	test('API and admin routes turn away anonymous requests', async ({ request }) => {
-		const routes: [string, string][] = [
+		// API calls get a JSON 401 rather than a redirect to an HTML page.
+		const apiRoutes: [string, string][] = [
 			['GET', '/api/repertoires'],
 			['POST', '/api/moves'],
 			['GET', '/api/settings'],
-			['GET', '/api/admin/users'],
-			['GET', '/admin']
+			['GET', '/api/admin/users']
 		];
-		for (const [method, path] of routes) {
+		for (const [method, path] of apiRoutes) {
 			const res = await request.fetch(path, { method, maxRedirects: 0 });
-			expect(res.status(), `${method} ${path}`).toBe(302);
-			expect(res.headers()['location'], `${method} ${path}`).toBe(ANON_HOME);
+			expect(res.status(), `${method} ${path}`).toBe(401);
+			expect(await res.json(), `${method} ${path}`).toEqual({ message: 'Not authenticated' });
+			// Refusals carry the security headers too.
+			expect(res.headers()['x-frame-options'], `${method} ${path}`).toBe('DENY');
 		}
+
+		const admin = await request.fetch('/admin', { maxRedirects: 0 });
+		expect(admin.status()).toBe(302);
+		expect(admin.headers()['location']).toBe(ANON_HOME);
+		expect(admin.headers()['content-security-policy']).toContain("frame-ancestors 'none'");
 
 		// Form posts from another site are refused (SvelteKit's CSRF check).
 		const crossSite = await request.post('/login', {
@@ -60,10 +68,37 @@ test.describe('public pages', () => {
 	test('pages carry the security headers', async ({ request }) => {
 		const headers = (await request.get('/')).headers();
 		expect(headers['content-security-policy']).toContain("frame-ancestors 'none'");
-		expect(headers['strict-transport-security']).toContain('max-age=');
-		expect(headers['x-frame-options']).toBe('SAMEORIGIN');
+		// The test server runs on plain HTTP, where the HTTPS-only parts are left out
+		// (see $lib/server/security-headers and its unit tests).
+		expect(headers['content-security-policy']).not.toContain('upgrade-insecure-requests');
+		expect(headers['strict-transport-security']).toBeUndefined();
+		expect(headers['x-frame-options']).toBe('DENY');
 		expect(headers['x-content-type-options']).toBe('nosniff');
 		expect(headers['referrer-policy']).toBe('strict-origin-when-cross-origin');
+	});
+
+	test('the app loads over plain HTTP from a LAN address, not just localhost', async ({
+		page,
+		baseURL
+	}) => {
+		// How a self-hosted instance is often opened (http://192.168.1.10:3000).
+		// Browsers treat localhost specially, so this needs a real interface
+		// address: an HTTPS-only header here once stopped the app's scripts loading.
+		const lanAddress = Object.values(networkInterfaces())
+			.flat()
+			.find((a) => a && a.family === 'IPv4' && !a.internal)?.address;
+		test.skip(!lanAddress, 'no non-loopback network interface');
+
+		const errors = trackErrors(page);
+		const url = new URL('/login', baseURL);
+		url.hostname = lanAddress!;
+		const appScript = page.waitForResponse(
+			(r) => r.url().startsWith(`http://${url.host}/_app/immutable/`) && r.ok()
+		);
+		await page.goto(url.href);
+		await appScript;
+		await expect(page.locator('input[name=username]')).toBeVisible();
+		expect(errors).toEqual([]);
 	});
 
 	test('the in-browser engine files load without a session', async ({ request }) => {
@@ -115,7 +150,8 @@ test('register → create repertoire → build a line → drill it', async ({ pa
 	await expect(page.getByText('Card 1 of 1')).toBeVisible();
 
 	// The board auto-plays 1. e4 e5; the user must answer 2. Nf3.
-	await page.waitForTimeout(1500); // let the auto-play animation finish
+	// The Hint button appears once the auto-play ends and the board is the user's.
+	await expect(page.getByRole('button', { name: /Hint/ })).toBeVisible();
 	await clickSquare(page, 'g1');
 	await clickSquare(page, 'f3');
 	await expect(page.getByText('Correct!')).toBeVisible();
@@ -152,12 +188,20 @@ test('sign out, sign back in, then delete the account', async ({ page }) => {
 
 	await page.goto('/settings');
 	await page.getByRole('button', { name: 'Delete My Account' }).click();
-	const modal = page.locator('.modal-content');
+	const modal = page.getByRole('dialog', { name: 'Delete Account' });
 	await expect(modal.getByRole('heading', { name: 'Delete Account' })).toBeVisible();
+
+	// Focus starts in the password field; Escape closes the dialog and hands focus back.
+	const deleteButton = page.getByRole('button', { name: 'Delete My Account' });
+	await expect(modal.locator('#delete-password')).toBeFocused();
+	await page.keyboard.press('Escape');
+	await expect(modal).toBeHidden();
+	await expect(deleteButton).toBeFocused();
+	await deleteButton.click();
 
 	await modal.locator('#delete-password').fill('Wrong-Password-123');
 	await modal.getByRole('button', { name: 'Delete Account' }).click();
-	await expect(modal.locator('.error-msg')).toBeVisible();
+	await expect(modal.locator('.modal-error')).toBeVisible();
 
 	await modal.locator('#delete-password').fill(PASSWORD);
 	await modal.getByRole('button', { name: 'Delete Account' }).click();

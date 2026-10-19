@@ -2,7 +2,8 @@
 //
 // Reads the token from the URL on load, then validates it and updates
 // the user's password on form submission. All existing sessions for the
-// user are invalidated after a successful reset.
+// user are invalidated after a successful reset, and the email counts as
+// verified (the link proves the user can read it).
 
 import type { Actions, PageServerLoad } from './$types';
 import { fail } from '@sveltejs/kit';
@@ -12,6 +13,7 @@ import { eq } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 import { validatePassword } from '$lib/auth/password';
 import { validatePasswordResetToken } from '$lib/auth/password-reset';
+import { clearLoginFailures } from '$lib/auth/login-rate-limit';
 
 export const load: PageServerLoad = async ({ url }) => {
 	const token = url.searchParams.get('token');
@@ -48,13 +50,23 @@ export const actions: Actions = {
 			});
 		}
 
-		// Update the user's password.
+		// Update the password and invalidate all existing sessions for the user:
+		// if the password was reset because of a compromise, no old session
+		// should remain valid. The link reached the user's inbox, which proves
+		// they own the address, so it counts as verifying it too.
 		const passwordHash = await bcrypt.hash(password, 10);
-		await db.update(user).set({ passwordHash }).where(eq(user.id, result.userId));
+		const [updated] = await db.transaction(async (tx) => {
+			await tx.delete(session).where(eq(session.userId, result.userId));
+			return tx
+				.update(user)
+				.set({ passwordHash, emailVerified: true })
+				.where(eq(user.id, result.userId))
+				.returning({ username: user.username });
+		});
 
-		// Invalidate all existing sessions for this user. If the password was
-		// reset because of a compromise, no old session should remain valid.
-		await db.delete(session).where(eq(session.userId, result.userId));
+		// Someone guessing at the account may have locked its login; let the
+		// owner straight back in with the new password.
+		if (updated) await clearLoginFailures(updated.username);
 
 		return { success: true };
 	}

@@ -15,7 +15,14 @@
 		rated sessions. You can change it later in Settings.
 	</p>
 	<div class="rating-input-row">
-		<input type="number" class="rating-input" min="100" max="3000" bind:value={s.initialRating} />
+		<input
+			type="number"
+			class="rating-input"
+			min="100"
+			max="3000"
+			aria-label="Starting rating"
+			bind:value={s.initialRating}
+		/>
 		<button class="btn btn-primary" onclick={s.saveInitialRating}>Set Rating</button>
 	</div>
 </div>

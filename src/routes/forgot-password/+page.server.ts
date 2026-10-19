@@ -35,12 +35,12 @@ export const actions: Actions = {
 		if (isPasswordResetEnabled()) {
 			const [found] = await db.select({ id: user.id }).from(user).where(eq(user.email, email));
 
+			// Not awaited: the reply would otherwise take a Loops round-trip longer
+			// when the account exists, which gives away the answer by timing.
 			if (found) {
-				try {
-					await createAndSendPasswordReset(found.id, email);
-				} catch (e) {
+				createAndSendPasswordReset(found.id, email).catch((e) => {
 					log.error('Failed to send password reset email', { err: e });
-				}
+				});
 			}
 		}
 

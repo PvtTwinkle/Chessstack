@@ -16,15 +16,19 @@
 
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { Chess } from 'chess.js';
 import { db } from '$lib/db';
-import { repertoire, userMove, userRepertoireMove } from '$lib/db/schema';
+import { repertoire, userMove } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { fenKey } from '$lib/fen';
 import { isRepertoireLocked } from '$lib/stripe/tiers.server';
 import { requireAuth, parseIntParam } from '$lib/server/api-helpers';
 import { parseBody } from '$lib/server/validation';
 import { createMoveSchema } from '$lib/server/schemas/moves';
+import {
+	addMove,
+	lockRepertoire,
+	playMove,
+	type RepertoireColor
+} from '$lib/server/repertoire-moves';
 
 // ── GET ────────────────────────────────────────────────────────────────────────
 
@@ -62,11 +66,7 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	// a crafted request to store an arbitrary FEN as the destination position,
 	// corrupting the move tree.
 	const body = await parseBody(request, createMoveSchema);
-	const { repertoireId, san } = body;
-
-	// Normalize to 4-field FEN (strip halfmove clock and fullmove counter) so
-	// transpositions always match regardless of move order.
-	const fromFen = fenKey(body.fromFen);
+	const { repertoireId } = body;
 
 	// Verify the repertoire exists and belongs to this user.
 	const [rep] = await db
@@ -80,104 +80,30 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		throw error(403, 'This repertoire is read-only. Upgrade your plan to edit it.');
 	}
 
-	// Determine if it is the user's turn at this position, and compute toFen.
-	// Chess.js parses the FEN and tells us whose turn it is ('w' or 'b').
-	// We compare that against the repertoire's color to decide.
-	// Applying chess.move(san) also validates that san is a legal move from
-	// fromFen — if it isn't, Chess.js throws and we return 400.
-	let isUserTurn: boolean;
-	let toFen: string;
-	try {
-		const chess = new Chess(fromFen);
-		const fenTurn = chess.turn(); // 'w' or 'b'
-		isUserTurn =
-			(rep.color === 'WHITE' && fenTurn === 'w') || (rep.color === 'BLACK' && fenTurn === 'b');
-		// Apply the move to validate it and compute the resulting position.
-		const result = chess.move(san);
-		if (!result) throw new Error('Illegal move');
-		toFen = fenKey(chess.fen());
-	} catch {
-		throw error(400, 'Invalid FEN or move');
-	}
+	// Validates the move and computes the normalised positions (4-field FENs,
+	// so transpositions match regardless of move order).
+	const played = playMove(body.fromFen, body.san);
+	if (!played) throw error(400, 'Invalid FEN or move');
 
-	if (isUserTurn) {
-		// User can have at most one move per position.
-		// Check whether a move from this position already exists.
-		const [existing] = await db
-			.select()
-			.from(userMove)
-			.where(and(eq(userMove.repertoireId, repertoireId), eq(userMove.fromFen, fromFen)));
-
-		if (existing) {
-			if (existing.san === san) {
-				// The exact same move is already saved — idempotent, return it.
-				return json(existing);
-			}
-			// A different move already exists at this position — signal conflict.
-			// The client uses this to show a warning and snap the board back.
-			return json({ error: 'A move already exists from this position', existing }, { status: 409 });
-		}
-	} else {
-		// Opponent's turn — multiple moves allowed, but no exact duplicates.
-		const [existing] = await db
-			.select()
-			.from(userMove)
-			.where(
-				and(
-					eq(userMove.repertoireId, repertoireId),
-					eq(userMove.fromFen, fromFen),
-					eq(userMove.san, san)
-				)
-			);
-
-		if (existing) {
-			// Already exists — idempotent, return it.
-			return json(existing);
-		}
-	}
-
-	// Save the move and (for user's own moves) create its SR card in a single
-	// transaction so both writes either succeed or roll back together.
-	// Opponent moves are NOT drilled — you need to know your own responses,
-	// not predict every move your opponent might make.
-	const savedMove = await db.transaction(async (tx) => {
-		const [move] = await tx
-			.insert(userMove)
-			.values({
-				userId: user.id,
-				repertoireId,
-				fromFen,
-				toFen,
-				san,
-				source: 'PERSONAL',
-				notes: null,
-				createdAt: new Date()
-			})
-			.returning();
-
-		// The card starts in "New" state (state=0) and is immediately due,
-		// meaning it will appear in the very next drill session.
-		if (isUserTurn) {
-			await tx.insert(userRepertoireMove).values({
-				userId: user.id,
-				repertoireId,
-				fromFen,
-				san,
-				due: new Date(), // immediately due
-				state: 0, // 0 = New in the FSRS state machine
-				reps: 0,
-				lapses: 0,
-				stability: null,
-				difficulty: null,
-				elapsedDays: null,
-				scheduledDays: null,
-				lastReview: null,
-				learningSteps: 0
-			});
-		}
-
-		return move;
+	const result = await db.transaction(async (tx) => {
+		await lockRepertoire(tx, repertoireId);
+		return addMove(
+			tx,
+			{ userId: user.id, repertoireId, color: rep.color as RepertoireColor },
+			{ ...played, source: 'PERSONAL' }
+		);
 	});
 
-	return json(savedMove, { status: 201 });
+	switch (result.status) {
+		case 'created':
+			return json(result.move, { status: 201 });
+		case 'exists':
+			return json(result.move);
+		case 'conflict':
+			// The client uses this to show a warning and snap the board back.
+			return json(
+				{ message: 'A move already exists from this position', existing: result.existing },
+				{ status: 409 }
+			);
+	}
 };

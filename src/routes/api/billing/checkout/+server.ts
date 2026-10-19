@@ -10,16 +10,17 @@ import { user, subscription } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import {
 	getStripe,
+	isBillingEnabled,
 	STRIPE_PRICE_ID_MONTHLY,
 	STRIPE_PRICE_ID_ANNUAL,
 	STRIPE_REFERRAL_COUPON_ID
 } from '$lib/stripe/client';
-import type Stripe from 'stripe';
+import Stripe from 'stripe';
+import { log } from '$lib/server/log';
 import { requireAuth } from '$lib/server/api-helpers';
 import { parseBody } from '$lib/server/validation';
 import { checkoutSchema } from '$lib/server/schemas/billing';
-
-const ORIGIN = process.env.ORIGIN ?? 'http://localhost:3000';
+import { ORIGIN } from '$lib/server/origin';
 
 const PRICE_IDS = {
 	monthly: STRIPE_PRICE_ID_MONTHLY,
@@ -30,7 +31,7 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	const authedUser = requireAuth(locals);
 
 	const stripe = getStripe();
-	if (!stripe || !STRIPE_PRICE_ID_MONTHLY || !STRIPE_PRICE_ID_ANNUAL) {
+	if (!stripe || !isBillingEnabled()) {
 		throw error(503, 'Billing is not configured');
 	}
 
@@ -40,16 +41,23 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	// Check if the user already has an active paid subscription.
 	const [existingSub] = await db
 		.select({
-			tier: subscription.tier,
 			status: subscription.status,
+			stripeSubscriptionId: subscription.stripeSubscriptionId,
 			referralDiscountActive: subscription.referralDiscountActive,
 			referralDiscountUsedAt: subscription.referralDiscountUsedAt
 		})
 		.from(subscription)
 		.where(eq(subscription.userId, authedUser.id));
 
-	if (existingSub?.tier === 'paid' && existingSub.status === 'active') {
-		throw error(400, 'You already have an active subscription');
+	// A past_due subscription is still live in Stripe and will retry its
+	// payment; a second checkout would start another one beside it and orphan
+	// the first (the webhook keeps only one subscription id). Gifts don't
+	// count: a gifted user may subscribe.
+	if (
+		existingSub?.stripeSubscriptionId &&
+		(existingSub.status === 'active' || existingSub.status === 'past_due')
+	) {
+		throw error(400, 'You already have a subscription. Use Manage Billing to change or update it.');
 	}
 
 	// Look up the user's Stripe customer ID (if they've checked out before).
@@ -88,7 +96,15 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		params.metadata = { referral_discount: '1' };
 	}
 
-	const session = await stripe.checkout.sessions.create(params);
-
-	return json({ url: session.url });
+	// A double click within the same minute gets the same Checkout session
+	// back instead of a second one.
+	const idempotencyKey = `checkout-${authedUser.id}-${plan}-${Math.floor(Date.now() / 60_000)}`;
+	try {
+		const session = await stripe.checkout.sessions.create(params, { idempotencyKey });
+		return json({ url: session.url });
+	} catch (err) {
+		if (!(err instanceof Stripe.errors.StripeError)) throw err;
+		log.warn('Stripe checkout failed', { userId: authedUser.id, reason: err.message });
+		throw error(502, 'Billing is temporarily unavailable. Please try again in a few minutes.');
+	}
 };

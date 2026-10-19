@@ -180,6 +180,19 @@
 		margin-top: var(--space-1);
 	}
 
+	.settings-section :global(.status-msg:empty) {
+		margin-top: 0;
+	}
+
+	.settings-section :global(.status-msg.error) {
+		color: var(--color-danger);
+	}
+
+	/* Forms here only group a field with its button; they add no spacing. */
+	.settings-section :global(form) {
+		margin: 0;
+	}
+
 	.settings-section :global(.error-msg) {
 		margin: var(--space-2) 0 0;
 		font-size: 13px;

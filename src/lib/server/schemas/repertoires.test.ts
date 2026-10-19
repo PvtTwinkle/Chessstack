@@ -64,3 +64,12 @@ describe('setActiveRepertoireSchema', () => {
 		});
 	});
 });
+
+describe('repertoire name limit', () => {
+	it('rejects a name over 100 characters', () => {
+		expect(validate(createRepertoireSchema, { name: 'x'.repeat(101), color: 'WHITE' })).toEqual({
+			success: false,
+			message: 'name must be 100 characters or fewer'
+		});
+	});
+});

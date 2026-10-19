@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createEngine, type EngineWorker } from './engine';
+import { chooseBuild, createEngine, type EngineWorker } from './engine';
 
 // A fake Stockfish worker. `script` decides what the engine "prints" for each
 // command; replies arrive asynchronously, like a real worker's messages.
@@ -269,5 +269,80 @@ describe('createEngine', () => {
 		await vi.advanceTimersByTimeAsync(1000 + 3000);
 		await next;
 		expect(workers).toHaveLength(2);
+	});
+
+	it('reports a worker that crashes mid-search as unavailable at once', async () => {
+		vi.useFakeTimers();
+		const script = stockfishScript({ hold: true });
+		const { engine, workers } = setup((command, worker) => {
+			if (command.startsWith('go')) {
+				// Out of memory on a phone, say: the worker dies partway.
+				queueMicrotask(() => worker.onerror?.(new Error('wasm out of memory')));
+				return script(command).slice(0, 2);
+			}
+			return script(command);
+		});
+		const pending = engine.analyse({ fen: START, depth: 30, numMoves: 2, timeoutMs: 10_000 });
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(await pending).toMatchObject({ available: false, moves: [] });
+		expect(workers[0].terminated).toBe(true);
+		// Nothing is left waiting to fire against the replaced worker.
+		expect(vi.getTimerCount()).toBe(0);
+
+		// The next analysis starts a fresh worker.
+		const next = engine.analyse({ fen: START, depth: 30, numMoves: 1, timeoutMs: 1000 });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(workers).toHaveLength(2);
+		workers[1].postMessage('stop');
+		await next;
+	});
+
+	it('leaves no timers or abort listeners behind when the stop goes unanswered', async () => {
+		vi.useFakeTimers();
+		const script = stockfishScript({ hold: true });
+		const { engine } = setup((command) => (command === 'stop' ? [] : script(command)));
+		const controller = new AbortController();
+		const removed = vi.spyOn(controller.signal, 'removeEventListener');
+		const pending = engine.analyse({
+			fen: START,
+			depth: 30,
+			numMoves: 1,
+			timeoutMs: 1000,
+			signal: controller.signal
+		});
+		await vi.advanceTimersByTimeAsync(0);
+		controller.abort();
+		await vi.advanceTimersByTimeAsync(3000);
+		await pending;
+
+		expect(vi.getTimerCount()).toBe(0);
+		expect(removed).toHaveBeenCalledWith('abort', expect.any(Function));
+	});
+});
+
+describe('chooseBuild', () => {
+	it('uses the threaded build with half the cores, at most 4', () => {
+		expect(
+			chooseBuild({ crossOriginIsolated: true, cores: 16, threadsFailedBefore: false })
+		).toEqual({ multiThreaded: true, threads: 4 });
+		expect(
+			chooseBuild({ crossOriginIsolated: true, cores: 6, threadsFailedBefore: false })
+		).toEqual({ multiThreaded: true, threads: 3 });
+	});
+
+	it('uses the single build when it would get one thread anyway', () => {
+		expect(
+			chooseBuild({ crossOriginIsolated: true, cores: 2, threadsFailedBefore: false })
+		).toMatchObject({ multiThreaded: false });
+	});
+
+	it('uses the single build without isolation or after the threaded build failed', () => {
+		expect(
+			chooseBuild({ crossOriginIsolated: false, cores: 8, threadsFailedBefore: false })
+		).toMatchObject({ multiThreaded: false });
+		expect(
+			chooseBuild({ crossOriginIsolated: true, cores: 8, threadsFailedBefore: true })
+		).toMatchObject({ multiThreaded: false });
 	});
 });

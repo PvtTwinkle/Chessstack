@@ -44,7 +44,7 @@
 
 .train-ui .btn-primary {
 	background: var(--color-accent);
-	color: #fff;
+	color: var(--color-base);
 	border-color: var(--color-accent);
 }
 

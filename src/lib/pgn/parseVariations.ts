@@ -54,18 +54,25 @@ function cleanComment(raw: string): string | null {
 
 // ─── Tokenizer ──────────────────────────────────────────────────────────────
 
+/** Token marking the end of one game in a multi-game PGN. */
+const GAME_END = '\x00END';
+/** Token standing in for a header tag, so a header after movetext starts a new game. */
+const HEADER = '\x00HDR';
+
+// A tag pair like [Event "Club [A] champs"]: the value may contain `]` and
+// escaped quotes, so a plain `\[[^\]]*\]` would stop inside it.
+const HEADER_TAG = /\[\s*\w+\s+"(?:[^"\\]|\\.)*"\s*\]/g;
+
 /**
  * Tokenize raw PGN text into a flat array of tokens: SAN moves, '(', ')',
- * and comment tokens (prefixed with COMMENT_PREFIX).
- * Strips headers, NAGs, move numbers, and result markers.
+ * comment tokens (prefixed with COMMENT_PREFIX), and GAME_END / HEADER
+ * markers for splitting a multi-game file. Strips NAGs and move numbers.
  */
 function tokenize(rawPgn: string): string[] {
 	let pgn = rawPgn;
 
-	// Strip header tags: [Key "Value"]
-	pgn = pgn.replace(/\[[^\]]*\]/g, '');
-
-	// Extract comments {anything} and replace with placeholder tokens.
+	// Extract comments {anything} first, before headers, so that square
+	// brackets inside a comment ({see [note]}) aren't mistaken for a tag.
 	// Comments can span multiple lines. We replace each with a unique
 	// marker so they survive the remaining text transformations.
 	const comments: string[] = [];
@@ -75,12 +82,14 @@ function tokenize(rawPgn: string): string[] {
 		return ` ${COMMENT_PREFIX}${idx} `;
 	});
 
+	pgn = pgn.replace(HEADER_TAG, ` ${HEADER} `);
+
 	// Strip NAGs: $1, $2, etc. and symbolic NAGs like !, ?, !!, ??, !?, ?!
 	pgn = pgn.replace(/\$\d+/g, '');
 	pgn = pgn.replace(/[!?]{1,2}/g, '');
 
-	// Strip result markers at end: 1-0, 0-1, 1/2-1/2, *
-	pgn = pgn.replace(/\b1-0\b|\b0-1\b|\b1\/2-1\/2\b|\*/g, '');
+	// Result markers (1-0, 0-1, 1/2-1/2, *) end a game.
+	pgn = pgn.replace(/\b1-0\b|\b0-1\b|\b1\/2-1\/2\b|\*/g, ` ${GAME_END} `);
 
 	// Strip move numbers: "1." "1..." "12." "12..." etc.
 	// Must be careful not to eat castling notation (O-O, O-O-O).
@@ -103,6 +112,34 @@ function tokenize(rawPgn: string): string[] {
 	});
 }
 
+const hasMoves = (tokens: string[]) => tokens.some((t) => !t.startsWith(COMMENT_PREFIX));
+
+/**
+ * Split a token stream into one token list per game. A game ends at a result
+ * marker, or where a header block follows movetext (a file without results).
+ */
+function splitGames(tokens: string[]): string[][] {
+	const games: string[][] = [];
+	let current: string[] = [];
+	const flush = () => {
+		if (hasMoves(current)) games.push(current);
+		current = [];
+	};
+	for (const token of tokens) {
+		if (token === GAME_END) flush();
+		else if (token === HEADER) {
+			if (hasMoves(current)) flush();
+		} else current.push(token);
+	}
+	flush();
+	return games;
+}
+
+/** Number of games with moves in a PGN text. */
+export function countPgnGames(rawPgn: string): number {
+	return splitGames(tokenize(rawPgn)).length;
+}
+
 /**
  * Parse a flat token stream into a tree of MoveNodes.
  *
@@ -112,22 +149,26 @@ function tokenize(rawPgn: string): string[] {
  *
  * Comment tokens (COMMENT_PREFIX) are attached to the preceding move node.
  */
-function buildTree(tokens: string[]): MoveNode[] {
+function buildTree(tokens: string[], errors: string[]): MoveNode[] {
 	let pos = 0;
 
-	function parseLine(): MoveNode[] {
+	function parseLine(depth: number): MoveNode[] {
 		const nodes: MoveNode[] = [];
 
 		while (pos < tokens.length) {
 			const token = tokens[pos];
 
 			if (token === ')') {
-				// End of current variation — don't consume the ')' here,
-				// let the caller handle it.
-				break;
-			}
-
-			if (token.startsWith(COMMENT_PREFIX)) {
+				if (depth > 0) {
+					// End of current variation — don't consume the ')' here,
+					// let the caller handle it.
+					break;
+				}
+				// A stray ')' outside any variation used to end the parse
+				// silently, dropping the rest of the game. Skip it and say so.
+				errors.push("Unmatched ')' ignored");
+				pos++;
+			} else if (token.startsWith(COMMENT_PREFIX)) {
 				// Comment token — attach to the preceding move (if any)
 				if (nodes.length > 0) {
 					const cleaned = cleanComment(token.slice(COMMENT_PREFIX.length));
@@ -139,7 +180,7 @@ function buildTree(tokens: string[]): MoveNode[] {
 			} else if (token === '(') {
 				// Start of a variation: alternative to the LAST move in `nodes`.
 				pos++; // consume '('
-				const variation = parseLine();
+				const variation = parseLine(depth + 1);
 				pos++; // consume ')'
 
 				// Attach the variation to the preceding move node.
@@ -157,7 +198,7 @@ function buildTree(tokens: string[]): MoveNode[] {
 		return nodes;
 	}
 
-	return parseLine();
+	return parseLine(0);
 }
 
 // ─── Replay ─────────────────────────────────────────────────────────────────
@@ -232,8 +273,9 @@ function replayTree(
  * Parse a PGN string with variations and produce a deduplicated list of
  * repertoire edges (fromFen → toFen via san).
  *
- * Handles nested variations of arbitrary depth. Invalid moves within a
- * variation skip that sub-line and collect an error message.
+ * Handles nested variations of arbitrary depth and files with several
+ * games. Invalid moves within a variation skip that sub-line and collect an
+ * error message.
  *
  * PGN comments are preserved as annotations on edges. Engine-specific
  * tags like [%evp ...] are stripped.
@@ -252,18 +294,20 @@ export function parseVariationPgn(
 		);
 	}
 
-	// Tokenize and build tree
-	const tokens = tokenize(pgn);
-	if (tokens.length === 0) throw new Error('PGN contains no moves');
-
-	const tree = buildTree(tokens);
-	if (tree.length === 0) throw new Error('PGN contains no moves');
-
-	// Replay through Chess.js to compute FENs
+	// A multi-game file (a Lichess study export has one game per chapter) is
+	// replayed game by game from the start position, and the edges merged.
+	const games = splitGames(tokenize(pgn));
 	const edges = new Map<string, PgnEdge>();
 	const errors: string[] = [];
+	let anyMoves = false;
 
-	replayTree(tree, STARTING_FEN, repertoireColor, edges, errors, []);
+	for (const tokens of games) {
+		const tree = buildTree(tokens, errors);
+		if (tree.length === 0) continue;
+		anyMoves = true;
+		replayTree(tree, STARTING_FEN, repertoireColor, edges, errors, []);
+	}
+	if (!anyMoves) throw new Error('PGN contains no moves');
 
 	return { edges: Array.from(edges.values()), errors };
 }

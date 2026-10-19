@@ -4,13 +4,16 @@
 	import { invalidateAll } from '$app/navigation';
 	import ChessBoard from '$lib/components/ChessBoard.svelte';
 	import ResizableBoard from '$lib/components/ResizableBoard.svelte';
+	import { saveBoardSize } from '$lib/settings-client';
 	import CandidateMoves from '$lib/components/CandidateMoves.svelte';
 	import PrepDashboard from '$lib/components/prep/PrepDashboard.svelte';
 	import PrepMovePanel from '$lib/components/prep/PrepMovePanel.svelte';
 	import MoveTree from '$lib/components/build/MoveTree.svelte';
-	import { createPrepState } from '$lib/components/prep/prepState.svelte';
+	import { createPrepState, type PrepMoveRow } from '$lib/components/prep/prepState.svelte';
+	import PrepDialog from '$lib/components/prep/PrepDialog.svelte';
 	import { SvelteSet } from 'svelte/reactivity';
-	import type { AggregatedMove, WorkerParseMessage, WorkerOutboundMessage } from '$lib/prep/types';
+	import { onDestroy } from 'svelte';
+	import { fetchErrorMessage, parseInWorker, postJson, uploadPrepMoves } from '$lib/prep/pipeline';
 
 	let { data }: { data: PageData } = $props();
 
@@ -19,9 +22,20 @@
 		getBaseUrl: () => base
 	});
 
+	/** The saved hidden moves; a damaged value hides nothing rather than breaking the page. */
+	function parseExcluded(raw: string | null): string[] {
+		if (!raw) return [];
+		try {
+			const parsed: unknown = JSON.parse(raw);
+			return Array.isArray(parsed) ? parsed.filter((k) => typeof k === 'string') : [];
+		} catch {
+			return [];
+		}
+	}
+
 	// Sync state when page data loads
 	$effect(() => {
-		const excluded: string[] = data.prep.excludedMoves ? JSON.parse(data.prep.excludedMoves) : [];
+		const excluded = parseExcluded(data.prep.excludedMoves);
 		s.syncFromData(
 			data.opponentMoves,
 			data.prepMoves,
@@ -59,8 +73,11 @@
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
-		const tag = (e.target as HTMLElement)?.tagName;
+		const target = e.target as HTMLElement | null;
+		const tag = target?.tagName;
 		if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+		// The board behind an open dialog doesn't move.
+		if (target?.closest('dialog')) return;
 
 		const moves = getCyclableMoves();
 
@@ -107,7 +124,30 @@
 		}
 	}
 
+	// A filter change waiting to be saved goes out when the page is left.
+	onDestroy(() => void s.flushFilters());
+
+	// ── Deleting a prep move ─────────────────────────────────────────────
+	// Asks first when moves after it would go too.
+	let pendingDelete = $state<{ move: PrepMoveRow; following: number } | null>(null);
+
+	function requestDelete(move: PrepMoveRow) {
+		const following = s.followingMoveCount(move.id);
+		if (following === 0) s.deletePrepMove(move.id);
+		else pendingDelete = { move, following };
+	}
+
+	function confirmDelete() {
+		if (!pendingDelete) return;
+		s.deletePrepMove(pendingDelete.move.id);
+		pendingDelete = null;
+	}
+
 	// ── Refresh flow ─────────────────────────────────────────────────────
+	// Stops a parse still running in the worker when the page is left.
+	const leaving = new AbortController();
+	onDestroy(() => leaving.abort());
+
 	let showRefreshConfirm = $state(false);
 	let refreshing = $state(false);
 	let refreshStatus = $state('');
@@ -135,7 +175,7 @@
 				})
 			});
 
-			if (!fetchRes.ok) throw new Error('Fetch failed');
+			if (!fetchRes.ok) throw new Error(await fetchErrorMessage(fetchRes));
 			const { pgns, gameCount, hasMore } = await fetchRes.json();
 
 			if (gameCount === 0) {
@@ -153,77 +193,27 @@
 			refreshStatus = `Downloaded ${gameCount} games${moreNote}. Parsing...`;
 
 			// Step 2: Parse in worker
-			const result = await new Promise<{
-				moves: AggregatedMove[];
-				gamesAsWhite: number;
-				gamesAsBlack: number;
-			}>((resolve, reject) => {
-				const worker = new Worker(
-					new URL('../../../lib/workers/prepParser.worker.ts', import.meta.url),
-					{ type: 'module' }
-				);
-				worker.onmessage = (event: MessageEvent<WorkerOutboundMessage>) => {
-					const msg = event.data;
-					if (msg.type === 'progress') {
-						refreshStatus = `Parsing... ${msg.completed}/${msg.total}`;
-					} else if (msg.type === 'result') {
-						worker.terminate();
-						resolve(msg as never);
-					} else if (msg.type === 'error') {
-						worker.terminate();
-						reject(new Error(msg.message));
-					}
-				};
-				worker.onerror = (e) => {
-					worker.terminate();
-					reject(new Error(e.message));
-				};
-				const message: WorkerParseMessage = {
-					type: 'parse',
-					pgns,
-					opponentUsername: data.prep.platformUsername
-				};
-				worker.postMessage(message);
-			});
+			const result = await parseInWorker(
+				pgns,
+				data.prep.platformUsername,
+				(completed, total) => {
+					refreshStatus = `Parsing... ${completed}/${total}`;
+				},
+				leaving.signal
+			);
 
 			refreshStatus = 'Saving data...';
 
-			// Step 3: Chunked merge — send moves in batches of 1000
-			const CHUNK_SIZE = 1000;
-			const allMoves = result.moves;
-			const totalChunks = Math.ceil(allMoves.length / CHUNK_SIZE);
-
-			// Phase 1: delete old data and update metadata
-			const startRes = await fetch(`${base}/api/prep/${data.prep.id}/refresh`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					mode: 'merge-start',
-					gamesAsWhite: result.gamesAsWhite,
-					gamesAsBlack: result.gamesAsBlack
-				})
+			// Step 3: Upload the new moves beside the old ones; the commit swaps
+			// them in, so a failure here leaves the current data as it is.
+			const { uploadId } = await postJson<{ uploadId: number }>(
+				`${base}/api/prep/${data.prep.id}/refresh`,
+				{ mode: 'merge-start' },
+				'Merge start failed'
+			);
+			await uploadPrepMoves(base, uploadId, result, refreshTimeWindow, (batch, total) => {
+				refreshStatus = `Saving moves... ${batch}/${total}`;
 			});
-			if (!startRes.ok) {
-				const err = await startRes.json().catch(() => null);
-				throw new Error(err?.message || `Merge start failed (${startRes.status})`);
-			}
-
-			// Phase 2: send move data in chunks
-			for (let i = 0; i < allMoves.length; i += CHUNK_SIZE) {
-				const chunk = allMoves.slice(i, i + CHUNK_SIZE);
-				const chunkNum = Math.floor(i / CHUNK_SIZE) + 1;
-				refreshStatus = `Saving moves... ${chunkNum}/${totalChunks}`;
-
-				const batchRes = await fetch(`${base}/api/prep/${data.prep.id}/refresh`, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ mode: 'merge-batch', moves: chunk })
-				});
-				if (!batchRes.ok) {
-					const err = await batchRes.json().catch(() => null);
-					throw new Error(err?.message || `Merge batch ${chunkNum} failed (${batchRes.status})`);
-				}
-			}
 
 			// Reload page data
 			await invalidateAll();
@@ -375,15 +365,20 @@
 	}
 </script>
 
+<svelte:head>
+	<title>Prep | Chessstack</title>
+</svelte:head>
+
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="prep-detail">
 	{#if showExportConfirm}
-		<div class="modal-backdrop" onclick={() => (showExportConfirm = false)} role="presentation">
-			<!-- svelte-ignore a11y_click_events_have_key_events -->
-			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<div class="modal" onclick={(e) => e.stopPropagation()}>
-				<h3>Export as Repertoire</h3>
+		<PrepDialog
+			title="Export as Repertoire"
+			onClose={() => (showExportConfirm = false)}
+			busy={exporting}
+		>
+			<div class="modal-content">
 				<p>
 					This will create a new repertoire
 					<strong
@@ -405,16 +400,16 @@
 						Cancel
 					</button>
 				</div>
+				{#if exportError}
+					<p class="export-error" role="alert">{exportError}</p>
+				{/if}
 			</div>
-		</div>
+		</PrepDialog>
 	{/if}
 
 	{#if showRefreshConfirm}
-		<div class="modal-backdrop" onclick={() => (showRefreshConfirm = false)} role="presentation">
-			<!-- svelte-ignore a11y_click_events_have_key_events -->
-			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<div class="modal" onclick={(e) => e.stopPropagation()}>
-				<h3>Refresh Games</h3>
+		<PrepDialog title="Refresh Games" onClose={() => (showRefreshConfirm = false)}>
+			<div class="modal-content">
 				<p>
 					This will <strong>replace all existing opponent move data</strong> with a fresh analysis of
 					games from the selected time window. Your prep moves will be kept.
@@ -438,20 +433,37 @@
 					<button class="cancel-btn" onclick={() => (showRefreshConfirm = false)}>Cancel</button>
 				</div>
 			</div>
-		</div>
+		</PrepDialog>
+	{/if}
+
+	{#if pendingDelete}
+		<PrepDialog title="Delete {pendingDelete.move.san}?" onClose={() => (pendingDelete = null)}>
+			<div class="modal-content">
+				<p>
+					This removes <strong>{pendingDelete.move.san}</strong> and
+					<strong>{pendingDelete.following}</strong> prep {pendingDelete.following === 1
+						? 'move'
+						: 'moves'} after it that no other line reaches.
+				</p>
+				<div class="modal-actions">
+					<button class="submit-btn" onclick={confirmDelete}>Delete</button>
+					<button class="cancel-btn" onclick={() => (pendingDelete = null)}>Cancel</button>
+				</div>
+			</div>
+		</PrepDialog>
 	{/if}
 
 	{#if showAddModal}
-		<div class="modal-backdrop" onclick={resetAddModal} role="presentation">
-			<!-- svelte-ignore a11y_click_events_have_key_events -->
-			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<div class="modal modal-wide" onclick={(e) => e.stopPropagation()}>
-				<h3>Add to Existing Repertoire</h3>
-
+		<PrepDialog title="Add to Existing Repertoire" onClose={resetAddModal} wide busy={addExecuting}>
+			<div class="modal-content">
 				{#if !addPreview}
 					<p>Select a {s.activeColor} repertoire to add your prep moves to.</p>
 					<div class="form-field">
-						<select class="time-window-select" bind:value={addTargetRepId}>
+						<select
+							class="time-window-select"
+							bind:value={addTargetRepId}
+							aria-label="Repertoire to add to"
+						>
 							<option value={null}>Select a repertoire...</option>
 							{#each matchingRepertoires as rep (rep.id)}
 								<option value={rep.id}>{rep.name}</option>
@@ -459,7 +471,7 @@
 						</select>
 					</div>
 					{#if addError}
-						<p class="export-error">{addError}</p>
+						<p class="export-error" role="alert">{addError}</p>
 					{/if}
 					<div class="modal-actions">
 						<button
@@ -511,7 +523,7 @@
 					{/if}
 
 					{#if addError}
-						<p class="export-error">{addError}</p>
+						<p class="export-error" role="alert">{addError}</p>
 					{/if}
 					<div class="modal-actions">
 						<button class="submit-btn" onclick={executeAdd} disabled={addExecuting}>
@@ -523,7 +535,7 @@
 					</div>
 				{/if}
 			</div>
-		</div>
+		</PrepDialog>
 	{/if}
 
 	<!-- Three-column layout: Dashboard | Board | Move Panel -->
@@ -570,7 +582,12 @@
 
 			<div class="sidebar-actions">
 				<div class="refresh-row">
-					<select class="time-window-select" bind:value={refreshTimeWindow} disabled={refreshing}>
+					<select
+						class="time-window-select"
+						bind:value={refreshTimeWindow}
+						disabled={refreshing}
+						aria-label="Time window to refresh"
+					>
 						<option value="1m">1 month</option>
 						<option value="3m">3 months</option>
 						<option value="6m">6 months</option>
@@ -586,6 +603,7 @@
 						step={50}
 						disabled={refreshing}
 						title="Max games to fetch"
+						aria-label="Max games to fetch"
 					/>
 				</div>
 				<button
@@ -596,7 +614,7 @@
 					{refreshing ? 'Refreshing...' : 'Refresh Games'}
 				</button>
 				{#if refreshStatus}
-					<p class="refresh-status">{refreshStatus}</p>
+					<p class="refresh-status" role="status">{refreshStatus}</p>
 				{/if}
 
 				<button class="export-btn" onclick={() => (showExportConfirm = true)}>
@@ -631,28 +649,38 @@
 						>You already have <strong>{s.conflictSan}</strong> at this position. Delete it first to play
 						a different move.</span
 					>
-					<button class="dismiss-btn" onclick={() => s.dismissConflict()}>&times;</button>
+					<button class="dismiss-btn" onclick={() => s.dismissConflict()} aria-label="Dismiss"
+						>&times;</button
+					>
 				</div>
 			{/if}
-			<ResizableBoard boardSize={data.settings?.boardSize ?? 0}>
-				{#key s.boardKey}
-					<ChessBoard
-						fen={s.currentFen}
-						orientation={s.activeColor}
-						{boardTheme}
-						interactive={!s.saving}
-						lastMove={s.lastMove}
-						onMove={s.handlePlayMove}
-					/>
-				{/key}
+			<ResizableBoard boardSize={data.settings?.boardSize ?? 0} onResize={saveBoardSize}>
+				<ChessBoard
+					fen={s.currentFen}
+					orientation={s.activeColor}
+					{boardTheme}
+					interactive={!s.saving}
+					lastMove={s.lastMove}
+					onMove={s.handlePlayMove}
+				/>
 			</ResizableBoard>
 
 			<!-- Navigation controls -->
 			<div class="nav-controls">
-				<button onclick={() => s.handleReset()} disabled={s.navHistory.length === 0} title="Reset">
+				<button
+					onclick={() => s.handleReset()}
+					disabled={s.navHistory.length === 0}
+					title="Reset"
+					aria-label="Back to the start position"
+				>
 					&#x23EE;
 				</button>
-				<button onclick={() => s.handleUndo()} disabled={s.navHistory.length === 0} title="Back">
+				<button
+					onclick={() => s.handleUndo()}
+					disabled={s.navHistory.length === 0}
+					title="Back"
+					aria-label="Take back one move"
+				>
 					&#x25C0;
 				</button>
 			</div>
@@ -677,7 +705,9 @@
 			{#if s.errorMsg}
 				<div class="error-banner">
 					<span>{s.errorMsg}</span>
-					<button class="dismiss-btn" onclick={() => s.dismissError()}>&times;</button>
+					<button class="dismiss-btn" onclick={() => s.dismissError()} aria-label="Dismiss"
+						>&times;</button
+					>
 				</div>
 			{/if}
 
@@ -722,7 +752,7 @@
 					onStarsSettingsChanged={() => {}}
 				/>
 			{/if}
-			<PrepMovePanel state={s} {highlightedIdx} />
+			<PrepMovePanel state={s} {highlightedIdx} onDeleteMove={requestDelete} />
 		</div>
 	</div>
 </div>
@@ -996,32 +1026,7 @@
 		margin: 0;
 	}
 
-	.modal-backdrop {
-		position: fixed;
-		inset: 0;
-		background: rgba(0, 0, 0, 0.6);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 1000;
-	}
-
-	.modal {
-		background: var(--color-surface);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-lg);
-		padding: var(--space-4);
-		max-width: 450px;
-		width: 90%;
-	}
-
-	.modal h3 {
-		margin: 0 0 var(--space-2) 0;
-		font-size: 1rem;
-		color: var(--color-text-primary);
-	}
-
-	.modal p {
+	.modal-content p {
 		font-size: 0.85rem;
 		color: var(--color-text-secondary);
 		margin: 0 0 var(--space-3) 0;
@@ -1060,10 +1065,6 @@
 		font-family: var(--font-body);
 		font-size: 0.85rem;
 		cursor: pointer;
-	}
-
-	.modal-wide {
-		max-width: 550px;
 	}
 
 	.form-field {

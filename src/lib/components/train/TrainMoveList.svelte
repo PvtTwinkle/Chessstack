@@ -10,7 +10,9 @@
 	let { pairs }: { pairs: MovePair[] } = $props();
 </script>
 
-<div class="move-list">
+<!-- A log, so screen readers announce each move as it's added (the computer's
+     replies included). -->
+<div class="move-list" role="log" aria-live="polite" aria-label="Moves">
 	{#each pairs as pair (pair.num)}
 		<span class="move-num">{pair.num}.</span>
 		{#if pair.white}

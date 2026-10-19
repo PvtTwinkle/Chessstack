@@ -35,14 +35,44 @@ test('settings are saved, and a changed password is the one that works', async (
 	await page.getByRole('button', { name: 'Import Games' }).click();
 	await expect(page.getByRole('button', { name: 'Import from Lichess' })).toBeEnabled();
 
-	// ── Change the password ────────────────────────────────────────────────
-	const newPassword = 'Changed-Smoke-Pass-2';
+	// ── Change the email: only with the current password ──────────────────
 	await page.goto('/settings');
-	await page.getByPlaceholder('Current password').fill(PASSWORD);
-	await page.getByPlaceholder('New password (min 12 characters)').fill(newPassword);
-	await page.getByPlaceholder('Confirm new password').fill(newPassword);
-	await page.getByRole('button', { name: 'Change Password' }).click();
+	const emailForm = page.locator('.email-form');
+	await emailForm.locator('input[type=email]').fill(`${username}-new@example.com`);
+	await emailForm.getByPlaceholder('Current password').fill('Wrong-Password-1');
+	await emailForm.getByRole('button', { name: 'Save Email' }).click();
+	await expect(page.getByText('Password is incorrect')).toBeVisible();
+	await emailForm.getByPlaceholder('Current password').fill(PASSWORD);
+	await emailForm.getByRole('button', { name: 'Save Email' }).click();
+	await expect(page.getByText('Email updated')).toBeVisible();
+	await page.reload();
+	await expect(emailForm.locator('input[type=email]')).toHaveValue(`${username}-new@example.com`);
+
+	// ── Change the password ────────────────────────────────────────────────
+	// A second browser signed in to the same account is signed out by the
+	// change, and this browser keeps working on a new session token.
+	const other = await page.context().browser()!.newContext();
+	const otherPage = await other.newPage();
+	await signIn(otherPage, username);
+	await expect(otherPage.getByRole('button', { name: 'Sign out' })).toBeVisible();
+	const sessionToken = async () =>
+		(await page.context().cookies()).find((c) => c.name === 'chessstack_session')?.value;
+	const tokenBefore = await sessionToken();
+
+	const newPassword = 'Changed-Smoke-Pass-2';
+	const passwordForm = page.locator('.password-form');
+	await passwordForm.getByPlaceholder('Current password').fill(PASSWORD);
+	await passwordForm.getByPlaceholder('New password (min 12 characters)').fill(newPassword);
+	await passwordForm.getByPlaceholder('Confirm new password').fill(newPassword);
+	await passwordForm.getByRole('button', { name: 'Change Password' }).click();
 	await expect(page.getByText('Password changed successfully')).toBeVisible();
+
+	expect(await sessionToken()).not.toBe(tokenBefore);
+	await page.reload();
+	await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+	await otherPage.goto('/settings');
+	await expect(otherPage).toHaveURL(AT_ANON_HOME);
+	await other.close();
 
 	// The old password no longer signs in; the new one does.
 	await page.getByRole('button', { name: 'Sign out' }).click();

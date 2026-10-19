@@ -4,12 +4,16 @@
 // available to +layout.svelte and (via inheritance) to every child page.
 //
 // We use this to pass these things into every page:
-//   user              — who is logged in (or null on /login)
-//   edition           — 'cloud' (chessstack.app) or 'selfhosted', see $lib/server/edition
-//   repertoires       — the full list of this user's repertoires
+//   user               — who is logged in (null for visitors)
+//   edition            — 'cloud' (chessstack.app) or 'selfhosted', see $lib/server/edition
+//   tier               — the user's plan ('free' for visitors)
+//   repertoires        — the full list of this user's repertoires
 //   activeRepertoireId — which repertoire is currently selected (from cookie)
-//   settings          — user preferences (board theme, sound, engine depth, etc.)
+//   lockedRepertoireIds — repertoires the plan makes read-only
+//   settings           — user preferences (board theme, sound, engine depth, etc.)
+//   plus the instance's feature switches (registration, billing, email)
 //
+// Signed in or not, the data has the same shape, so pages need no fallbacks.
 // The repertoires list powers the RepertoireSelector in the nav bar.
 // The activeRepertoireId will be used by build/drill to scope data.
 // Settings are loaded once here instead of per-page so every ChessBoard
@@ -20,12 +24,12 @@ import { db } from '$lib/db';
 import { repertoire, userSettings } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { getLockedRepertoireIds } from '$lib/stripe/tiers';
-import { STRIPE_PRICE_ID_MONTHLY, STRIPE_PRICE_ID_ANNUAL } from '$lib/stripe/client';
-import { isEmailVerificationEnabled } from '$lib/loops';
+import { STRIPE_PRICE_ID_ANNUAL, isBillingEnabled } from '$lib/stripe/client';
+import { isEmailVerificationEnabled, isPasswordResetEnabled } from '$lib/loops';
 import { EDITION } from '$lib/server/edition';
 
 const REGISTRATION_MODE = process.env.REGISTRATION_MODE ?? 'invite';
-const BILLING_ENABLED = !!process.env.STRIPE_SECRET_KEY;
+const BILLING_ENABLED = isBillingEnabled();
 
 export const load: LayoutServerLoad = async ({ locals, cookies }) => {
 	// When the user is not logged in (e.g. the /login page), return early
@@ -34,12 +38,16 @@ export const load: LayoutServerLoad = async ({ locals, cookies }) => {
 		return {
 			user: null,
 			edition: EDITION,
-			repertoires: [],
+			tier: 'free' as const,
+			repertoires: [] as (typeof repertoire.$inferSelect)[],
 			activeRepertoireId: null,
+			lockedRepertoireIds: [] as number[],
 			settings: null,
 			registrationMode: REGISTRATION_MODE,
 			billingEnabled: BILLING_ENABLED,
-			emailVerificationEnabled: isEmailVerificationEnabled()
+			emailVerificationEnabled: isEmailVerificationEnabled(),
+			passwordResetEnabled: isPasswordResetEnabled(),
+			stripePriceIdAnnual: STRIPE_PRICE_ID_ANNUAL
 		};
 	}
 
@@ -106,7 +114,7 @@ export const load: LayoutServerLoad = async ({ locals, cookies }) => {
 		registrationMode: REGISTRATION_MODE,
 		billingEnabled: BILLING_ENABLED,
 		emailVerificationEnabled: isEmailVerificationEnabled(),
-		stripePriceIdMonthly: STRIPE_PRICE_ID_MONTHLY,
+		passwordResetEnabled: isPasswordResetEnabled(),
 		stripePriceIdAnnual: STRIPE_PRICE_ID_ANNUAL
 	};
 };

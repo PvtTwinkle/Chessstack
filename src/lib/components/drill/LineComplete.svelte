@@ -3,6 +3,7 @@
 -->
 <script lang="ts">
 	import DrillFeedback from './DrillFeedback.svelte';
+	import GradeError from './GradeError.svelte';
 	import NextButton from './NextButton.svelte';
 	import type { DrillState } from './drillState.svelte';
 
@@ -27,7 +28,8 @@
 			</span>
 		</div>
 	</div>
-	<NextButton label="Next Line" onclick={drill.advanceToNextLine} />
+	<NextButton label="Next Line" onclick={drill.advanceToNextLine} disabled={drill.grading} />
+	<GradeError {drill} />
 	<a href={buildHref} class="btn btn--secondary">Build from this line</a>
 </div>
 

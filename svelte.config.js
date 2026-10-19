@@ -13,7 +13,15 @@ const config = {
 		})
 	],
 	kit: {
-		adapter: adapter()
+		adapter: adapter(),
+		// SvelteKit adds a per-request nonce to its inline hydration scripts and
+		// sends it in a script-src header. hooks.server.ts merges that nonce into
+		// the full policy from $lib/server/security-headers, which no longer
+		// needs 'unsafe-inline' for scripts.
+		csp: {
+			mode: 'nonce',
+			directives: { 'script-src': ['self'] }
+		}
 	}
 };
 

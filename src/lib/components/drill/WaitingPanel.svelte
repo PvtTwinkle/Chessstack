@@ -86,7 +86,6 @@
 	.turn-hint {
 		font-weight: 400;
 		font-size: 0.75rem;
-		opacity: 0.8;
 	}
 
 	/* ── Tempo timer bar ─────────────────────────────────────────────────────── */

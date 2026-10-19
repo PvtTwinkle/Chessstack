@@ -7,19 +7,21 @@ import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { trainerSavedPosition } from '$lib/db/schema';
-import { eq, and, desc } from 'drizzle-orm';
+import { eq, and, count, desc } from 'drizzle-orm';
 import { fenKey } from '$lib/fen';
 import { parseBody } from '$lib/server/validation';
 import { savePositionSchema, deletePositionSchema } from '$lib/server/schemas/train';
+import { requireAuth } from '$lib/server/api-helpers';
+import { SAVED_POSITIONS_MAX } from '$lib/validation-limits';
 
 /** List all saved positions for the authenticated user. */
 export const GET: RequestHandler = async ({ locals }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
 	const positions = await db
 		.select()
 		.from(trainerSavedPosition)
-		.where(eq(trainerSavedPosition.userId, locals.user.id))
+		.where(eq(trainerSavedPosition.userId, user.id))
 		.orderBy(desc(trainerSavedPosition.createdAt));
 
 	return json({ positions });
@@ -27,7 +29,7 @@ export const GET: RequestHandler = async ({ locals }) => {
 
 /** Save a new starting position. */
 export const POST: RequestHandler = async ({ request, locals }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
 	const body = await parseBody(request, savePositionSchema);
 	const { name } = body;
@@ -37,11 +39,19 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 
 	const normalizedFen = fenKey(body.fen);
 
+	const [{ saved }] = await db
+		.select({ saved: count() })
+		.from(trainerSavedPosition)
+		.where(eq(trainerSavedPosition.userId, user.id));
+	if (saved >= SAVED_POSITIONS_MAX) {
+		throw error(400, `You can save up to ${SAVED_POSITIONS_MAX} positions. Delete one first.`);
+	}
+
 	try {
 		const [inserted] = await db
 			.insert(trainerSavedPosition)
 			.values({
-				userId: locals.user.id,
+				userId: user.id,
 				fen: normalizedFen,
 				name,
 				leadInMoves,
@@ -61,15 +71,13 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 
 /** Delete a saved position by ID. */
 export const DELETE: RequestHandler = async ({ request, locals }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
 	const body = await parseBody(request, deletePositionSchema);
 
 	const deleted = await db
 		.delete(trainerSavedPosition)
-		.where(
-			and(eq(trainerSavedPosition.id, body.id), eq(trainerSavedPosition.userId, locals.user.id))
-		)
+		.where(and(eq(trainerSavedPosition.id, body.id), eq(trainerSavedPosition.userId, user.id)))
 		.returning();
 
 	if (deleted.length === 0) throw error(404, 'Position not found');

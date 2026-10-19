@@ -5,6 +5,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import type { ToggleSetting } from './settingsState.svelte';
+	import StatusMessage from './StatusMessage.svelte';
 
 	let {
 		label,
@@ -15,14 +16,28 @@
 		setting: ToggleSetting;
 		children?: Snippet;
 	} = $props();
+
+	const labelId = $props.id();
 </script>
 
 <div class="setting-row">
-	<span class="setting-label">{label}</span>
-	<button class="toggle-btn" class:active={setting.value} onclick={setting.toggle}>
+	<span class="setting-label" id={labelId}>{label}</span>
+	<!-- Named by the label and its own On/Off text, with the state in
+	     aria-pressed, so it reads as "Sound Effects On, toggle button, pressed"
+	     rather than just "On". The visible text has to be part of the name
+	     (WCAG 2.5.3, Label in Name) for voice control users. -->
+	<button
+		id="{labelId}-btn"
+		class="toggle-btn"
+		class:active={setting.value}
+		aria-labelledby="{labelId} {labelId}-btn"
+		aria-pressed={setting.value}
+		onclick={setting.toggle}
+	>
 		{setting.value ? 'On' : 'Off'}
 	</button>
 	{@render children?.()}
+	<StatusMessage status={setting.status} />
 </div>
 
 <style>

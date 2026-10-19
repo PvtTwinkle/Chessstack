@@ -7,7 +7,7 @@ import type { PageServerLoad } from './$types';
 import { redirect } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { opponentPreps, opponentMoves, prepMoves, userMove, repertoire } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, isNull } from 'drizzle-orm';
 
 export const load: PageServerLoad = async ({ locals, params }) => {
 	if (!locals.user) redirect(302, '/login');
@@ -15,11 +15,17 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 	const prepId = parseInt(params.id);
 	if (isNaN(prepId)) redirect(302, '/prep');
 
-	// Verify ownership
+	// Verify ownership. A pending upload isn't a prep yet.
 	const [prep] = await db
 		.select()
 		.from(opponentPreps)
-		.where(and(eq(opponentPreps.id, prepId), eq(opponentPreps.userId, locals.user.id)));
+		.where(
+			and(
+				eq(opponentPreps.id, prepId),
+				eq(opponentPreps.userId, locals.user.id),
+				isNull(opponentPreps.pendingSince)
+			)
+		);
 
 	if (!prep) redirect(302, '/prep');
 

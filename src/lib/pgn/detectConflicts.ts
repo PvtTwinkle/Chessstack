@@ -8,7 +8,7 @@
 // Opponent-turn moves never conflict — all variations are welcome.
 
 import type { PgnEdge } from './parseVariations';
-import { fenKey } from './index';
+import { fenKey } from '$lib/fen';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 

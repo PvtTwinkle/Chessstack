@@ -20,6 +20,7 @@ describe('isCloudOnlyRoute', () => {
 		expect(isCloudOnlyRoute('/openings')).toBe(true);
 		expect(isCloudOnlyRoute('/openings/sicilian-defense')).toBe(true);
 		expect(isCloudOnlyRoute('/sitemap.xml')).toBe(true);
+		expect(isCloudOnlyRoute('/chess-repertoire-builder')).toBe(true);
 	});
 
 	it('leaves the app alone', () => {

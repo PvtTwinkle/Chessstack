@@ -1,4 +1,3 @@
-/* eslint-disable security/detect-non-literal-fs-filename -- test writes migration folders into its own mkdtemp directory */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';

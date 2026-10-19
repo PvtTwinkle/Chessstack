@@ -6,10 +6,14 @@
 	// overrides (display: flex beats .btn's display: block).
 	import './drill-ui.css';
 
-	let { label = 'Next', onclick }: { label?: string; onclick: () => void } = $props();
+	let {
+		label = 'Next',
+		disabled = false,
+		onclick
+	}: { label?: string; disabled?: boolean; onclick: () => void } = $props();
 </script>
 
-<button class="btn btn--primary next-btn" {onclick}>
+<button class="btn btn--primary next-btn" {onclick} {disabled}>
 	{label} <kbd>Space</kbd>
 </button>
 

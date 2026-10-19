@@ -57,16 +57,17 @@ scanners against chessstack.app while researching.
 
 ### CI (every pull request and push to `main`)
 
-| Check                   | Purpose                                                                     |
-| ----------------------- | --------------------------------------------------------------------------- |
-| Gitleaks                | Secrets in the Git history                                                  |
-| npm audit               | Known vulnerabilities in all dependencies (fails on high or critical)       |
-| ESLint security plugins | Node.js security antipatterns and DOM injection sinks                       |
-| License checker         | Dependency licenses must be on the approved list (below)                    |
-| Semgrep                 | SAST: injection, path traversal and similar patterns                        |
-| Trivy (config)          | Dockerfile misconfigurations                                                |
-| Trivy (image)           | OS and library vulnerabilities in the built Docker image                    |
-| Tests                   | Unit, database integration and end-to-end tests, including auth and billing |
+| Check                   | Purpose                                                                                |
+| ----------------------- | -------------------------------------------------------------------------------------- |
+| Gitleaks                | Secrets in the Git history                                                             |
+| npm audit               | Known vulnerabilities in all dependencies (fails on high or critical)                  |
+| ESLint security plugins | Node.js security antipatterns and DOM injection sinks                                  |
+| License checker         | Dependency licenses must be on the approved list (below)                               |
+| Semgrep                 | SAST: injection, path traversal and similar patterns                                   |
+| Trivy (config)          | Dockerfile misconfigurations                                                           |
+| Trivy (image)           | OS and library vulnerabilities in the built Docker image                               |
+| Image boot test         | The built image starts as a non-root user, migrates an empty database and serves pages |
+| Tests                   | Unit, database integration and end-to-end tests, including auth and billing            |
 
 GitHub Actions are pinned to full commit SHAs, and workflows run with read-only permissions.
 [Dependabot](.github/dependabot.yml) opens weekly update PRs for npm packages, GitHub Actions and

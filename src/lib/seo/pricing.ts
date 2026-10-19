@@ -1,9 +1,8 @@
 // Public plan prices, shown on the landing page and published as structured data.
 //
-// Keep in sync with the Stripe prices (STRIPE_PRICE_ID_MONTHLY / _ANNUAL) and the
-// plan cards in SubscriptionSection.svelte. Google expects the prices in
-// structured data to match what the page shows, so the landing page reads its
-// pricing text from here too.
+// Keep in sync with the Stripe prices (STRIPE_PRICE_ID_MONTHLY / _ANNUAL). Google
+// expects the prices in structured data to match what the page shows, so the
+// landing page and the plan cards in Settings read their prices from here too.
 
 import { TIER_LIMITS } from '$lib/stripe/tiers';
 

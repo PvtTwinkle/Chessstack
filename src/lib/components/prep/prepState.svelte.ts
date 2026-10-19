@@ -8,37 +8,31 @@
  * - Gap detection and priority navigation
  */
 
-import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+// The maps and sets built inside $derived blocks below are rebuilt whole on
+// each change and never mutated afterwards, so they are plain Map/Set: the
+// reactive versions would only add overhead on big preps.
+/* eslint-disable svelte/prefer-svelte-reactivity */
+
+import { untrack } from 'svelte';
+import { SvelteSet } from 'svelte/reactivity';
 import { Chess } from 'chess.js';
 import { playMove, playCapture } from '$lib/sounds';
 import { fenKey, STARTING_FEN } from '$lib/fen';
+import type {
+	opponentMoves as opponentMovesTable,
+	prepMoves as prepMovesTable
+} from '$lib/db/schema';
+import { prepSubtreeIds } from '$lib/prep/subtree';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-/** Shape of an opponent move row from the database. */
-export interface OpponentMoveRow {
-	prepId: number;
-	positionFen: string;
-	moveSan: string;
-	opponentColor: string;
-	resultingFen: string;
-	gamesPlayed: number;
-	whiteWins: number;
-	blackWins: number;
-	draws: number;
-}
+/** An opponent move row from the database. */
+export type OpponentMoveRow = typeof opponentMovesTable.$inferSelect;
 
-/** Shape of a prep move row from the database. */
-export interface PrepMoveRow {
-	id: number;
-	prepId: number;
-	userId: number;
-	fromFen: string;
-	toFen: string;
-	san: string;
-	color: string;
+/** A prep move row from the database (createdAt arrives as a string from fetch). */
+export type PrepMoveRow = Omit<typeof prepMovesTable.$inferSelect, 'createdAt'> & {
 	createdAt: Date | string | number;
-}
+};
 
 /** Shape of a repertoire coverage entry (read-only). */
 export interface CoverageEntry {
@@ -81,7 +75,21 @@ function resolveSquares(fen: string, san: string): [string, string] | undefined 
 	}
 }
 
+/** The position after `san`, or null when it isn't legal there. */
+function playedFen(fen: string, san: string): string | null {
+	try {
+		const chess = new Chess(fen);
+		chess.move(san);
+		return fenKey(chess.fen());
+	} catch {
+		return null;
+	}
+}
+
 // ── State factory ────────────────────────────────────────────────────────────
+
+/** How long filter changes wait for more changes before they're saved. */
+export const FILTER_SAVE_DELAY_MS = 500;
 
 interface CreatePrepStateParams {
 	getPrepId: () => number;
@@ -101,7 +109,6 @@ export function createPrepState(params: CreatePrepStateParams) {
 	let saving = $state(false);
 	let conflictSan = $state<string | null>(null);
 	let errorMsg = $state<string | null>(null);
-	let boardKey = $state(0);
 
 	// Which color the user is prepping as ('white' or 'black').
 	// This determines: the board orientation and which opponent moves to show.
@@ -115,7 +122,7 @@ export function createPrepState(params: CreatePrepStateParams) {
 
 	// Opponent moves indexed by position FEN for O(1) lookup.
 	const oppMovesByFen = $derived.by(() => {
-		const map = new SvelteMap<string, OpponentMoveRow[]>();
+		const map = new Map<string, OpponentMoveRow[]>();
 		for (const m of opponentMoves) {
 			const key = m.positionFen;
 			const arr = map.get(key);
@@ -127,7 +134,7 @@ export function createPrepState(params: CreatePrepStateParams) {
 
 	// Prep moves indexed by fromFen.
 	const prepMovesByFen = $derived.by(() => {
-		const map = new SvelteMap<string, PrepMoveRow[]>();
+		const map = new Map<string, PrepMoveRow[]>();
 		for (const m of prepMoves) {
 			const key = fenKey(m.fromFen);
 			const arr = map.get(key);
@@ -139,12 +146,30 @@ export function createPrepState(params: CreatePrepStateParams) {
 
 	// Repertoire coverage indexed by fromFen.
 	const coverageByFen = $derived.by(() => {
-		const map = new SvelteMap<string, CoverageEntry[]>();
+		const map = new Map<string, CoverageEntry[]>();
 		for (const c of coverageEntries) {
 			const key = fenKey(c.fromFen);
 			const arr = map.get(key);
 			if (arr) arr.push(c);
 			else map.set(key, [c]);
+		}
+		return map;
+	});
+
+	// The user's repertoire moves for the active colour, as fromFen → the
+	// positions they lead to. Worked out once per data or colour change, so
+	// walking the tree never has to build chess.js boards.
+	const coverageTargets = $derived.by(() => {
+		const userRepColor = activeColor === 'white' ? 'WHITE' : 'BLACK';
+		const map = new Map<string, { san: string; toFen: string }[]>();
+		for (const c of coverageEntries) {
+			if (c.color !== userRepColor) continue;
+			const from = fenKey(c.fromFen);
+			const toFen = playedFen(from, c.san);
+			if (!toFen) continue;
+			const arr = map.get(from);
+			if (arr) arr.push({ san: c.san, toFen });
+			else map.set(from, [{ san: c.san, toFen }]);
 		}
 		return map;
 	});
@@ -217,7 +242,7 @@ export function createPrepState(params: CreatePrepStateParams) {
 			notes: null;
 			userId: number;
 			repertoireId: number;
-			createdAt: Date;
+			createdAt: Date | string | number;
 		}[] = [];
 		let syntheticId = -1;
 
@@ -233,7 +258,7 @@ export function createPrepState(params: CreatePrepStateParams) {
 				notes: null,
 				userId: pm.userId,
 				repertoireId: pm.prepId,
-				createdAt: pm.createdAt as Date
+				createdAt: pm.createdAt
 			});
 		}
 
@@ -251,7 +276,7 @@ export function createPrepState(params: CreatePrepStateParams) {
 				notes: null,
 				userId: 0,
 				repertoireId: 0,
-				createdAt: 0 as unknown as Date
+				createdAt: 0
 			});
 		}
 
@@ -293,13 +318,13 @@ export function createPrepState(params: CreatePrepStateParams) {
 		let totalPositions = 0;
 		let greenCount = 0;
 		let yellowCount = 0;
-		const visited = new SvelteSet<string>();
-		const counted = new SvelteSet<string>();
+		const visited = new Set<string>();
+		const counted = new Set<string>();
 		const queue: { fen: string; depth: number }[] = [{ fen: STARTING_FEN, depth: 0 }];
-		const userRepColor = activeColor === 'white' ? 'WHITE' : 'BLACK';
 
-		while (queue.length > 0) {
-			const { fen, depth } = queue.shift()!;
+		// An index instead of queue.shift(), which copies the array each time.
+		for (let head = 0; head < queue.length; head++) {
+			const { fen, depth } = queue[head];
 			const key = fenKey(fen);
 			if (visited.has(key)) continue;
 			visited.add(key);
@@ -343,14 +368,8 @@ export function createPrepState(params: CreatePrepStateParams) {
 				for (const pm of (prepMovesByFen.get(key) ?? []).filter((m) => m.color === activeColor)) {
 					queue.push({ fen: fenKey(pm.toFen), depth: depth + 1 });
 				}
-				for (const c of (coverageByFen.get(key) ?? []).filter((c) => c.color === userRepColor)) {
-					try {
-						const chess = new Chess(fen);
-						const result = chess.move(c.san);
-						if (result) queue.push({ fen: fenKey(chess.fen()), depth: depth + 1 });
-					} catch {
-						/* skip */
-					}
+				for (const c of coverageTargets.get(key) ?? []) {
+					queue.push({ fen: c.toFen, depth: depth + 1 });
 				}
 			}
 		}
@@ -412,16 +431,35 @@ export function createPrepState(params: CreatePrepStateParams) {
 		opponentMoves = newOpponentMoves;
 		prepMoves = newPrepMoves;
 		coverageEntries = newCoverage;
-		navHistory = [];
-		currentFen = STARTING_FEN;
-		lastMove = undefined;
 		errorMsg = null;
+		// A reload (after adding to a repertoire, say) keeps the board where it
+		// is while every step to it is still in the data.
+		// untrack: the page calls this from an effect, which must rerun for new
+		// data only, not every time the board moves.
+		if (!untrack(pathStillExists)) {
+			navHistory = [];
+			currentFen = STARTING_FEN;
+			lastMove = undefined;
+		}
 
 		if (initialMinGames !== undefined) minGames = initialMinGames;
 		excludedKeys.clear();
 		if (initialExcluded) {
 			for (const key of initialExcluded) excludedKeys.add(key);
 		}
+	}
+
+	/** Whether every move in the current line is still an opponent, prep or repertoire move. */
+	function pathStillExists(): boolean {
+		return navHistory.every((step) => {
+			const from = fenKey(step.fromFen);
+			const to = fenKey(step.toFen);
+			return (
+				(oppMovesByFen.get(from) ?? []).some((m) => fenKey(m.resultingFen) === to) ||
+				(prepMovesByFen.get(from) ?? []).some((m) => fenKey(m.toFen) === to) ||
+				(coverageTargets.get(from) ?? []).some((c) => c.toFen === to)
+			);
+		});
 	}
 
 	// ── Navigation ───────────────────────────────────────────────────────
@@ -487,13 +525,13 @@ export function createPrepState(params: CreatePrepStateParams) {
 		const targetKey = fenKey(targetFen);
 		if (targetKey === fenKey(STARTING_FEN)) return [];
 
-		const visited = new SvelteSet<string>();
-		const parent = new SvelteMap<string, { fromFen: string; san: string }>();
+		const visited = new Set<string>();
+		const parent = new Map<string, { fromFen: string; san: string }>();
 		const queue: string[] = [STARTING_FEN];
 		visited.add(fenKey(STARTING_FEN));
 
-		while (queue.length > 0) {
-			const fen = queue.shift()!;
+		for (let head = 0; head < queue.length; head++) {
+			const fen = queue[head];
 			const key = fenKey(fen);
 
 			// Collect all moves from this position (opponent + prep + coverage)
@@ -510,16 +548,7 @@ export function createPrepState(params: CreatePrepStateParams) {
 			}
 
 			// Coverage moves
-			const userRepColor = activeColor === 'white' ? 'WHITE' : 'BLACK';
-			for (const c of (coverageByFen.get(key) ?? []).filter((c) => c.color === userRepColor)) {
-				try {
-					const chess = new Chess(fen);
-					const result = chess.move(c.san);
-					if (result) moves.push({ san: c.san, toFen: fenKey(chess.fen()) });
-				} catch {
-					// skip
-				}
-			}
+			for (const c of coverageTargets.get(key) ?? []) moves.push(c);
 
 			for (const move of moves) {
 				const toKey = fenKey(move.toFen);
@@ -557,14 +586,12 @@ export function createPrepState(params: CreatePrepStateParams) {
 
 	// ── Animated gap navigation ─────────────────────────────────────────
 
-	let animating = $state(false);
 	let animationTimer: ReturnType<typeof setTimeout> | undefined;
 	const ANIMATION_DELAY_MS = 400;
 
 	function stopAnimation(): void {
 		if (animationTimer) clearTimeout(animationTimer);
 		animationTimer = undefined;
-		animating = false;
 	}
 
 	function navigateToGap(): void {
@@ -609,12 +636,10 @@ export function createPrepState(params: CreatePrepStateParams) {
 		currentFen = STARTING_FEN;
 		lastMove = undefined;
 		errorMsg = null;
-		animating = true;
 
 		let step = 0;
 		function playNext() {
 			if (step >= path.length) {
-				animating = false;
 				return;
 			}
 			const entry = path[step];
@@ -678,7 +703,6 @@ export function createPrepState(params: CreatePrepStateParams) {
 			}
 			// Different move exists — conflict, snap board back
 			conflictSan = existingPreps[0].san;
-			boardKey += 1;
 			return;
 		}
 
@@ -699,13 +723,11 @@ export function createPrepState(params: CreatePrepStateParams) {
 				// Server-side conflict (race condition fallback)
 				const body = await res.json();
 				conflictSan = body.existing?.san ?? '?';
-				boardKey += 1;
 				return;
 			}
 
 			if (!res.ok) {
 				errorMsg = 'Failed to save prep move.';
-				boardKey += 1;
 				return;
 			}
 
@@ -714,13 +736,36 @@ export function createPrepState(params: CreatePrepStateParams) {
 			navigate();
 		} catch {
 			errorMsg = 'Network error. Please try again.';
-			boardKey += 1;
 		} finally {
 			saving = false;
 		}
 	}
 
 	// ── Delete prep move ─────────────────────────────────────────────────
+
+	/**
+	 * How many prep moves after `moveId` go with it when it's deleted: the
+	 * ones no other line on the board still reaches. The server works out the
+	 * same set.
+	 */
+	function followingMoveCount(moveId: number): number {
+		return deletionIds(moveId).length - 1;
+	}
+
+	function deletionIds(moveId: number): number[] {
+		const sameColor = prepMoves.filter((m) => m.color === activeColor);
+		const walkable = [
+			...opponentMoves.map((m) => ({
+				fromFen: m.positionFen,
+				toFen: m.resultingFen,
+				san: m.moveSan
+			})),
+			...[...coverageTargets].flatMap(([fromFen, targets]) =>
+				targets.map((t) => ({ fromFen, toFen: t.toFen, san: t.san }))
+			)
+		];
+		return prepSubtreeIds(STARTING_FEN, sameColor, walkable, moveId);
+	}
 
 	async function deletePrepMove(moveId: number): Promise<void> {
 		if (saving) return;
@@ -739,7 +784,9 @@ export function createPrepState(params: CreatePrepStateParams) {
 				return;
 			}
 
-			prepMoves = prepMoves.filter((m) => m.id !== moveId);
+			const body: { ids?: number[] } = await res.json().catch(() => ({}));
+			const removed = new Set(body.ids ?? [moveId]);
+			prepMoves = prepMoves.filter((m) => !removed.has(m.id));
 		} catch {
 			errorMsg = 'Network error. Please try again.';
 		} finally {
@@ -749,19 +796,47 @@ export function createPrepState(params: CreatePrepStateParams) {
 
 	// ── Filter actions ──────────────────────────────────────────────────
 
-	async function persistFilters(): Promise<void> {
-		try {
-			await fetch(`${params.getBaseUrl()}/api/prep/${params.getPrepId()}`, {
-				method: 'PATCH',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					minGames,
-					excludedMoves: Array.from(excludedKeys)
-				})
-			});
-		} catch {
-			// Silent — filter changes are also in local state, persist is best-effort
+	// Filter changes are saved once they stop for a moment, one request at a
+	// time, and each request sends the state as it is when it goes out, so a
+	// slow request can never land after a newer one and save older filters.
+	let filterTimer: ReturnType<typeof setTimeout> | undefined;
+	let filterSaving: Promise<void> | null = null;
+	let filterDirty = false;
+
+	async function saveFilters(): Promise<void> {
+		while (filterDirty) {
+			filterDirty = false;
+			try {
+				const res = await fetch(`${params.getBaseUrl()}/api/prep/${params.getPrepId()}`, {
+					method: 'PATCH',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ minGames, excludedMoves: Array.from(excludedKeys) })
+				});
+				if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			} catch {
+				errorMsg = "Couldn't save the filter change. It applies until you leave this page.";
+			}
 		}
+		filterSaving = null;
+	}
+
+	function persistFilters(): void {
+		filterDirty = true;
+		clearTimeout(filterTimer);
+		filterTimer = setTimeout(() => {
+			filterTimer = undefined;
+			filterSaving ??= saveFilters();
+		}, FILTER_SAVE_DELAY_MS);
+	}
+
+	/** Saves a pending filter change now (the page is being left). */
+	function flushFilters(): Promise<void> | null {
+		if (filterTimer !== undefined) {
+			clearTimeout(filterTimer);
+			filterTimer = undefined;
+			filterSaving ??= saveFilters();
+		}
+		return filterSaving;
 	}
 
 	function setMinGames(n: number): void {
@@ -771,11 +846,6 @@ export function createPrepState(params: CreatePrepStateParams) {
 
 	function excludeMove(fen: string, san: string): void {
 		excludedKeys.add(`${fen}|${san}`);
-		persistFilters();
-	}
-
-	function restoreMove(fen: string, san: string): void {
-		excludedKeys.delete(`${fen}|${san}`);
 		persistFilters();
 	}
 
@@ -820,16 +890,9 @@ export function createPrepState(params: CreatePrepStateParams) {
 		get errorMsg() {
 			return errorMsg;
 		},
-		get boardKey() {
-			return boardKey;
-		},
 		get activeColor() {
 			return activeColor;
 		},
-		get animating() {
-			return animating;
-		},
-		stopAnimation,
 
 		// Derived — turn state
 		get isUserTurn() {
@@ -890,10 +953,11 @@ export function createPrepState(params: CreatePrepStateParams) {
 		navigateToGap,
 		toggleColor,
 		deletePrepMove,
+		followingMoveCount,
 		setMinGames,
 		excludeMove,
-		restoreMove,
 		restoreAllMoves,
+		flushFilters,
 		dismissConflict() {
 			conflictSan = null;
 		},

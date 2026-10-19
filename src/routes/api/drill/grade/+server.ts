@@ -6,7 +6,8 @@
 // and record the grade in review_log.
 //
 // The card must belong to the requesting user — we verify ownership before
-// touching anything.
+// touching anything. With a sessionId the grade also adds to that drill
+// session's counts. Returns reviewedAt, which undo sends back.
 
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
@@ -23,7 +24,7 @@ import { applyGrade } from '$lib/server/grading';
 export const POST: RequestHandler = async ({ locals, request }) => {
 	const user = requireAuth(locals);
 
-	const { cardId, rating } = await parseBody(request, gradeCardSchema);
+	const { cardId, rating, sessionId } = await parseBody(request, gradeCardSchema);
 
 	// Load card + FSRS config in parallel — they are independent queries.
 	const [cardRows, fsrsConfig] = await Promise.all([
@@ -41,7 +42,9 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		throw error(403, 'This repertoire is read-only. Upgrade your plan to edit it.');
 	}
 
-	const updated = await applyGrade(user.id, card, rating, 'DRILL', fsrsConfig);
+	// The card is read again, locked, inside the grading transaction.
+	const result = await applyGrade(user.id, card.id, rating, 'DRILL', fsrsConfig, { sessionId });
+	if (result.status !== 'graded') throw error(404, 'Card not found');
 
-	return json({ updated: true, due: updated.due });
+	return json({ updated: true, due: result.updated.due, reviewedAt: result.reviewedAt });
 };

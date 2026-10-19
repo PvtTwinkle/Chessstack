@@ -1,11 +1,12 @@
 // Database connection singleton.
 //
-// This file does four things when the app first starts:
+// This file does these things when the app first starts:
 //   1. Opens a connection to the PostgreSQL database
 //   2. Runs any pending migrations — creates all tables on first run,
 //      applies only new migrations on subsequent runs
-//   3. Creates a default admin if no user exists yet (self-hosted edition only)
-//   4. Exports the `db` object that every other file uses to query the database
+//   3. Starts loading the reference datasets in the background (first boot)
+//   4. Creates a default admin if no user exists yet (self-hosted edition only)
+//   5. Exports the `db` object that every other file uses to query the database
 //
 // IMPORTANT: The connection and initialization are lazy — they only happen when
 // `dbReady` is first awaited (in hooks.server.ts). This is critical because
@@ -98,9 +99,41 @@ export const dbReady: Promise<void> = {
 	}
 } as Promise<void>;
 
+// Held while one instance migrates, so two instances starting together don't
+// both run the same migrations.
+const MIGRATE_LOCK_KEY = 0x63_73_6d_67; // "csmg"
+
 async function initDatabase(): Promise<void> {
 	const realDb = getDb();
 
+	// The advisory lock belongs to the connection that took it, so it is taken
+	// and released on one reserved connection; a second instance waits here
+	// and then finds nothing left to migrate.
+	const lockConn = await getRawSql().reserve();
+	try {
+		await lockConn`SELECT pg_advisory_lock(${MIGRATE_LOCK_KEY})`;
+		try {
+			await runMigrations(realDb);
+		} finally {
+			await lockConn`SELECT pg_advisory_unlock(${MIGRATE_LOCK_KEY})`;
+		}
+	} finally {
+		lockConn.release();
+	}
+
+	// Seed large reference tables (masters, puzzles, players, stars) from the
+	// embedded dumps. This takes minutes on first boot, so it runs in the
+	// background: the app starts answering (and passes its health check) while
+	// those features fill in. Skips quickly in local dev or once loaded.
+	loadSeedData().catch((err) => log.error('Seed data load failed', { err }));
+
+	// The cloud edition creates no account: the first person to register becomes
+	// admin. A self-hosted instance usually runs in invite mode, where nobody
+	// could register, so it starts with a default admin as it always has.
+	if (!IS_CLOUD) await createDefaultAdmin(realDb);
+}
+
+async function runMigrations(realDb: ReturnType<typeof getDb>): Promise<void> {
 	const migrationsFolder = path.join(process.cwd(), 'drizzle', 'migrations');
 
 	// A database created by the self-hosted edition records its migrations
@@ -118,15 +151,6 @@ async function initDatabase(): Promise<void> {
 	// only the ones that have not run yet. On first run it creates all tables.
 	await migrate(realDb, { migrationsFolder });
 	log.info('Database migrations complete.');
-
-	// Seed large reference tables (masters + puzzles) from embedded dump files.
-	// Skips silently in local dev (no dump files) or if tables already have data.
-	await loadSeedData();
-
-	// The cloud edition creates no account: the first person to register becomes
-	// admin. A self-hosted instance usually runs in invite mode, where nobody
-	// could register, so it starts with a default admin as it always has.
-	if (!IS_CLOUD) await createDefaultAdmin(realDb);
 }
 
 /** Creates the self-hosted edition's first account, unless any account exists. */

@@ -1,12 +1,12 @@
 # Security scanning pipeline
 #
-# Runs on every push to main and every PR targeting main.
+# Runs on every push to main and every PR targeting it.
 # This is separate from ci.yml (which handles build + type-check + migrations)
 # so that security failures are clearly visible as their own check.
 #
 # Two parallel jobs:
 #   1. security-checks — fast scans that don't need a Docker build
-#   2. image-scan — builds the Docker image and scans it for CVEs
+#   2. image-scan — builds the Docker image, scans it for CVEs and boots it
 
 name: Security
 
@@ -30,6 +30,7 @@ jobs:
   security-checks:
     name: Security Scans
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read # gitleaks lists the commits of a PR
@@ -42,7 +43,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -64,9 +65,9 @@ jobs:
       - name: npm audit
         run: npm audit --audit-level=high
 
-      # ── ESLint security rules ───────────────────────────────────────────────
-      - name: ESLint security check
-        run: npm run lint:security
+      # The ESLint security rules (eslint-plugin-security, no-unsanitized) are
+      # part of the shared ESLint config, so `npm run lint` in the CI workflow
+      # already enforces them; running ESLint again here would only repeat it.
 
       # ── License compliance ──────────────────────────────────────────────────
       # `sentry` (the Sentry CLI, pulled in by @sentry/sveltekit's build plugin)
@@ -74,12 +75,10 @@ jobs:
       # after two years. It only runs at build time to upload source maps and is
       # never part of the app, so it is excluded by name at whatever version is
       # installed.
+      # The allowed licences are in the `license` script in package.json, which
+      # the pre-push hook runs too.
       - name: License compliance check
-        run: >-
-          npx license-checker
-          --excludePrivatePackages
-          --excludePackages "sentry@$(node -p "require('./node_modules/sentry/package.json').version")"
-          --onlyAllow 'MIT;ISC;BSD-2-Clause;BSD-3-Clause;Apache-2.0;MPL-2.0;GPL-3.0-or-later;Python-2.0;Unlicense;CC0-1.0;CC-BY-3.0;CC-BY-4.0;BlueOak-1.0.0;(MIT OR WTFPL);(MIT AND CC-BY-3.0);(BSD-2-Clause OR MIT OR Apache-2.0)'
+        run: npm run license
 
       # ── Semgrep SAST ────────────────────────────────────────────────────────
       # Runs the official Semgrep container (the old returntocorp/semgrep-action
@@ -104,12 +103,30 @@ jobs:
   image-scan:
     name: Docker Image Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # A database for the boot test below.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: chessstack
+          POSTGRES_PASSWORD: chessstack
+          POSTGRES_DB: chessstack
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U chessstack"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build Docker image
+        id: build
         run: docker build -t chessstack:ci-scan .
 
       - name: Trivy image scan
@@ -119,3 +136,47 @@ jobs:
           severity: 'HIGH,CRITICAL'
           exit-code: '1'
           ignore-unfixed: true
+
+      # Start the image the way Railway does and check it comes up: migrations
+      # run on an empty database, Docker's own HEALTHCHECK turns healthy, and
+      # the pages, the readiness check and the engine files answer. The seed
+      # restore is skipped (SEED_DATA_DIR points at nothing): it takes several
+      # minutes and gigabytes of disk.
+      # Runs even when the Trivy scan fails, so both results show.
+      - name: Boot test
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          docker run -d --name app --network host \
+            -e DATABASE_URL=postgresql://chessstack:chessstack@localhost:5432/chessstack \
+            -e ORIGIN=http://localhost:3000 \
+            -e SEED_DATA_DIR=/nonexistent \
+            chessstack:ci-scan
+
+          # The HEALTHCHECK polls every 30 s, so allow a few rounds.
+          for i in $(seq 1 60); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' app 2>/dev/null || echo gone)
+            [ "$status" = healthy ] && break
+            if [ "$(docker inspect -f '{{.State.Running}}' app)" != true ]; then
+              echo "::error::The container exited during startup."
+              exit 1
+            fi
+            sleep 5
+          done
+          if [ "$status" != healthy ]; then
+            echo "::error::The container did not become healthy (status: $status)."
+            exit 1
+          fi
+
+          [ "$(docker exec app id -u)" = 1000 ] || { echo "::error::The app is not running as the node user."; exit 1; }
+
+          curl -fsS http://localhost:3000/api/health/ready
+          echo
+          # / redirects to the sign-in page on a fresh instance; follow it so a page renders.
+          curl -fsSL -o /dev/null http://localhost:3000/
+          curl -fsS -o /dev/null -w '%{content_type}\n' http://localhost:3000/engine/stockfish-19-lite.js | grep -q '^text/javascript'
+          curl -fsS -o /dev/null -w '%{content_type}\n' http://localhost:3000/engine/stockfish-19-lite-single.wasm | grep -q '^application/wasm'
+          echo "The image booted, migrated an empty database and served its pages."
+
+      - name: Container logs
+        if: always()
+        run: docker logs app 2>&1 | tail -n 200 || true

@@ -8,7 +8,6 @@
 
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { Chess } from 'chess.js';
 import { db } from '$lib/db';
 import {
 	opponentPreps,
@@ -19,15 +18,19 @@ import {
 	userRepertoireMove
 } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { fenKey } from '$lib/fen';
+import { fenKey, STARTING_FEN } from '$lib/fen';
 import { parseBody } from '$lib/server/validation';
 import { exportPrepSchema } from '$lib/server/schemas/prep';
+import { requireAuth, parseIntParam } from '$lib/server/api-helpers';
+import { isUserTurn, newCard, playMove } from '$lib/server/repertoire-moves';
+import { walkableEdges } from '$lib/server/prep-connect';
+import { connectingEdges, type Edge } from '$lib/prep/connect';
+import { repertoireLimitMessage } from '$lib/stripe/tiers.server';
 
 export const POST: RequestHandler = async ({ locals, params, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	const prepId = parseInt(params.id);
-	if (isNaN(prepId)) throw error(400, 'Invalid prep ID');
+	const prepId = parseIntParam(params.id, 'prep ID');
 
 	const { color } = await parseBody(request, exportPrepSchema);
 
@@ -35,11 +38,11 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 	const [prep] = await db
 		.select()
 		.from(opponentPreps)
-		.where(and(eq(opponentPreps.id, prepId), eq(opponentPreps.userId, locals.user.id)));
+		.where(and(eq(opponentPreps.id, prepId), eq(opponentPreps.userId, user.id)));
 
 	if (!prep) throw error(404, 'Prep not found');
 
-	const userId = locals.user.id;
+	const userId = user.id;
 	const repColor = color === 'white' ? 'WHITE' : 'BLACK';
 	const repName = `Prep vs ${prep.opponentName} — ${color === 'white' ? 'White' : 'Black'}`;
 
@@ -53,6 +56,11 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 		throw error(400, `No prep moves for ${color}. Build some prep moves first.`);
 	}
 
+	// Exporting creates a repertoire, so the plan's limit applies as it does
+	// to the repertoire form.
+	const overLimit = await repertoireLimitMessage(userId, user.tier ?? 'free');
+	if (overLimit) throw error(403, overLimit);
+
 	// Load opponent moves for this prep — we need them to build connecting moves
 	const oppMoves = await db.select().from(opponentMoves).where(eq(opponentMoves.prepId, prepId));
 
@@ -60,11 +68,56 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 	// opponent moves are needed to connect the tree
 	const prepFromFens = new Set(userPrepMoves.map((m) => fenKey(m.fromFen)));
 	const prepToFens = new Set(userPrepMoves.map((m) => fenKey(m.toFen)));
+	const userTurn = (fen: string) => isUserTurn(repColor, fen);
+
+	const moveRows: Edge[] = [];
+	// The new repertoire saves each move once, and one move per position on
+	// the user's turn (its unique indexes would reject anything else).
+	const savedKeys = new Set<string>();
+	const cardFens = new Set<string>();
+	const saveMove = (m: Edge): void => {
+		const from = fenKey(m.fromFen);
+		if (savedKeys.has(`${from}|${m.san}`)) return;
+		if (userTurn(from)) {
+			if (cardFens.has(from)) return;
+			cardFens.add(from);
+		}
+		savedKeys.add(`${from}|${m.san}`);
+		moveRows.push({ fromFen: from, toFen: fenKey(m.toFen), san: m.san });
+	};
+
+	for (const pm of userPrepMoves) saveMove(pm);
+
+	// Add connecting opponent moves — only include moves where the opponent
+	// was playing the opposite color from the export color.
+	const expectedOppColor = repColor === 'WHITE' ? 'b' : 'w';
+	for (const om of oppMoves) {
+		const resultKey = fenKey(om.resultingFen);
+		if (!prepFromFens.has(resultKey) && !prepToFens.has(resultKey)) continue;
+
+		// Only include moves from games where the opponent played the expected color
+		if (om.opponentColor !== expectedOppColor) continue;
+		const fenActiveSide = om.positionFen.split(' ')[1];
+		if (om.opponentColor !== fenActiveSide) continue;
+
+		const played = playMove(om.positionFen, om.moveSan);
+		if (played) saveMove(played);
+	}
+
+	// Link prep moves that were played after stepping through a repertoire or
+	// game move, so no line in the new repertoire starts in mid-air.
+	const linking = connectingEdges(
+		STARTING_FEN,
+		[...moveRows],
+		[],
+		await walkableEdges(userId, repColor, oppMoves),
+		userTurn
+	);
+	for (const m of linking) saveMove(m);
 
 	const now = new Date();
 
 	const result = await db.transaction(async (tx) => {
-		// Create the repertoire
 		const [rep] = await tx
 			.insert(repertoire)
 			.values({
@@ -74,56 +127,8 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 				createdAt: now
 			})
 			.returning();
-
 		const repertoireId = rep.id;
 
-		// Prepare all moves for batch insert
-		const moveRows: { fromFen: string; toFen: string; san: string }[] = [];
-		const fsrsRows: { fromFen: string; san: string }[] = [];
-
-		for (const pm of userPrepMoves) {
-			const from = fenKey(pm.fromFen);
-			const to = fenKey(pm.toFen);
-			moveRows.push({ fromFen: from, toFen: to, san: pm.san });
-
-			try {
-				const chess = new Chess(from);
-				const fenTurn = chess.turn();
-				const isUserTurnAtPosition =
-					(repColor === 'WHITE' && fenTurn === 'w') || (repColor === 'BLACK' && fenTurn === 'b');
-				if (isUserTurnAtPosition) fsrsRows.push({ fromFen: from, san: pm.san });
-			} catch {
-				// skip FSRS card if FEN is invalid
-			}
-		}
-
-		// Add connecting opponent moves — only include moves where the opponent
-		// was playing the opposite color from the export color.
-		const expectedOppColor = repColor === 'WHITE' ? 'b' : 'w';
-		const prepFenSanSet = new Set(userPrepMoves.map((pm) => `${fenKey(pm.fromFen)}|${pm.san}`));
-		for (const om of oppMoves) {
-			const resultKey = fenKey(om.resultingFen);
-			if (!prepFromFens.has(resultKey) && !prepToFens.has(resultKey)) continue;
-
-			// Only include moves from games where the opponent played the expected color
-			if (om.opponentColor !== expectedOppColor) continue;
-			const fenActiveSide = om.positionFen.split(' ')[1];
-			if (om.opponentColor !== fenActiveSide) continue;
-
-			const from = fenKey(om.positionFen);
-			if (prepFenSanSet.has(`${from}|${om.moveSan}`)) continue;
-
-			try {
-				const chess = new Chess(from);
-				const result = chess.move(om.moveSan);
-				if (!result) continue;
-				moveRows.push({ fromFen: from, toFen: fenKey(chess.fen()), san: om.moveSan });
-			} catch {
-				continue;
-			}
-		}
-
-		// Batch insert all moves
 		if (moveRows.length > 0) {
 			await tx.insert(userMove).values(
 				moveRows.map((m) => ({
@@ -139,28 +144,11 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 			);
 		}
 
-		// Batch insert FSRS cards
-		if (fsrsRows.length > 0) {
-			await tx.insert(userRepertoireMove).values(
-				fsrsRows.map((m) => ({
-					userId,
-					repertoireId,
-					fromFen: m.fromFen,
-					san: m.san,
-					due: now,
-					state: 0,
-					reps: 0,
-					lapses: 0,
-					stability: null,
-					difficulty: null,
-					elapsedDays: null,
-					scheduledDays: null,
-					lastReview: null,
-					learningSteps: 0
-				}))
-			);
-			// No FSRS card — this is the opponent's move, not drillable
-		}
+		// Drill cards for the user's own moves; the opponent's aren't drilled.
+		const cardRows = moveRows
+			.filter((m) => userTurn(m.fromFen))
+			.map((m) => newCard(userId, repertoireId, m.fromFen, m.san));
+		if (cardRows.length > 0) await tx.insert(userRepertoireMove).values(cardRows);
 
 		return { repertoireId, name: repName };
 	});

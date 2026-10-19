@@ -7,17 +7,19 @@
 	import SettingsSection from './SettingsSection.svelte';
 	import SettingToggle from './SettingToggle.svelte';
 	import { BOARD_THEMES, type SettingsState } from './settingsState.svelte';
+	import StatusMessage from './StatusMessage.svelte';
 
 	let { settings }: { settings: SettingsState } = $props();
 </script>
 
 <SettingsSection title="Board Appearance">
 	<div class="setting-row">
-		<span class="setting-label">App Theme</span>
-		<div class="theme-mode-picker">
+		<span class="setting-label" id="app-theme-label">App Theme</span>
+		<div class="theme-mode-picker" role="group" aria-labelledby="app-theme-label">
 			<button
 				class="mode-btn"
 				class:selected={settings.appTheme === 'dark'}
+				aria-pressed={settings.appTheme === 'dark'}
 				onclick={() => settings.setAppTheme('dark')}
 			>
 				Dark
@@ -25,20 +27,23 @@
 			<button
 				class="mode-btn"
 				class:selected={settings.appTheme === 'light'}
+				aria-pressed={settings.appTheme === 'light'}
 				onclick={() => settings.setAppTheme('light')}
 			>
 				Light
 			</button>
 		</div>
+		<StatusMessage status={settings.appThemeStatus} />
 	</div>
 
 	<div class="setting-row">
-		<span class="setting-label">Board Theme</span>
-		<div class="theme-picker">
+		<span class="setting-label" id="board-theme-label">Board Theme</span>
+		<div class="theme-picker" role="group" aria-labelledby="board-theme-label">
 			{#each BOARD_THEMES as theme (theme.name)}
 				<button
 					class="theme-swatch"
 					class:selected={settings.boardTheme === theme.name}
+					aria-pressed={settings.boardTheme === theme.name}
 					title={theme.label}
 					onclick={() => settings.setBoardTheme(theme.name)}
 				>
@@ -48,9 +53,7 @@
 				</button>
 			{/each}
 		</div>
-		{#if settings.boardThemeStatus}
-			<span class="status-msg">{settings.boardThemeStatus}</span>
-		{/if}
+		<StatusMessage status={settings.boardThemeStatus} />
 	</div>
 
 	<!-- Board preview -->

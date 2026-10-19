@@ -10,7 +10,8 @@
 // counted here: when it loses, the execute route deletes its subtree itself.
 
 import { Chess } from 'chess.js';
-import { fenKey } from './index';
+import { fenKey } from '$lib/fen';
+import { IMPORT_MAX_MOVES } from '$lib/validation-limits';
 import type { ImportConflict, ImportPreview } from './detectConflicts';
 
 /** Conflict position (the conflict's fromFen, as given) → the SAN the user chose. */
@@ -45,6 +46,15 @@ function target(fromFen: string, san: string): string | null {
  */
 export function abandonedPositions(preview: ImportPreview, resolved: Resolutions): Set<string> {
 	const edges = [...preview.newUserMoves, ...preview.newOpponentMoves];
+	// Built once so the walk is linear in the number of edges: this runs on
+	// every conflict click, and a big repertoire file has thousands of edges.
+	const childrenOf = new Map<string, string[]>();
+	for (const edge of edges) {
+		const from = fenKey(edge.fromFen);
+		const list = childrenOf.get(from);
+		if (list) list.push(fenKey(edge.toFen));
+		else childrenOf.set(from, [fenKey(edge.toFen)]);
+	}
 
 	const roots = new Set<string>();
 	for (const conflict of preview.conflicts) {
@@ -64,9 +74,8 @@ export function abandonedPositions(preview: ImportPreview, resolved: Resolutions
 		for (const p of queue) dead.add(p);
 		while (queue.length > 0) {
 			const from = queue.pop()!;
-			for (const edge of edges) {
-				const to = fenKey(edge.toFen);
-				if (fenKey(edge.fromFen) === from && !dead.has(to) && !reachable.has(to)) {
+			for (const to of childrenOf.get(from) ?? []) {
+				if (!dead.has(to) && !reachable.has(to)) {
 					dead.add(to);
 					queue.push(to);
 				}
@@ -118,4 +127,59 @@ export function buildImportRequest(preview: ImportPreview, resolved: Resolutions
 		}
 	}
 	return { moves, replacements };
+}
+
+/**
+ * Moves per POST /api/import/execute, the most one request accepts. Each move
+ * is about 100 bytes of JSON, so one request for a big repertoire file would
+ * pass the preview and then hit the server's request body limit on save.
+ */
+export const IMPORT_CHUNK_SIZE = IMPORT_MAX_MOVES;
+
+export interface ImportCounts {
+	inserted: number;
+	replaced: number;
+	skipped: number;
+}
+
+/**
+ * Split an import request into requests of at most `size` moves. The server
+ * saves each move idempotently, so the chunks can be sent one after another
+ * and a failed import can simply be retried. Replacing moves go first, and
+ * each chunk carries the replacements for its own moves: the server handles
+ * a replacement before the rest because removing an old line can remove
+ * moves the import would otherwise count as already saved.
+ */
+export function chunkImportRequest(
+	request: ImportRequest,
+	size = IMPORT_CHUNK_SIZE
+): ImportRequest[] {
+	const key = (m: { fromFen: string; san: string }) => `${fenKey(m.fromFen)}|${m.san}`;
+	const replacing = new Set(request.replacements.map(key));
+	const ordered = [
+		...request.moves.filter((m) => replacing.has(key(m))),
+		...request.moves.filter((m) => !replacing.has(key(m)))
+	];
+	const chunks: ImportRequest[] = [];
+	for (let i = 0; i < ordered.length; i += size) {
+		const moves = ordered.slice(i, i + size);
+		const inChunk = new Set(moves.map(key));
+		chunks.push({ moves, replacements: request.replacements.filter((r) => inChunk.has(key(r))) });
+	}
+	return chunks;
+}
+
+/** Send an import chunk by chunk and add up the server's counts. */
+export async function sendImportInChunks(
+	request: ImportRequest,
+	send: (chunk: ImportRequest) => Promise<ImportCounts>
+): Promise<ImportCounts> {
+	const total: ImportCounts = { inserted: 0, replaced: 0, skipped: 0 };
+	for (const chunk of chunkImportRequest(request)) {
+		const counts = await send(chunk);
+		total.inserted += counts.inserted;
+		total.replaced += counts.replaced;
+		total.skipped += counts.skipped;
+	}
+	return total;
 }

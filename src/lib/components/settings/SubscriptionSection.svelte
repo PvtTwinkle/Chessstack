@@ -5,7 +5,10 @@
 -->
 <script lang="ts">
 	import { page } from '$app/state';
+	import { invalidateAll } from '$app/navigation';
 	import SettingsSection from './SettingsSection.svelte';
+	import { isGiftActive } from '$lib/stripe/tiers';
+	import { ANNUAL_PLAN, MONTHLY_PLAN, formatPrice } from '$lib/seo/pricing';
 
 	interface SubscriptionInfo {
 		status: string;
@@ -28,9 +31,7 @@
 	} = $props();
 
 	// Gift subscription detection — derived so it updates when data changes.
-	const isGifted = $derived(
-		subscription?.giftExpiry != null && new Date(subscription.giftExpiry) > new Date()
-	);
+	const isGifted = $derived(isGiftActive(subscription?.giftExpiry));
 	const isLifetimeGift = $derived(
 		isGifted && new Date(subscription!.giftExpiry!).getFullYear() >= 9999
 	);
@@ -41,6 +42,23 @@
 
 	// Post-checkout feedback from the ?checkout= query parameter.
 	const checkoutResult = $derived(page.url.searchParams.get('checkout'));
+
+	// Stripe's redirect usually beats its webhook, so the page first loads on
+	// the free plan. Reload the data every 2 s, for up to 30 s, until it lands.
+	const awaitingUpgrade = $derived(checkoutResult === 'success' && tier === 'free');
+	$effect(() => {
+		if (!awaitingUpgrade) return;
+		let polls = 0;
+		const timer = setInterval(() => {
+			polls++;
+			if (polls >= 15) clearInterval(timer);
+			invalidateAll();
+		}, 2000);
+		return () => clearInterval(timer);
+	});
+
+	const annualMonthly = formatPrice(Math.floor((ANNUAL_PLAN.price / 12) * 100) / 100);
+	const annualSaving = Math.round((1 - ANNUAL_PLAN.price / (MONTHLY_PLAN.price * 12)) * 100);
 
 	// Format a date for display, e.g. "Mar 16, 2026".
 	function formatDate(d: Date | string | null): string {
@@ -97,7 +115,7 @@
 
 {#if billingEnabled || isGifted}
 	<SettingsSection title="Subscription" id="subscription">
-		{#if checkoutResult === 'success' && tier === 'free'}
+		{#if awaitingUpgrade}
 			<div class="billing-banner billing-info">
 				Your upgrade is being processed. This page will update shortly.
 			</div>
@@ -158,16 +176,20 @@
 			<div class="plan-cards">
 				<div class="plan-card">
 					<div class="plan-card-name">Monthly</div>
-					<div class="plan-card-price">$1<span class="plan-card-period">/month</span></div>
+					<div class="plan-card-price">
+						{formatPrice(MONTHLY_PLAN.price)}<span class="plan-card-period">/month</span>
+					</div>
 					<button class="btn-primary" onclick={() => handleUpgrade('monthly')} disabled={upgrading}>
 						{upgrading ? 'Redirecting...' : 'Choose Monthly'}
 					</button>
 				</div>
 				<div class="plan-card plan-card-highlight">
-					<div class="plan-card-badge">Save 17%</div>
+					<div class="plan-card-badge">Save {annualSaving}%</div>
 					<div class="plan-card-name">Annual</div>
-					<div class="plan-card-price">$10<span class="plan-card-period">/year</span></div>
-					<div class="plan-card-detail">$0.83/month</div>
+					<div class="plan-card-price">
+						{formatPrice(ANNUAL_PLAN.price)}<span class="plan-card-period">/year</span>
+					</div>
+					<div class="plan-card-detail">{annualMonthly}/month</div>
 					<button class="btn-primary" onclick={() => handleUpgrade('annual')} disabled={upgrading}>
 						{upgrading ? 'Redirecting...' : 'Choose Annual'}
 					</button>

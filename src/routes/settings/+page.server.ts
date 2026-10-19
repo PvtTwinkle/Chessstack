@@ -1,8 +1,9 @@
 // Settings page server load.
 //
-// User settings come from the layout load (no duplicate query needed).
-// This file also fetches the full subscription row so the billing UI
-// can show status, period end, and cancellation state.
+// User settings come from the layout load, which every page already merges in.
+// This file also fetches the subscription so the billing UI can show status,
+// period end, and cancellation state. Only the columns the page uses are sent
+// to the browser.
 
 import type { PageServerLoad } from './$types';
 import { db } from '$lib/db';
@@ -11,9 +12,7 @@ import { eq, count, and } from 'drizzle-orm';
 import { generateReferralCode } from '$lib/auth/referral-code';
 import { IS_CLOUD } from '$lib/server/edition';
 
-export const load: PageServerLoad = async ({ parent, locals }) => {
-	const { settings } = await parent();
-
+export const load: PageServerLoad = async ({ locals }) => {
 	// Fetch full subscription details for the billing section.
 	let sub = null;
 	let referralCode: string | null = null;
@@ -22,7 +21,15 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 	// Self-hosted instances have no plans or referrals, so there is nothing to load.
 	if (locals.user && IS_CLOUD) {
 		const [row] = await db
-			.select()
+			.select({
+				status: subscription.status,
+				stripePriceId: subscription.stripePriceId,
+				currentPeriodEnd: subscription.currentPeriodEnd,
+				cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
+				giftExpiry: subscription.giftExpiry,
+				referralDiscountActive: subscription.referralDiscountActive,
+				referralDiscountUsedAt: subscription.referralDiscountUsedAt
+			})
 			.from(subscription)
 			.where(eq(subscription.userId, locals.user.id));
 		sub = row ?? null;
@@ -49,8 +56,13 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 	}
 
 	return {
-		settings,
-		subscription: sub,
+		subscription: sub && {
+			status: sub.status,
+			stripePriceId: sub.stripePriceId,
+			currentPeriodEnd: sub.currentPeriodEnd,
+			cancelAtPeriodEnd: sub.cancelAtPeriodEnd,
+			giftExpiry: sub.giftExpiry
+		},
 		referralCode,
 		referralCount,
 		referralDiscountActive: sub?.referralDiscountActive ?? false,

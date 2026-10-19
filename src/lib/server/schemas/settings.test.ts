@@ -41,7 +41,7 @@ describe('updateSettingsSchema', () => {
 		expect(parsed({ tutorialStep: 99 })).toEqual({ tutorialStep: TOTAL_STEPS - 1 });
 	});
 
-	it('only applies the lower bound to Stockfish depth (the route applies the plan cap)', () => {
+	it('clamps Stockfish depth to its bounds', () => {
 		expect(parsed({ stockfishDepth: 5 })).toEqual({ stockfishDepth: 15 });
 		expect(parsed({ stockfishDepth: 40 })).toEqual({ stockfishDepth: 30 });
 	});

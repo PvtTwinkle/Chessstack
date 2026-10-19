@@ -10,65 +10,88 @@
 
 <SettingsSection title="Account">
 	<div class="setting-row">
-		<span class="setting-label">Email</span>
-		<p class="setting-hint">Used for account recovery. One email per account.</p>
-		<div class="email-form">
+		<label class="setting-label" for="account-email">Email</label>
+		<p class="setting-hint" id="account-email-hint">
+			Used for account recovery. One email per account. Changing it needs your current password.
+		</p>
+		<!-- Forms, so Enter submits and password managers recognise the fields. -->
+		<form
+			class="email-form"
+			onsubmit={(e) => {
+				e.preventDefault();
+				settings.saveEmail();
+			}}
+		>
 			<input
+				id="account-email"
 				type="email"
 				placeholder="your@email.com"
 				autocomplete="email"
 				maxlength="254"
+				aria-describedby="account-email-hint"
 				bind:value={settings.email}
 			/>
-			<button class="btn-primary" onclick={settings.saveEmail} disabled={settings.savingEmail}>
+			<input
+				type="password"
+				placeholder="Current password"
+				autocomplete="current-password"
+				aria-label="Current password, to confirm the email change"
+				bind:value={settings.emailPassword}
+			/>
+			<button type="submit" class="btn-primary" disabled={settings.savingEmail}>
 				{settings.savingEmail ? 'Saving...' : 'Save Email'}
 			</button>
-		</div>
+		</form>
 		{#if settings.emailError}
-			<p class="error-msg">{settings.emailError}</p>
+			<p class="error-msg" role="alert">{settings.emailError}</p>
 		{/if}
-		{#if settings.emailStatus}
-			<p class="success-msg">{settings.emailStatus}</p>
-		{/if}
+		<p class="success-msg" role="status">{settings.emailStatus}</p>
 	</div>
 
 	<div class="setting-row">
-		<span class="setting-label">Change Password</span>
+		<span class="setting-label" id="change-password-label">Change Password</span>
 
-		<div class="password-form">
+		<form
+			class="password-form"
+			aria-labelledby="change-password-label"
+			onsubmit={(e) => {
+				e.preventDefault();
+				settings.changePassword();
+			}}
+		>
+			<label class="visually-hidden" for="current-password">Current password</label>
 			<input
+				id="current-password"
 				type="password"
 				placeholder="Current password"
 				autocomplete="current-password"
 				bind:value={settings.currentPassword}
 			/>
+			<label class="visually-hidden" for="new-password">New password</label>
 			<input
+				id="new-password"
 				type="password"
 				placeholder="New password (min 12 characters)"
 				autocomplete="new-password"
 				bind:value={settings.newPassword}
 			/>
+			<label class="visually-hidden" for="confirm-password">Confirm new password</label>
 			<input
+				id="confirm-password"
 				type="password"
 				placeholder="Confirm new password"
 				autocomplete="new-password"
 				bind:value={settings.confirmPassword}
 			/>
-			<button
-				class="btn-primary"
-				onclick={settings.changePassword}
-				disabled={settings.changingPassword}
-			>
+			<button type="submit" class="btn-primary" disabled={settings.changingPassword}>
 				{settings.changingPassword ? 'Changing...' : 'Change Password'}
 			</button>
-		</div>
+		</form>
 
 		{#if settings.passwordError}
-			<p class="error-msg">{settings.passwordError}</p>
+			<p class="error-msg" role="alert">{settings.passwordError}</p>
 		{/if}
-		{#if settings.passwordStatus}
-			<p class="success-msg">{settings.passwordStatus}</p>
-		{/if}
+		<p class="success-msg" role="status">{settings.passwordStatus}</p>
 	</div>
 </SettingsSection>
 
@@ -107,13 +130,14 @@
 
 	.email-form {
 		display: flex;
+		flex-wrap: wrap;
 		gap: var(--space-3);
 		max-width: 420px;
 		align-items: center;
 	}
 
 	.email-form input {
-		flex: 1;
+		flex: 1 1 180px;
 		padding: var(--space-3) var(--space-4);
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-sm);
@@ -140,13 +164,30 @@
 		color: var(--color-success);
 	}
 
+	.success-msg:empty {
+		margin: 0;
+	}
+
+	.visually-hidden {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		margin: -1px;
+		padding: 0;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
+		border: 0;
+	}
+
 	/* ── Tablets and phones (< 768px) ── --bp-md */
 	@media (max-width: 767px) {
 		.password-form {
 			max-width: 100%;
 		}
 
-		.password-form input {
+		.password-form input,
+		.email-form input {
 			font-size: 16px; /* prevents iOS auto-zoom on focus */
 		}
 	}

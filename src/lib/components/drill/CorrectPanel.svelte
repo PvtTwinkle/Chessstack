@@ -9,6 +9,7 @@
 	import DrillLineDisplay from './DrillLineDisplay.svelte';
 	import DrillNote from './DrillNote.svelte';
 	import GradeButtons from './GradeButtons.svelte';
+	import GradeError from './GradeError.svelte';
 	import NextButton from './NextButton.svelte';
 	import type { DrillState } from './drillState.svelte';
 
@@ -24,14 +25,18 @@
 	<DrillNote text={drill.currentMoveNote} />
 {/if}
 
-{#if drill.hintUsed}
+{#if drill.currentIsPractice}
+	<!-- Not due ("Drill all"): practice, so there is nothing to grade. -->
+	<p class="auto-advance-hint">Practice: not due yet, so not graded</p>
+	<NextButton onclick={drill.handleNext} disabled={drill.grading} />
+{:else if drill.hintUsed}
 	<!-- Hint was used — will be graded Again when Next is clicked. -->
 	<p class="auto-advance-hint">Will be graded as Forgot</p>
-	<NextButton onclick={drill.handleNext} />
+	<NextButton onclick={drill.handleNext} disabled={drill.grading} />
 {:else if drill.awaitingNext}
 	<!-- Already graded — show Next + Undo buttons. -->
 	<div class="next-row">
-		<NextButton onclick={drill.handleNext} />
+		<NextButton onclick={drill.handleNext} disabled={drill.grading} />
 		{#if drill.undoSnapshot}
 			<button
 				class="btn btn--ghost undo-btn"
@@ -49,6 +54,8 @@
 		onGrade={drill.submitGrade}
 	/>
 {/if}
+
+<GradeError {drill} />
 
 <style>
 	.auto-advance-hint {

@@ -122,10 +122,11 @@ export function buildInScopeFens(startFens: string[], moves: MoveRow[]): Set<str
 
 /**
  * Reconstruct the SAN move sequence from the standard starting position to
- * targetFen by walking the move tree backwards.
+ * targetFen.
  *
- * When multiple paths exist (transpositions), any one is chosen — all are
- * equally valid for replaying moves to reach the target position.
+ * Searches forward from the start, so it returns the shortest line when
+ * several reach the target (transpositions) and terminates when the moves
+ * form a cycle (1.Nf3 Nf6 2.Ng1 Ng8 leads back to the start).
  *
  * Returns [] if the target is the starting position or unreachable.
  */
@@ -133,21 +134,98 @@ export function reconstructPath(moves: MoveRow[], targetFen: string): string[] {
 	const targetKey = fenKey(targetFen);
 	if (targetKey === STARTING_FEN) return [];
 
-	// Build a reverse map: normalized(toFen) -> { fromFen, san }
-	const reverse = new Map<string, { fromFen: string; san: string }>();
+	const adj = new Map<string, MoveRow[]>();
 	for (const m of moves) {
-		reverse.set(fenKey(m.toFen), { fromFen: m.fromFen, san: m.san });
+		const key = fenKey(m.fromFen);
+		let list = adj.get(key);
+		if (!list) {
+			list = [];
+			adj.set(key, list);
+		}
+		list.push(m);
 	}
+
+	// Breadth-first, remembering how each position was first reached.
+	const cameFrom = new Map<string, { fromKey: string; san: string }>();
+	const queue = [STARTING_FEN];
+	const seen = new Set([STARTING_FEN]);
+
+	for (let i = 0; i < queue.length; i++) {
+		const current = queue[i];
+		if (current === targetKey) break;
+		for (const m of adj.get(current) ?? []) {
+			const next = fenKey(m.toFen);
+			if (seen.has(next)) continue;
+			seen.add(next);
+			cameFrom.set(next, { fromKey: current, san: m.san });
+			queue.push(next);
+		}
+	}
+
+	if (!cameFrom.has(targetKey)) return [];
 
 	const pathSans: string[] = [];
-	let current = targetKey;
+	for (let key = targetKey; key !== STARTING_FEN;) {
+		const step = cameFrom.get(key)!;
+		pathSans.unshift(step.san);
+		key = step.fromKey;
+	}
+	return pathSans;
+}
 
-	while (current !== STARTING_FEN) {
-		const prev = reverse.get(current);
-		if (!prev) break;
-		pathSans.unshift(prev.san);
-		current = fenKey(prev.fromFen);
+/**
+ * What deleting `target` removes, mirroring the server's deleteMove: the move
+ * itself and every move after it that the start position no longer reaches
+ * without it. A position another line transposes into keeps its moves, and
+ * the walk never continues out of the position the deleted move starts from.
+ *
+ * Returns the ids of the removed moves and the positions left without a path
+ * from the start.
+ */
+export function movesRemovedByDelete<T extends MoveRow & { id: number }>(
+	moves: T[],
+	target: T
+): { removed: Set<number>; unreachableFens: Set<string> } {
+	const remaining = moves.filter((m) => m.id !== target.id);
+
+	const adj = new Map<string, T[]>();
+	for (const m of remaining) {
+		const key = fenKey(m.fromFen);
+		let list = adj.get(key);
+		if (!list) {
+			list = [];
+			adj.set(key, list);
+		}
+		list.push(m);
 	}
 
-	return pathSans;
+	const reachable = new Set([STARTING_FEN]);
+	const queue = [STARTING_FEN];
+	for (let i = 0; i < queue.length; i++) {
+		for (const m of adj.get(queue[i]) ?? []) {
+			const next = fenKey(m.toFen);
+			if (reachable.has(next)) continue;
+			reachable.add(next);
+			queue.push(next);
+		}
+	}
+
+	const stopKey = fenKey(target.fromFen);
+	const removed = new Set([target.id]);
+	const unreachableFens = new Set<string>();
+	const walked = new Set<string>();
+	const walk = [fenKey(target.toFen)];
+	for (let i = 0; i < walk.length; i++) {
+		const key = walk[i];
+		if (walked.has(key) || key === stopKey) continue;
+		walked.add(key);
+		if (reachable.has(key)) continue;
+		unreachableFens.add(key);
+		for (const m of adj.get(key) ?? []) {
+			removed.add(m.id);
+			walk.push(fenKey(m.toFen));
+		}
+	}
+
+	return { removed, unreachableFens };
 }

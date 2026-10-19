@@ -3,27 +3,53 @@
 	import manropeLatin from '$lib/assets/fonts/manrope/manrope-latin-wght-normal.woff2';
 	import logoIcon from '$lib/assets/logo-icon.svg';
 	import { base } from '$app/paths';
-	import { page } from '$app/stores';
-	import type { Snippet } from 'svelte';
+	import { page } from '$app/state';
+	import { invalidateAll } from '$app/navigation';
+	import { onMount, type Snippet } from 'svelte';
+	import { timeZoneCookieUpdate } from '$lib/dashboard/stats';
 	import type { LayoutData } from './$types';
 	import RepertoireSelector from '$lib/components/RepertoireSelector.svelte';
 	import ManageRepertoireModal from '$lib/components/ManageRepertoireModal.svelte';
 	import TutorialOverlay from '$lib/components/tutorial/TutorialOverlay.svelte';
-	import { manageRepertoiresOpen } from '$lib/stores/manageRepertoires';
-	import { tutorialStep } from '$lib/stores/tutorial';
+	import { manageRepertoires } from '$lib/stores/manageRepertoires.svelte';
+	import { tutorial } from '$lib/stores/tutorial.svelte';
+	import { pageOwnsLandmarks } from '$lib/public-pages';
 
 	// `data` comes from +layout.server.ts and includes `user`, `repertoires`,
 	// and `activeRepertoireId`.
 	// `children` is the content of the current page — rendered with {@render children()}.
 	let { children, data }: { children: Snippet; data: LayoutData } = $props();
 
-	// Sync tutorial step from server data into the shared store
-	$effect(() => {
-		$tutorialStep = data.settings?.tutorialStep ?? null;
+	// Seed the shared tutorial step from the server data. A pre-effect, so the
+	// page renders with the step from the data it was loaded with.
+	$effect.pre(() => {
+		tutorial.sync(data.settings?.tutorialStep);
+	});
+
+	// Public pages render their own <main> between the public header and footer.
+	const ownsLandmarks = $derived(pageOwnsLandmarks(page.route.id, !!data.user));
+
+	// Tell the server the browser's time zone, so the dashboard's streak and
+	// daily puzzle goal follow the player's own days rather than UTC.
+	onMount(() => {
+		const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+		if (!zone) return;
+		const update = timeZoneCookieUpdate(document.cookie, zone);
+		if (!update) return;
+		document.cookie = update;
+		// The dashboard on screen was counted without the zone; count it again.
+		if (data.user && page.route.id === '/') void invalidateAll();
 	});
 
 	// Mobile hamburger menu state
 	let mobileMenuOpen = $state(false);
+	let hamburgerButton = $state<HTMLButtonElement>();
+
+	function closeMenuOnEscape(e: KeyboardEvent) {
+		if (e.key !== 'Escape' || !mobileMenuOpen) return;
+		mobileMenuOpen = false;
+		hamburgerButton?.focus();
+	}
 
 	// Navigation link definitions — Admin link only shown for admin users.
 	const navLinks = $derived([
@@ -33,6 +59,7 @@
 		{ href: `${base}/train`, label: 'Train' },
 		{ href: `${base}/puzzles`, label: 'Puzzles' },
 		{ href: `${base}/review`, label: 'Review' },
+		{ href: `${base}/report`, label: 'Report' },
 		{ href: `${base}/prep`, label: 'Prep' },
 		{ href: `${base}/settings`, label: 'Settings' },
 		...(data.user?.role === 'admin' ? [{ href: `${base}/admin`, label: 'Admin' }] : [])
@@ -41,7 +68,7 @@
 	// Determine if a nav link is the active page.
 	// Dashboard matches exact "/", others match by prefix.
 	function isActive(href: string): boolean {
-		const path = $page.url.pathname;
+		const path = page.url.pathname;
 		if (href === `${base}/`) return path === `${base}/` || path === base;
 		return path.startsWith(href);
 	}
@@ -51,12 +78,18 @@
 <svelte:head>
 	<!-- Start the font download with the HTML instead of after the CSS is parsed. -->
 	<link rel="preload" href={manropeLatin} as="font" type="font/woff2" crossorigin="anonymous" />
+	<!-- The mobile browser bar follows the app theme (visitors get the dark one). -->
+	<meta name="theme-color" content={data.settings?.appTheme === 'light' ? '#dfe3e9' : '#0a1a2e'} />
 </svelte:head>
+
+<svelte:window onkeydown={closeMenuOnEscape} />
 
 <!--
 	Only show the nav bar when the user is logged in.
 	On the /login page, data.user is null so the nav is hidden.
 -->
+<a class="skip-link" href="#main">Skip to content</a>
+
 {#if data.user}
 	<header class="app-header">
 		<a href="{base}/" class="brand">
@@ -65,7 +98,7 @@
 		</a>
 
 		<!-- Desktop nav links -->
-		<nav class="nav-links">
+		<nav class="nav-links" aria-label="Main">
 			{#each navLinks as link (link.href)}
 				<a
 					href={link.href}
@@ -80,21 +113,23 @@
 		<RepertoireSelector
 			repertoires={data.repertoires}
 			activeRepertoireId={data.activeRepertoireId}
-			lockedRepertoireIds={data.lockedRepertoireIds ?? []}
+			lockedRepertoireIds={data.lockedRepertoireIds}
 		/>
 
 		<!-- Sign-out (POST form prevents CSRF via crafted URL) -->
 		<form method="POST" action="/api/auth/logout" class="signout-form">
-			<span class="username">{data.user.username}</span>
+			<span class="username" title={data.user.username}>{data.user.username}</span>
 			<button type="submit" class="signout-btn">Sign out</button>
 		</form>
 
 		<!-- Mobile hamburger toggle -->
 		<button
+			bind:this={hamburgerButton}
 			class="hamburger"
 			onclick={() => (mobileMenuOpen = !mobileMenuOpen)}
 			aria-label="Toggle navigation menu"
 			aria-expanded={mobileMenuOpen}
+			aria-controls="mobile-drawer"
 		>
 			<span class="hamburger-line" class:open={mobileMenuOpen}></span>
 			<span class="hamburger-line" class:open={mobileMenuOpen}></span>
@@ -104,7 +139,7 @@
 
 	<!-- Mobile slide-down drawer -->
 	{#if mobileMenuOpen}
-		<nav class="mobile-drawer">
+		<nav id="mobile-drawer" class="mobile-drawer" aria-label="Main menu">
 			{#each navLinks as link (link.href)}
 				<a
 					href={link.href}
@@ -114,28 +149,41 @@
 					onclick={() => (mobileMenuOpen = false)}>{link.label}</a
 				>
 			{/each}
+			<!-- The header's sign-out form is hidden whenever this drawer is in use. -->
+			<form method="POST" action="/api/auth/logout" class="mobile-signout">
+				<span class="mobile-username">{data.user.username}</span>
+				<button type="submit" class="signout-btn">Sign out</button>
+			</form>
 		</nav>
 	{/if}
 {/if}
 
-{#if data.user && !data.user.email}
-	<div class="email-banner">
-		<span>Please add an email address to your account for recovery purposes.</span>
-		<a href="{base}/settings">Go to Settings</a>
-	</div>
-{/if}
+<svelte:element
+	this={ownsLandmarks ? 'div' : 'main'}
+	id={ownsLandmarks ? undefined : 'main'}
+	tabindex={ownsLandmarks ? undefined : -1}
+	class={data.user ? 'app-main' : ''}
+>
+	<!-- Only worth nagging about when the email could actually recover the account,
+	     which needs password reset emails (Loops) to be set up. In the page flow
+	     rather than fixed, so it never covers the top of the page. -->
+	{#if data.user && !data.user.email && data.passwordResetEnabled}
+		<div class="email-banner">
+			<span>Please add an email address to your account for recovery purposes.</span>
+			<a href="{base}/settings">Go to Settings</a>
+		</div>
+	{/if}
 
-<main class={data.user ? 'app-main' : ''}>
 	{@render children()}
-</main>
+</svelte:element>
 
 <!-- Rendered outside the header so it's not trapped in the header's stacking context (z-index: 900). -->
 {#if data.user}
 	<ManageRepertoireModal
-		bind:open={$manageRepertoiresOpen}
+		bind:open={manageRepertoires.open}
 		repertoires={data.repertoires}
 		tier={data.tier}
-		lockedRepertoireIds={data.lockedRepertoireIds ?? []}
+		lockedRepertoireIds={data.lockedRepertoireIds}
 	/>
 	<TutorialOverlay />
 {/if}
@@ -193,6 +241,31 @@
 			animation-iteration-count: 1 !important;
 			transition-duration: 0.01ms !important;
 		}
+	}
+
+	/* Hidden until a keyboard user tabs to it. */
+	.skip-link {
+		position: fixed;
+		top: var(--space-2);
+		left: var(--space-2);
+		z-index: 1000;
+		padding: var(--space-2) var(--space-3);
+		background: var(--color-surface);
+		border: 1px solid var(--color-accent);
+		border-radius: var(--radius-sm);
+		color: var(--color-text-primary);
+		font-size: 14px;
+		text-decoration: none;
+		transform: translateY(-200%);
+	}
+
+	.skip-link:focus {
+		transform: none;
+	}
+
+	/* The skip link focuses <main>; it needs no ring of its own. */
+	:global(main:focus) {
+		outline: none;
 	}
 
 	/* Page entry animation */
@@ -316,6 +389,10 @@
 	}
 
 	.username {
+		max-width: 140px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 		font-size: 12px;
 		color: var(--color-text-muted);
 		text-transform: uppercase;
@@ -431,21 +508,39 @@
 		border-left: 2px solid var(--color-accent);
 	}
 
+	.mobile-signout {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-3);
+		margin-top: var(--space-2);
+		padding: var(--space-3) var(--space-6) var(--space-2);
+		border-top: 1px solid var(--color-border);
+	}
+
+	.mobile-username {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 12px;
+		color: var(--color-text-secondary);
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+	}
+
 	/* ── Email banner ────────────────────────────────────────────────── */
 
 	.email-banner {
-		position: fixed;
-		top: 56px;
-		left: 0;
-		right: 0;
-		z-index: 898;
 		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
 		justify-content: center;
-		gap: var(--space-4);
-		padding: var(--space-3) var(--space-6);
+		gap: var(--space-2) var(--space-4);
+		margin-bottom: var(--space-4);
+		padding: var(--space-3) var(--space-4);
 		background: var(--color-warning-bg, rgba(250, 204, 21, 0.12));
-		border-bottom: 1px solid var(--color-warning-border, rgba(250, 204, 21, 0.3));
+		border: 1px solid var(--color-warning-border, rgba(250, 204, 21, 0.3));
+		border-radius: var(--radius-md);
 		font-size: 13px;
 		color: var(--color-text-primary);
 	}
@@ -472,7 +567,37 @@
 
 	/* ── Responsive ───────────────────────────────────────────────────── */
 
-	@media (max-width: 768px) {
+	/* The full header (brand, nine or ten links, repertoire selector, username,
+	   Sign out) is about 1,450px wide, and it is fixed, so anything past the
+	   viewport edge is unreachable. Below that it sheds the username, then the
+	   brand text and some link padding, then switches to the hamburger. */
+	@media (max-width: 1499px) {
+		.username {
+			display: none;
+		}
+	}
+
+	@media (max-width: 1399px) {
+		.brand-text {
+			display: none;
+		}
+
+		.nav-link {
+			padding-left: var(--space-2);
+			padding-right: var(--space-2);
+		}
+
+		.nav-link.active::after {
+			left: var(--space-2);
+			right: var(--space-2);
+		}
+	}
+
+	@media (max-width: 1199px) {
+		.brand-text {
+			display: inline;
+		}
+
 		.nav-links {
 			display: none;
 		}
@@ -488,7 +613,9 @@
 		.mobile-drawer {
 			display: flex;
 		}
+	}
 
+	@media (max-width: 768px) {
 		.app-main {
 			padding: var(--space-4);
 			padding-top: calc(56px + var(--space-4));

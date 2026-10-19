@@ -13,8 +13,8 @@ import { db } from '$lib/db';
 import { user } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
-import { createSession, SESSION_COOKIE_NAME, SECURE_COOKIE } from '$lib/auth';
-import { isRateLimited, resetRateLimit } from '$lib/auth/rate-limit';
+import { createSession, setSessionCookie } from '$lib/auth';
+import { clearLoginFailures, isLoginRateLimited } from '$lib/auth/login-rate-limit';
 import { isEmailVerificationEnabled, isPasswordResetEnabled } from '$lib/loops';
 import { createAndSendVerification } from '$lib/auth/email-verification';
 import { safeRedirectPath } from '$lib/auth/redirect';
@@ -39,13 +39,6 @@ export const load: PageServerLoad = async ({ url }) => {
 
 export const actions: Actions = {
 	default: async ({ request, cookies, getClientAddress }) => {
-		// Rate limit check — block brute-force login attempts.
-		// Uses database-backed rate limiting so it works across multiple instances.
-		const clientIp = getClientAddress();
-		if (await isRateLimited(clientIp, { prefix: 'login', max: 10, windowMs: 15 * 60 * 1000 })) {
-			return fail(429, { error: 'Too many login attempts. Please try again in 15 minutes.' });
-		}
-
 		// Read the values the user typed into the form.
 		const formData = await request.formData();
 		const username = formData.get('username')?.toString().trim();
@@ -57,6 +50,13 @@ export const actions: Actions = {
 			return fail(400, { error: 'Username and password are required.' });
 		}
 
+		// Rate limit check — block brute-force login attempts, per IP and per
+		// username (see $lib/auth/login-rate-limit). Database-backed, so it works
+		// across multiple instances.
+		if (await isLoginRateLimited(getClientAddress(), username)) {
+			return fail(429, { error: 'Too many login attempts. Please try again in 15 minutes.' });
+		}
+
 		// Look up the user by username.
 		const [foundUser] = await db.select().from(user).where(eq(user.username, username));
 
@@ -66,31 +66,22 @@ export const actions: Actions = {
 		const hashToCompare = foundUser?.passwordHash ?? DUMMY_HASH;
 		const passwordValid = await bcrypt.compare(password, hashToCompare);
 		if (!foundUser || !passwordValid) {
-			log.warn('Failed login attempt', { username });
+			// No username in the log: people sometimes type their password into it.
+			log.warn('Failed login attempt', { userId: foundUser?.id ?? null });
 			return fail(400, { error: 'Invalid username or password.' });
 		}
 
 		// Account disabled by admin — specific message since the user already knows their username.
 		if (!foundUser.enabled) {
-			log.warn('Login blocked — account is disabled', { username });
+			log.warn('Login blocked — account is disabled', { userId: foundUser.id });
 			return fail(403, { error: 'This account has been disabled.' });
 		}
 
-		// Credentials are correct — clear the rate limit counter for this IP.
-		await resetRateLimit(clientIp, 'login');
+		// Credentials are correct — clear this account's failed-attempt count.
+		await clearLoginFailures(username);
 
-		// Create a session in the database.
-		// createSession() returns the random UUID token to put in the cookie.
-		const token = await createSession(foundUser.id);
-
-		// Set the session cookie in the browser.
-		cookies.set(SESSION_COOKIE_NAME, token, {
-			path: '/',
-			httpOnly: true,
-			sameSite: 'lax',
-			secure: SECURE_COOKIE,
-			maxAge: 60 * 60 * 24 * 14 // 14 days in seconds
-		});
+		// Create a session in the database and set the session cookie.
+		setSessionCookie(cookies, await createSession(foundUser.id));
 
 		// If the user's email is unverified and Loops is configured, send a
 		// verification email and redirect to /verify-email instead of the dashboard.

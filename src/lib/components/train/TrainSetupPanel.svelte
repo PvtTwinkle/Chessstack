@@ -204,7 +204,7 @@
 
 	.tab-btn.active {
 		background: var(--color-accent);
-		color: #fff;
+		color: var(--color-base);
 	}
 
 	.tab-btn:hover:not(.active) {

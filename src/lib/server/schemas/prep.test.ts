@@ -33,13 +33,16 @@ describe('createPrepSchema', () => {
 		platformUsername: 'DrNykterstein',
 		timeWindow: '3m',
 		gamesAsWhite: 12,
-		gamesAsBlack: 9,
-		moves: [move]
+		gamesAsBlack: 9
 	};
 
-	it('accepts a prep with aggregated moves', () => {
+	it('accepts a prep and drops a moves list (moves arrive in batches)', () => {
 		expect(validate(createPrepSchema, prep)).toEqual({ success: true, data: prep });
-		expect(validate(createPrepSchema, { ...prep, moves: [], timeWindow: null }).success).toBe(true);
+		expect(validate(createPrepSchema, { ...prep, moves: [move] })).toEqual({
+			success: true,
+			data: prep
+		});
+		expect(validate(createPrepSchema, { ...prep, timeWindow: null }).success).toBe(true);
 	});
 
 	it.each([
@@ -47,14 +50,7 @@ describe('createPrepSchema', () => {
 		[{ opponentName: 'x'.repeat(101) }, 'opponentName must be at most 100 characters'],
 		[{ platform: 'FICS' }, 'platform must be one of: "LICHESS", "CHESSCOM"'],
 		[{ timeWindow: '2w' }, 'timeWindow must be one of: "1m", "3m", "6m", "1y", "all"'],
-		[{ gamesAsWhite: -1 }, 'gamesAsWhite must be at least 0'],
-		[{ moves: 'e4' }, 'moves must be an array'],
-		[
-			{ moves: [{ ...move, opponentColor: 'white' }] },
-			'moves[0].opponentColor must be one of: "w", "b"'
-		],
-		[{ moves: [{ ...move, gamesPlayed: 1.5 }] }, 'moves[0].gamesPlayed must be an integer'],
-		[{ moves: [{ ...move, resultingFen: '' }] }, 'moves[0].resultingFen must not be empty']
+		[{ gamesAsWhite: -1 }, 'gamesAsWhite must be at least 0']
 	])('rejects a prep with %j', (change, message) => {
 		expect(validate(createPrepSchema, { ...prep, ...change })).toEqual(fail(message));
 	});
@@ -148,16 +144,44 @@ describe('refreshPrepSchema', () => {
 		});
 		expect(validate(refreshPrepSchema, { mode: 'merge-start' })).toEqual({
 			success: true,
-			data: { mode: 'merge-start', gamesAsWhite: 0, gamesAsBlack: 0 }
+			data: { mode: 'merge-start' }
 		});
 		expect(validate(refreshPrepSchema, { mode: 'merge-batch', moves: [move] }).success).toBe(true);
+		expect(validate(refreshPrepSchema, { mode: 'merge-commit', timeWindow: '1y' })).toEqual({
+			success: true,
+			data: { mode: 'merge-commit', timeWindow: '1y', gamesAsWhite: 0, gamesAsBlack: 0 }
+		});
 	});
 
+	it('caps a batch at 1000 moves', () => {
+		expect(
+			validate(refreshPrepSchema, { mode: 'merge-batch', moves: Array(1001).fill(move) })
+		).toEqual(fail('moves must have at most 1000 items'));
+	});
+
+	const modes = 'mode must be "fetch", "merge-start", "merge-batch", or "merge-commit"';
 	it.each([
-		[{}, 'mode must be "fetch", "merge-start", or "merge-batch"'],
-		[{ mode: 'merge' }, 'mode must be "fetch", "merge-start", or "merge-batch"'],
+		[{}, modes],
+		[{ mode: 'merge' }, modes],
 		[{ mode: 'merge-batch', moves: [] }, 'moves must not be empty'],
-		[{ mode: 'merge-start', gamesAsBlack: -2 }, 'gamesAsBlack must be at least 0']
+		[{ mode: 'merge-batch', moves: 'e4' }, 'moves must be an array'],
+		[
+			{ mode: 'merge-batch', moves: [{ ...move, opponentColor: 'white' }] },
+			'moves[0].opponentColor must be one of: "w", "b"'
+		],
+		[
+			{ mode: 'merge-batch', moves: [{ ...move, gamesPlayed: 1.5 }] },
+			'moves[0].gamesPlayed must be an integer'
+		],
+		[
+			{ mode: 'merge-batch', moves: [{ ...move, resultingFen: '' }] },
+			'moves[0].resultingFen must not be empty'
+		],
+		[{ mode: 'merge-commit', gamesAsBlack: -2 }, 'gamesAsBlack must be at least 0'],
+		[
+			{ mode: 'merge-commit', timeWindow: '2w' },
+			'timeWindow must be one of: "1m", "3m", "6m", "1y", "all"'
+		]
 	])('rejects %j', (body, message) => {
 		expect(validate(refreshPrepSchema, body)).toEqual(fail(message));
 	});
@@ -183,8 +207,8 @@ describe('fetchOpponentGamesSchema', () => {
 	it.each([
 		[{ platform: 'LICHESS' }, 'opponentUsername is required'],
 		[
-			{ opponentUsername: 'x'.repeat(51), platform: 'LICHESS' },
-			'opponentUsername must be at most 50 characters'
+			{ opponentUsername: 'x'.repeat(26), platform: 'LICHESS' },
+			'opponentUsername must be at most 25 characters'
 		],
 		[
 			{ opponentUsername: 'x', platform: 'lichess' },

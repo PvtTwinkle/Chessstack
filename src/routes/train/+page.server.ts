@@ -1,7 +1,8 @@
 // Opening trainer page server load.
 //
-// Loads the active repertoire, saved starting positions, recent training
-// sessions, and the user's trainer rating for the train page.
+// Loads the active repertoire, saved starting positions and the user's
+// trainer rating for the train page. Finished games are written to
+// trainer_session (POST /api/train/evaluate) but not read back anywhere yet.
 
 import type { PageServerLoad } from './$types';
 import { redirect } from '@sveltejs/kit';

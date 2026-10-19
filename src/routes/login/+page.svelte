@@ -214,12 +214,9 @@
 		color: var(--color-text-secondary);
 	}
 
+	/* Underlined: colour alone doesn't set a link apart from the sentence. */
 	.register-link a {
 		color: var(--color-accent);
-		text-decoration: none;
-	}
-
-	.register-link a:hover {
-		text-decoration: underline;
+		text-underline-offset: 2px;
 	}
 </style>

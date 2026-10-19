@@ -15,12 +15,14 @@ const SENTRY_DSN = process.env.SENTRY_DSN;
 if (SENTRY_DSN) {
 	Sentry.init({
 		dsn: SENTRY_DSN,
-		environment: dev ? 'development' : 'production',
+		// A staging copy sets this so its events can be told apart from the live
+		// site's. It is the same variable the browser reads.
+		environment: process.env.PUBLIC_SENTRY_ENVIRONMENT || (dev ? 'development' : 'production'),
 		// A small share of requests is traced for performance data; errors are
 		// always reported regardless of this rate.
 		tracesSampleRate: parseSampleRate(process.env.SENTRY_TRACES_SAMPLE_RATE, 0.05),
-		// The health check is polled every 30s; tracing it would only use up quota.
-		ignoreSpans: ['GET /api/health'],
+		// The health checks are polled by monitors; tracing them would only use up quota.
+		ignoreSpans: ['GET /api/health', 'GET /api/health/ready'],
 		// No cookies, IP addresses or request bodies; scrubEvent removes the rest.
 		dataCollection: DATA_COLLECTION,
 		beforeSend: (event) => scrubEvent(event),

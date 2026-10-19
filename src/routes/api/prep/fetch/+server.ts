@@ -9,42 +9,29 @@
 
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { fetchLichessGames, LichessApiError } from '$lib/lichess';
-import { fetchChesscomGames, ChesscomApiError } from '$lib/chesscom';
-import { timeWindowToSince } from '$lib/prep/timeWindow';
+import { LichessApiError } from '$lib/lichess';
+import { ChesscomApiError } from '$lib/chesscom';
+import { fetchOpponentGames } from '$lib/server/prep-fetch';
 import { parseBody } from '$lib/server/validation';
 import { fetchOpponentGamesSchema } from '$lib/server/schemas/prep';
+import { rateLimitResponse, requireAuth } from '$lib/server/api-helpers';
+import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
+
+	const limited = await rateLimitResponse(user.id, RATE_LIMITS.prepFetch);
+	if (limited) return limited;
 
 	const { opponentUsername, platform, timeWindow, maxGames } = await parseBody(
 		request,
 		fetchOpponentGamesSchema
 	);
 
-	const since = timeWindowToSince(timeWindow ?? undefined);
-	const sinceDate = since ? new Date(since) : undefined;
-
 	try {
-		let games;
-		if (platform === 'LICHESS') {
-			games = await fetchLichessGames(opponentUsername, {
-				since,
-				max: maxGames + 1,
-				sort: 'dateDesc'
-			});
-		} else {
-			games = await fetchChesscomGames(opponentUsername, {
-				since: sinceDate,
-				max: maxGames + 1
-			});
-		}
-
-		const hasMore = games.length > maxGames;
-		const trimmed = hasMore ? games.slice(0, maxGames) : games;
-		const pgns = trimmed.map((g) => g.pgn);
-		return json({ pgns, gameCount: pgns.length, hasMore });
+		return json(
+			await fetchOpponentGames(platform, opponentUsername, timeWindow ?? undefined, maxGames)
+		);
 	} catch (e) {
 		if (e instanceof LichessApiError || e instanceof ChesscomApiError) {
 			if (e.status === 429) {

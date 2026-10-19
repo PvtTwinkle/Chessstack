@@ -1,7 +1,8 @@
 // Request bodies for /api/import routes.
 
 import { z } from 'zod';
-import { fen, id } from './common';
+import { IMPORT_MAX_MOVES, NOTES_MAX_LENGTH, PGN_MAX_BYTES } from '$lib/validation-limits';
+import { fen, id, san } from './common';
 
 /** PATCH /api/import/[id]: skip a game in the import queue, or un-skip it. */
 export const updateImportedGameSchema = z.object({
@@ -13,18 +14,22 @@ export const fetchImportSchema = z.object({
 	source: z.enum(['LICHESS', 'CHESSCOM'])
 });
 
-/** POST /api/import/parse. The route also caps the PGN size (413). */
+/** POST /api/import/parse. */
 export const parseImportSchema = z.object({
 	repertoireId: id,
-	pgn: z.string().min(1)
+	pgn: z.string().min(1).max(PGN_MAX_BYTES, { error: 'PGN is too large (max 1 MB)' })
 });
 
 // The route skips illegal moves (the parse step already reported them) and
 // truncates long PGN comments to the notes limit rather than rejecting them.
 const importMove = z.object({
 	fromFen: fen,
-	san: z.string().min(1),
-	annotation: z.string().nullish()
+	san,
+	// Truncated to the notes limit by the route; the cap here only stops abuse.
+	annotation: z
+		.string()
+		.max(NOTES_MAX_LENGTH * 10)
+		.nullish()
 });
 
 /**
@@ -33,6 +38,6 @@ const importMove = z.object({
  */
 export const executeImportSchema = z.object({
 	repertoireId: id,
-	moves: z.array(importMove).min(1),
-	replacements: z.array(importMove).default([])
+	moves: z.array(importMove).min(1).max(IMPORT_MAX_MOVES),
+	replacements: z.array(importMove).max(IMPORT_MAX_MOVES).default([])
 });

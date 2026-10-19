@@ -1,9 +1,6 @@
-// Shared helper for loading per-user FSRS config from the database.
-//
-// Three server-side callers need the same query + fallback logic:
-//   - drill/grade (grading a card)
-//   - review/fail-card (failing a card from game review)
-//   - drill/+page.server.ts (computing interval labels)
+// Shared helper for loading per-user FSRS config from the database, so every
+// place that grades a card or shows an interval uses the same query and
+// fallbacks.
 
 import { db } from '$lib/db';
 import { userSettings } from '$lib/db/schema';

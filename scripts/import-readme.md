@@ -1,4 +1,21 @@
-# Lichess Import -- Quick Reference
+# Reference datasets
+
+The four datasets the Docker image loads on first boot (see the README) are built offline into
+PostgreSQL tables and then dumped with `scripts/data-export.sh`, which writes the four
+`*-dump.sql.gz` files for a `data-v*` release. Where each one comes from:
+
+| Dataset | Table(s)                          | Source                                                                                                     | Built with                                                                                                                   |
+| ------- | --------------------------------- | ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Masters | `chessmont_moves`                 | [Chessmont dataset](https://www.kaggle.com/datasets/chessmontdb/chessmont-big-dataset) (games rated 2500+) | `scripts/chessmont-import.py` (see its header for options)                                                                   |
+| Players | `lichess_moves`                   | [Lichess open database](https://database.lichess.org/), monthly "Standard rated" files                     | `scripts/lichess-import.py` (below)                                                                                          |
+| Stars   | `star_players`, `celebrity_moves` | Each player's games from Lichess, Chess.com or a PGN file                                                  | `scripts/celebrity-download.py` and `scripts/celebrity-import.py` ([guide](../docs/star-player-import-guide.md))             |
+| Puzzles | `puzzle`                          | [Lichess puzzle database](https://database.lichess.org/#puzzles) (`lichess_db_puzzle.csv`)                 | Loaded once from the CSV; no script is kept. `opening_family` holds the most specific of each puzzle's Lichess opening tags. |
+
+Licences and credits are in [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md).
+
+---
+
+# Players database (Lichess import) -- quick reference
 
 ## Prerequisites (already installed)
 

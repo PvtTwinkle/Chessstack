@@ -6,10 +6,10 @@ import { captureException, init } from '@sentry/sveltekit';
 import { dev } from '$app/environment';
 import { DATA_COLLECTION, scrubBreadcrumb, scrubEvent } from '$lib/sentry';
 
-export function initSentry(dsn: string): void {
+export function initSentry(dsn: string, environment?: string): void {
 	init({
 		dsn,
-		environment: dev ? 'development' : 'production',
+		environment: environment || (dev ? 'development' : 'production'),
 		// Errors only: no performance tracing or session replay in the browser,
 		// and no page content is sent.
 		dataCollection: DATA_COLLECTION,

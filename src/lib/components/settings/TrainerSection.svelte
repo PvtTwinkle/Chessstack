@@ -4,6 +4,8 @@
 <script lang="ts">
 	import SettingsSection from './SettingsSection.svelte';
 	import type { SettingsState } from './settingsState.svelte';
+	import { TRAINER_RATING_RANGE } from '$lib/validation-limits';
+	import StatusMessage from './StatusMessage.svelte';
 
 	let { settings }: { settings: SettingsState } = $props();
 </script>
@@ -11,31 +13,31 @@
 <SettingsSection title="Opening Trainer">
 	<div class="setting-row">
 		<label class="setting-label" for="trainer-rating">Trainer Rating</label>
-		<div class="username-input-row">
+		<form
+			class="username-input-row"
+			onsubmit={(e) => {
+				e.preventDefault();
+				settings.saveTrainerRating();
+			}}
+		>
 			<input
 				id="trainer-rating"
 				type="number"
-				min="100"
-				max="3000"
+				min={TRAINER_RATING_RANGE.min}
+				max={TRAINER_RATING_RANGE.max}
 				placeholder="1200"
 				bind:value={settings.trainerRatingInput}
 				class="username-input"
 				style="width: 100px"
 			/>
-			<button
-				class="btn-save"
-				onclick={settings.saveTrainerRating}
-				disabled={settings.savingTrainerRating}
-			>
+			<button type="submit" class="btn-save" disabled={settings.savingTrainerRating}>
 				{settings.savingTrainerRating ? 'Saving...' : 'Save'}
 			</button>
-		</div>
+		</form>
 		<p class="setting-hint">
-			Your opening trainer Elo rating (100-3000). Updates automatically after rated training
-			sessions.
+			Your opening trainer Elo rating ({TRAINER_RATING_RANGE.min}-{TRAINER_RATING_RANGE.max}).
+			Updates automatically after rated training sessions.
 		</p>
-		{#if settings.trainerRatingStatus}
-			<span class="status-msg">{settings.trainerRatingStatus}</span>
-		{/if}
+		<StatusMessage status={settings.trainerRatingStatus} />
 	</div>
 </SettingsSection>

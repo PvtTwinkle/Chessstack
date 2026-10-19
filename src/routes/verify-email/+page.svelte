@@ -1,7 +1,9 @@
 <script lang="ts">
 	import Seo from '$lib/components/Seo.svelte';
+	import SupportContact from '$lib/components/SupportContact.svelte';
 	import type { PageData } from './$types';
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
+	import { invalidateAll } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import logoIcon from '$lib/assets/logo-icon.svg';
 
@@ -11,7 +13,7 @@
 	let feedback = $state<{ type: 'success' | 'error'; message: string } | null>(null);
 
 	// Detect if the initial email send failed (flag from registration redirect).
-	const sendFailed = $derived($page.url.searchParams.get('send') === 'failed');
+	const sendFailed = $derived(page.url.searchParams.get('send') === 'failed');
 
 	// After 2 minutes, show a "didn't receive it?" prompt for normal arrivals.
 	let showTimeoutHint = $state(false);
@@ -26,7 +28,7 @@
 	});
 
 	// Show error from query params (e.g. after clicking an expired link).
-	const errorParam = $derived($page.url.searchParams.get('error'));
+	const errorParam = $derived(page.url.searchParams.get('error'));
 	const errorMessage = $derived(
 		errorParam === 'invalid-or-expired'
 			? 'That verification link is invalid or has expired. Please request a new one.'
@@ -36,6 +38,38 @@
 					? 'Something went wrong. Please request a new verification email.'
 					: null
 	);
+
+	// "Wrong address?" form: a mistyped email can be corrected from here, since
+	// the rest of the app (settings included) is closed until it is verified.
+	let newEmail = $state('');
+	let password = $state('');
+	let changing = $state(false);
+
+	async function changeEmail(event: SubmitEvent) {
+		event.preventDefault();
+		changing = true;
+		feedback = null;
+		try {
+			const res = await fetch('/api/account/email', {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ email: newEmail, password })
+			});
+			const body = await res.json().catch(() => null);
+			if (res.ok) {
+				password = '';
+				newEmail = '';
+				feedback = { type: 'success', message: 'Verification email sent to your new address.' };
+				await invalidateAll();
+			} else {
+				feedback = { type: 'error', message: body?.message ?? 'Could not change your email.' };
+			}
+		} catch {
+			feedback = { type: 'error', message: 'Network error. Please try again.' };
+		} finally {
+			changing = false;
+		}
+	}
 
 	async function resend() {
 		sending = true;
@@ -87,7 +121,7 @@
 			<p class="error" role="alert">
 				We were unable to send the verification email. This may be a temporary issue. Try the resend
 				button below, or contact
-				<a href="mailto:support@chessstack.app" class="support-link">support@chessstack.app</a>
+				<SupportContact />
 				for help.
 			</p>
 		{/if}
@@ -96,7 +130,7 @@
 			<p class="warning" role="status">
 				It's been a couple of minutes. If you haven't received the email, check your spam folder or
 				try resending. Still stuck? Contact
-				<a href="mailto:support@chessstack.app" class="support-link">support@chessstack.app</a>.
+				<SupportContact />.
 			</p>
 		{/if}
 
@@ -114,9 +148,35 @@
 
 		<p class="help-text">
 			Didn't receive it? Check your spam folder, or click resend above.<br />
-			Still having trouble? Contact us at
-			<a href="mailto:support@chessstack.app" class="support-link">support@chessstack.app</a>
+			Still having trouble? Contact
+			<SupportContact />
 		</p>
+
+		<details class="change-email">
+			<summary>Wrong address? Change it</summary>
+			<form onsubmit={changeEmail}>
+				<input
+					type="email"
+					placeholder="New email address"
+					autocomplete="email"
+					maxlength="254"
+					required
+					aria-label="New email address"
+					bind:value={newEmail}
+				/>
+				<input
+					type="password"
+					placeholder="Current password"
+					autocomplete="current-password"
+					required
+					aria-label="Current password"
+					bind:value={password}
+				/>
+				<button type="submit" disabled={changing}>
+					{changing ? 'Changing…' : 'Change email and resend'}
+				</button>
+			</form>
+		</details>
 
 		<form method="POST" action="/api/auth/logout" class="logout-form">
 			<button type="submit" class="logout-btn">Sign out</button>
@@ -187,6 +247,41 @@
 		color: var(--color-text-primary);
 	}
 
+	.change-email {
+		margin-top: var(--space-6);
+		text-align: left;
+		font-size: 13px;
+		color: var(--color-text-secondary);
+	}
+
+	.change-email summary {
+		cursor: pointer;
+		text-align: center;
+	}
+
+	.change-email form {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
+		margin-top: var(--space-4);
+	}
+
+	.change-email input {
+		padding: var(--space-3) var(--space-4);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-sm);
+		background: var(--color-surface-alt);
+		color: var(--color-text-primary);
+		font-family: var(--font-body);
+		font-size: 14px;
+	}
+
+	.change-email input:focus {
+		outline: none;
+		border-color: var(--color-accent);
+		box-shadow: 0 0 0 3px var(--color-accent-glow);
+	}
+
 	.error {
 		background: rgba(248, 113, 113, 0.1);
 		border: 1px solid rgba(248, 113, 113, 0.3);
@@ -252,15 +347,6 @@
 		color: var(--color-text-muted);
 		margin-top: var(--space-4);
 		line-height: 1.5;
-	}
-
-	.support-link {
-		color: var(--color-accent);
-		text-decoration: none;
-	}
-
-	.support-link:hover {
-		text-decoration: underline;
 	}
 
 	.logout-form {

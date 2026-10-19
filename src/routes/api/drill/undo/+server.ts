@@ -1,9 +1,10 @@
 // POST /api/drill/undo — restore a drill card's FSRS state to its pre-grade snapshot.
 //
 // When a user grades a card and immediately regrets it (before clicking "Next"),
-// the client sends back the snapshot of FSRS fields it captured before grading.
-// We validate ownership and write those fields back, effectively undoing the grade,
-// and remove the grade from review_log.
+// the client sends back the snapshot of FSRS fields it captured before grading,
+// with the reviewedAt the grade returned. We validate ownership and, while that
+// grade is still the card's latest, write those fields back and remove the
+// grade from review_log; otherwise 409, and nothing changes.
 
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
@@ -20,14 +21,18 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	const user = requireAuth(locals);
 
 	// The schema range-checks every FSRS field before it is written back.
-	const { cardId, previousState: validated } = await parseBody(request, undoGradeSchema);
+	const {
+		cardId,
+		reviewedAt,
+		sessionId,
+		previousState: validated
+	} = await parseBody(request, undoGradeSchema);
 
 	// Verify the card belongs to this user.
 	const [card] = await db
 		.select({
 			id: userRepertoireMove.id,
-			repertoireId: userRepertoireMove.repertoireId,
-			lastReview: userRepertoireMove.lastReview
+			repertoireId: userRepertoireMove.repertoireId
 		})
 		.from(userRepertoireMove)
 		.where(and(eq(userRepertoireMove.id, cardId), eq(userRepertoireMove.userId, user.id)));
@@ -39,7 +44,11 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	}
 
 	// Restore the pre-grade FSRS fields using validated values.
-	await undoGrade(card, validated);
+	const result = await undoGrade(user.id, card.id, reviewedAt, validated, sessionId);
+	if (result === 'not_found') throw error(404, 'Card not found');
+	if (result === 'stale') {
+		throw error(409, 'This card has been graded since, so the grade can no longer be undone');
+	}
 
 	return json({ restored: true });
 };

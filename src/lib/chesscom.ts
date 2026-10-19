@@ -9,10 +9,18 @@
 // User-Agent header is required per Chess.com API policy.
 
 import { log } from '$lib/server/log';
+import { IS_CLOUD } from '$lib/server/edition';
+import { isTimeout } from '$lib/lichess';
 
 const CHESSCOM_API_BASE = 'https://api.chess.com';
-const USER_AGENT = 'Chessstack/1.0 (https://github.com/PvtTwinkle/Chessstack)';
+// Chess.com asks API clients to identify themselves, so the hosted site names
+// itself rather than the open-source project every self-hosted copy points at.
+const USER_AGENT = IS_CLOUD
+	? 'Chessstack/1.0 (https://chessstack.app)'
+	: 'Chessstack/1.0 (https://github.com/PvtTwinkle/Chessstack)';
 const DELAY_BETWEEN_ARCHIVES_MS = 1000;
+// Per request, body included; see LICHESS_TIMEOUT_MS.
+export const CHESSCOM_TIMEOUT_MS = 15_000;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -75,10 +83,24 @@ interface ChesscomGamesResponse {
  * @param username - Chess.com username (case-insensitive)
  * @param options.since - Only fetch games played after this date
  * @param options.max - Maximum number of games to return (default 50)
+ * @param options.oldestFirst - Walk archives forward from `since` and keep the
+ *   oldest `max` games, so a watermark set from the newest of them never skips
+ *   a game. Game import needs this; opponent prep wants the newest games.
+ * @param options.allArchives - With no `since`, read every archive instead of
+ *   the last 3 months (opponent prep's "All time")
+ * @param options.newestFirst - Return the newest games, newest first, when
+ *   there are more than `max`. The user's own import keeps oldest-first,
+ *   because its watermark has to advance in order; prep wants recent games.
  */
 export async function fetchChesscomGames(
 	username: string,
-	options: { since?: Date; max?: number } = {}
+	options: {
+		since?: Date;
+		max?: number;
+		oldestFirst?: boolean;
+		allArchives?: boolean;
+		newestFirst?: boolean;
+	} = {}
 ): Promise<ChesscomGame[]> {
 	const max = options.max ?? 50;
 
@@ -93,23 +115,26 @@ export async function fetchChesscomGames(
 
 	// Filter to only relevant archives (from the watermark month onward,
 	// or the last 3 months if no watermark).
-	const relevantArchives = filterArchives(archiveUrls, options.since);
+	const relevantArchives =
+		!options.since && options.allArchives
+			? archiveUrls
+			: filterArchives(archiveUrls, options.since);
 
 	log.info('Chess.com archives after date filter', {
 		archives: relevantArchives.length,
 		since: options.since?.toISOString() ?? null
 	});
 
-	// Step 2: Fetch each archive sequentially (newest first for better UX).
+	// Step 2: Fetch each archive sequentially, newest first unless asked for
+	// oldest first.
 	const allGames: ChesscomGame[] = [];
 	let archiveErrors = 0;
+	const ordered = options.oldestFirst ? relevantArchives : [...relevantArchives].reverse();
 
-	for (let i = relevantArchives.length - 1; i >= 0; i--) {
-		const archiveUrl = relevantArchives[i];
-
+	for (let i = 0; i < ordered.length; i++) {
 		if (allGames.length >= max) break;
 
-		const games = await fetchArchiveGames(archiveUrl, username, options.since);
+		const games = await fetchArchiveGames(ordered[i], username, options.since);
 		if (games === null) {
 			archiveErrors++;
 		} else {
@@ -117,7 +142,7 @@ export async function fetchChesscomGames(
 		}
 
 		// Delay between archive fetches to be polite.
-		if (i > 0) {
+		if (i < ordered.length - 1 && allGames.length < max) {
 			await sleep(DELAY_BETWEEN_ARCHIVES_MS);
 		}
 	}
@@ -131,9 +156,15 @@ export async function fetchChesscomGames(
 		);
 	}
 
+	const time = (g: ChesscomGame) => g.playedAt?.getTime() ?? 0;
+	if (options.newestFirst) {
+		// Archives were read newest first, so the oldest month is the one cut.
+		allGames.sort((a, b) => time(b) - time(a));
+		return allGames.slice(0, max);
+	}
 	// Sort by playedAt ascending (oldest first) so the watermark advances monotonically,
 	// then trim to max.
-	allGames.sort((a, b) => (a.playedAt?.getTime() ?? 0) - (b.playedAt?.getTime() ?? 0));
+	allGames.sort((a, b) => time(a) - time(b));
 	return allGames.slice(0, max);
 }
 
@@ -141,20 +172,40 @@ export async function fetchChesscomGames(
 
 async function fetchArchiveList(username: string): Promise<string[]> {
 	const url = `${CHESSCOM_API_BASE}/pub/player/${encodeURIComponent(username)}/games/archives`;
-	const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT } });
+	return withTimeout(async () => {
+		const res = await fetch(url, {
+			headers: { 'User-Agent': USER_AGENT },
+			signal: AbortSignal.timeout(CHESSCOM_TIMEOUT_MS)
+		});
 
-	if (res.status === 404) {
-		throw new ChesscomApiError(`Chess.com user "${username}" not found`, 404);
-	}
-	if (res.status === 429) {
-		throw new ChesscomApiError('Chess.com rate limit exceeded. Try again later.', 429);
-	}
-	if (!res.ok) {
-		throw new ChesscomApiError(`Chess.com API error: ${res.status} ${res.statusText}`, res.status);
-	}
+		if (res.status === 404) {
+			throw new ChesscomApiError(`Chess.com user "${username}" not found`, 404);
+		}
+		if (res.status === 429) {
+			throw new ChesscomApiError('Chess.com rate limit exceeded. Try again later.', 429);
+		}
+		if (!res.ok) {
+			throw new ChesscomApiError(
+				`Chess.com API error: ${res.status} ${res.statusText}`,
+				res.status
+			);
+		}
 
-	const data = (await res.json()) as ChesscomArchivesResponse;
-	return data.archives ?? [];
+		const data = (await res.json()) as ChesscomArchivesResponse;
+		return data.archives ?? [];
+	});
+}
+
+/** Runs one request, turning a timeout into a clear ChesscomApiError. */
+async function withTimeout<T>(request: () => Promise<T>): Promise<T> {
+	try {
+		return await request();
+	} catch (e) {
+		if (isTimeout(e)) {
+			throw new ChesscomApiError('Chess.com did not respond in time. Try again later.', 504);
+		}
+		throw e;
+	}
 }
 
 /**
@@ -189,21 +240,27 @@ async function fetchArchiveGames(
 	username: string,
 	since?: Date
 ): Promise<ChesscomGame[] | null> {
-	const res = await fetch(archiveUrl, { headers: { 'User-Agent': USER_AGENT } });
-
-	if (res.status === 429) {
-		throw new ChesscomApiError('Chess.com rate limit exceeded. Try again later.', 429);
-	}
-	if (!res.ok) {
-		log.warn('Chess.com archive fetch failed', {
-			status: res.status,
-			statusText: res.statusText,
-			url: archiveUrl
+	const data = await withTimeout(async () => {
+		const res = await fetch(archiveUrl, {
+			headers: { 'User-Agent': USER_AGENT },
+			signal: AbortSignal.timeout(CHESSCOM_TIMEOUT_MS)
 		});
-		return null;
-	}
 
-	const data = (await res.json()) as ChesscomGamesResponse;
+		if (res.status === 429) {
+			throw new ChesscomApiError('Chess.com rate limit exceeded. Try again later.', 429);
+		}
+		if (!res.ok) {
+			log.warn('Chess.com archive fetch failed', {
+				status: res.status,
+				statusText: res.statusText,
+				url: archiveUrl
+			});
+			return null;
+		}
+
+		return (await res.json()) as ChesscomGamesResponse;
+	});
+	if (!data) return null;
 	const rawCount = data.games?.length ?? 0;
 	const games: ChesscomGame[] = [];
 

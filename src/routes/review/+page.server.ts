@@ -1,8 +1,9 @@
 // Review mode page server.
 //
 // LOAD: returns the active repertoire, all its moves, the 20 most recent
-//       reviewed games for the history list, user settings, all imported games
-//       for the import tab, and all repertoires for multi-repertoire analysis.
+//       reviewed games for the history list, user settings, the imported games
+//       for the import tab (all pending ones and the first page of the rest),
+//       and all repertoires for multi-repertoire analysis.
 //       If ?importedGameId=N is in the URL, also loads that specific game for prefill.
 //
 // ACTION analyzeGame: receives a PGN + player color from the form submission,
@@ -15,20 +16,16 @@ import { fail, redirect } from '@sveltejs/kit';
 import { db } from '$lib/db';
 import { repertoire, userMove, reviewedGame, importedGame, userSettings } from '$lib/db/schema';
 import { eq, and, desc } from 'drizzle-orm';
-import { parsePgn, analyzeGame, computeMatchDepth } from '$lib/pgn';
+import { parsePgn, analyzeGame, computeMatchDepth, formatOpeningMoves } from '$lib/pgn';
 import { isRepertoireLocked } from '$lib/stripe/tiers.server';
-
-/** Format the first N half-moves as readable notation, e.g. "1. e4 e5 2. Nf3 Nc6". */
-function formatOpeningMoves(moves: { san: string }[], plies = 4): string {
-	const slice = moves.slice(0, plies);
-	let result = '';
-	for (let i = 0; i < slice.length; i++) {
-		if (i % 2 === 0) result += `${Math.floor(i / 2) + 1}. `;
-		result += slice[i].san;
-		if (i < slice.length - 1) result += ' ';
-	}
-	return result || '(empty game)';
-}
+import { isRateLimited } from '$lib/auth/rate-limit';
+import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
+import {
+	loadReviewRepertoires,
+	type MoveRow,
+	type RepertoireRow
+} from '$lib/server/review-repertoires';
+import { loadImportHistory, loadPendingImports } from '$lib/server/imported-games';
 
 export const load: PageServerLoad = async ({ locals, parent, url }) => {
 	const { activeRepertoireId, repertoires, lockedRepertoireIds } = await parent();
@@ -60,13 +57,13 @@ export const load: PageServerLoad = async ({ locals, parent, url }) => {
 		.orderBy(desc(reviewedGame.reviewedAt))
 		.limit(20);
 
-	// All imported games for this user (all statuses) — displayed in the Import tab.
-	const importedGames = await db
-		.select()
-		.from(importedGame)
-		.where(eq(importedGame.userId, userId))
-		.orderBy(desc(importedGame.playedAt))
-		.limit(100);
+	// Imported games for the Import tab: every pending one, plus the first
+	// page of reviewed and skipped ones (the tab loads more on demand).
+	const [pendingImports, importHistory] = await Promise.all([
+		loadPendingImports(userId),
+		loadImportHistory(userId, 0)
+	]);
+	const importedGames = [...pendingImports, ...importHistory.games];
 
 	// User settings — needed for platform username display in the import tab.
 	const [settings] = await db.select().from(userSettings).where(eq(userSettings.userId, userId));
@@ -90,6 +87,7 @@ export const load: PageServerLoad = async ({ locals, parent, url }) => {
 		moves,
 		recentGames,
 		importedGames,
+		importHistoryHasMore: importHistory.hasMore,
 		importSettings: settings
 			? {
 					lichessUsername: settings.lichessUsername,
@@ -104,6 +102,11 @@ export const load: PageServerLoad = async ({ locals, parent, url }) => {
 export const actions: Actions = {
 	analyzeGame: async ({ locals, request }) => {
 		if (!locals.user) return fail(401, { error: 'Not authenticated' });
+		// Same budget as POST /api/import/[id]/analyze: both parse a game and
+		// analyse it against the user's repertoires.
+		if (await isRateLimited(String(locals.user.id), RATE_LIMITS.importAnalyze)) {
+			return fail(429, { error: 'Too many requests. Please try again later.' });
+		}
 
 		const form = await request.formData();
 		const pgn = (form.get('pgn') as string | null)?.trim() ?? '';
@@ -130,11 +133,8 @@ export const actions: Actions = {
 		const playerColor: 'WHITE' | 'BLACK' =
 			colorOverride === 'WHITE' || colorOverride === 'BLACK' ? colorOverride : 'WHITE'; // overridden below if we find a repertoire
 
-		type RepRow = typeof repertoire.$inferSelect;
-		type MoveRow = (typeof userMove.$inferSelect)[];
-
-		let bestRep: RepRow | null;
-		let bestMoves: MoveRow;
+		let bestRep: RepertoireRow | null;
+		let bestMoves: MoveRow[];
 
 		if (repertoireIdOverride) {
 			// Import flow — use the explicitly specified repertoire.
@@ -158,38 +158,26 @@ export const actions: Actions = {
 				.from(userMove)
 				.where(and(eq(userMove.userId, locals.user.id), eq(userMove.repertoireId, rep.id)));
 		} else {
-			// Paste PGN flow — find the best matching repertoire based on opening.
-			// Get all repertoires for this user that match the player's color.
-			// Filter out locked repertoires so free users only match against their free one.
-			const allRepsRaw = await db
-				.select()
-				.from(repertoire)
-				.where(and(eq(repertoire.userId, locals.user.id), eq(repertoire.color, playerColor)));
+			// Paste PGN flow — find the best matching repertoire based on opening,
+			// among the user's same-colour repertoires that aren't locked.
+			const usable = await loadReviewRepertoires(
+				locals.user.id,
+				locals.user.tier ?? 'free',
+				playerColor
+			);
 
-			const userTier = locals.user.tier ?? 'free';
-			const allReps: typeof allRepsRaw = [];
-			for (const rep of allRepsRaw) {
-				if (!(await isRepertoireLocked(locals.user.id, rep.id, userTier))) {
-					allReps.push(rep);
-				}
-			}
-
-			if (allReps.length === 0) {
+			if (usable.length === 0) {
 				return fail(400, {
 					error: `No ${playerColor.toLowerCase()} repertoire found for this game (${openingMoves}). Create one first.`
 				});
 			}
 
-			// Load moves for each repertoire and score by opening overlap.
-			const repData: { rep: (typeof allReps)[0]; moves: MoveRow; depth: number }[] = [];
-			for (const rep of allReps) {
-				const moves = await db
-					.select()
-					.from(userMove)
-					.where(and(eq(userMove.userId, locals.user.id), eq(userMove.repertoireId, rep.id)));
-				const depth = computeMatchDepth(parsed.moves, moves, playerColor);
-				repData.push({ rep, moves, depth });
-			}
+			// Score each repertoire by opening overlap.
+			const repData = usable.map(({ rep, moves }) => ({
+				rep,
+				moves,
+				depth: computeMatchDepth(parsed.moves, moves, playerColor)
+			}));
 
 			// Pick the repertoire with the deepest opening match.
 			repData.sort((a, b) => b.depth - a.depth);

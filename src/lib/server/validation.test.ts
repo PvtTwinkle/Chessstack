@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { isHttpError } from '@sveltejs/kit';
 import { z } from 'zod';
-import { parseBody, validate } from './validation';
+import { parseBody, parseQuery, validate } from './validation';
 
 const schema = z.object({
 	name: z.string().min(1),
@@ -90,5 +90,39 @@ describe('validate messages', () => {
 
 	it('keeps a message set on the schema', () => {
 		expect(message({ ...valid, label: 3 })).toBe('Pick a label.');
+	});
+});
+
+describe('parseBody size limit', () => {
+	it('answers 413 when the server rejects an oversized body', async () => {
+		// adapter-node errors the stream with a SvelteKitError carrying status 413.
+		const tooLarge = Object.assign(new Error('Payload Too Large'), { status: 413 });
+		const request = { json: () => Promise.reject(tooLarge) } as unknown as Request;
+		expect(await statusAndMessage(parseBody(request, schema))).toEqual([
+			413,
+			'Request body is too large'
+		]);
+	});
+});
+
+describe('parseQuery', () => {
+	const query = z.object({ fen: z.string().max(5), limit: z.coerce.number().int().max(10) });
+
+	it('parses and coerces query parameters', () => {
+		const url = new URL('http://localhost/api/x?fen=abc&limit=3&limit=9');
+		expect(parseQuery(url, query)).toEqual({ fen: 'abc', limit: 3 });
+	});
+
+	it('throws 400 with the first problem', () => {
+		const url = new URL('http://localhost/api/x?fen=abcdef&limit=3');
+		try {
+			parseQuery(url, query);
+			throw new Error('expected parseQuery to throw');
+		} catch (e) {
+			expect(isHttpError(e) && [e.status, e.body.message]).toEqual([
+				400,
+				'fen must be at most 5 characters'
+			]);
+		}
 	});
 });

@@ -5,7 +5,12 @@
 	import SettingsSection from './SettingsSection.svelte';
 	import SettingSlider from './SettingSlider.svelte';
 	import type { SettingsState } from './settingsState.svelte';
-	import { MAX_STOCKFISH_DEPTH, MIN_STOCKFISH_DEPTH } from '$lib/validation-limits';
+	import {
+		DEFAULT_STOCKFISH_DEPTH,
+		MAX_STOCKFISH_DEPTH,
+		MIN_STOCKFISH_DEPTH,
+		STOCKFISH_TIMEOUT_RANGE
+	} from '$lib/validation-limits';
 
 	let { settings }: { settings: SettingsState } = $props();
 </script>
@@ -22,18 +27,20 @@
 		maxLabel={String(MAX_STOCKFISH_DEPTH)}
 		setting={settings.stockfishDepth}
 	>
-		<p class="setting-hint">Higher = stronger analysis but slower. 20 is a good default.</p>
+		<p class="setting-hint">
+			Higher = stronger analysis but slower. {DEFAULT_STOCKFISH_DEPTH} is a good default.
+		</p>
 	</SettingSlider>
 
 	<SettingSlider
 		id="timeout-slider"
 		label="Analysis Timeout"
 		display="{settings.stockfishTimeout.value}s"
-		min="3"
-		max="30"
+		min={STOCKFISH_TIMEOUT_RANGE.min}
+		max={STOCKFISH_TIMEOUT_RANGE.max}
 		step="1"
-		minLabel="3s"
-		maxLabel="30s"
+		minLabel="{STOCKFISH_TIMEOUT_RANGE.min}s"
+		maxLabel="{STOCKFISH_TIMEOUT_RANGE.max}s"
 		setting={settings.stockfishTimeout}
 	>
 		<p class="setting-hint">

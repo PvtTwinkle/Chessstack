@@ -33,26 +33,9 @@
 	import { getEngine, type EngineMove } from '$lib/engine/engine';
 	import { candidateCount, toCandidates } from '$lib/engine/candidates';
 	import { engineSettings } from '$lib/engine/settings';
-
-	interface Candidate {
-		san: string;
-		uci: string;
-		evalCp: number | null;
-		evalMate: number | null;
-		isBook: boolean;
-		annotation: string | null;
-		openingName: string | null;
-	}
+	import type { Candidate, MastersMove, StarPlayer } from '$lib/api-types';
 
 	type TabId = 'book' | 'masters' | 'stars' | 'players' | 'engine';
-
-	interface MastersMove {
-		san: string;
-		white: number;
-		draws: number;
-		black: number;
-		totalGames: number;
-	}
 
 	interface Props {
 		currentFen: string;
@@ -147,7 +130,7 @@
 	let starsMoves = $state<MastersMove[]>([]);
 	let starsLoading = $state(false);
 	let starsError = $state(false);
-	let starsPlayers = $state<{ slug: string; displayName: string; category: string | null }[]>([]);
+	let starsPlayers = $state<StarPlayer[]>([]);
 	// Local override: null means "use the prop". Set when the user picks a player
 	// in the dropdown; cleared when the prop catches up (after settings PATCH).
 	let starsPlayerOverride = $state<string | null>(null);

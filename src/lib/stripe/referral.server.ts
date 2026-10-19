@@ -21,76 +21,71 @@ export async function activateReferralDiscount(refereeUserId: number): Promise<v
 	const referrerId = refereeUser?.referredByUserId;
 	if (!referrerId) return;
 
-	// Idempotency: bail if referee already has the flag set.
-	const [refereeSub] = await db
-		.select({ referralDiscountActive: subscription.referralDiscountActive })
-		.from(subscription)
-		.where(eq(subscription.userId, refereeUserId));
+	// Each flag is set by one conditional upsert, so of two callers racing
+	// (the same referee verifying twice, or two referees of one referrer) only
+	// one gets a row back and goes on.
+	const [referee] = await flagDiscount(refereeUserId);
+	if (!referee) return;
 
-	if (refereeSub?.referralDiscountActive) return;
+	const [referrerSub] = await flagDiscount(referrerId);
+	if (!referrerSub) return;
 
-	// Flag the referee.
-	if (refereeSub) {
+	// Apply the coupon now if the referrer is already on an active annual
+	// subscription (it will discount their next renewal). A monthly referrer's
+	// discount waits for an annual checkout.
+	const stripe = getStripe();
+	if (
+		!stripe ||
+		!STRIPE_REFERRAL_COUPON_ID ||
+		!referrerSub.stripeSubscriptionId ||
+		referrerSub.status !== 'active' ||
+		referrerSub.stripePriceId !== STRIPE_PRICE_ID_ANNUAL
+	) {
+		return;
+	}
+
+	try {
+		await stripe.subscriptions.update(referrerSub.stripeSubscriptionId, {
+			discounts: [{ coupon: STRIPE_REFERRAL_COUPON_ID }]
+		});
+	} catch (err) {
+		// Unflag the referrer so their next referral tries again, rather than
+		// leaving a reward that was promised and never applied.
 		await db
 			.update(subscription)
-			.set({ referralDiscountActive: true, updatedAt: new Date() })
-			.where(eq(subscription.userId, refereeUserId));
-	} else {
-		await db.insert(subscription).values({
-			userId: refereeUserId,
+			.set({ referralDiscountActive: false, updatedAt: new Date() })
+			.where(eq(subscription.userId, referrerId));
+		throw err;
+	}
+
+	// The coupon is now consumed — don't apply it again at a future checkout.
+	await db
+		.update(subscription)
+		.set({ referralDiscountUsedAt: new Date(), updatedAt: new Date() })
+		.where(eq(subscription.userId, referrerId));
+}
+
+/** Sets referralDiscountActive; returns the row only if it wasn't set before. */
+function flagDiscount(userId: number) {
+	const now = new Date();
+	return db
+		.insert(subscription)
+		.values({
+			userId,
 			tier: 'free',
 			status: 'active',
 			referralDiscountActive: true,
-			createdAt: new Date(),
-			updatedAt: new Date()
-		});
-	}
-
-	// Flag the referrer, and apply the coupon immediately if they are already
-	// on an active annual subscription (it will discount their next renewal).
-	const [referrerSub] = await db
-		.select({
+			createdAt: now,
+			updatedAt: now
+		})
+		.onConflictDoUpdate({
+			target: subscription.userId,
+			set: { referralDiscountActive: true, updatedAt: now },
+			setWhere: eq(subscription.referralDiscountActive, false)
+		})
+		.returning({
 			stripeSubscriptionId: subscription.stripeSubscriptionId,
 			stripePriceId: subscription.stripePriceId,
-			status: subscription.status,
-			referralDiscountActive: subscription.referralDiscountActive
-		})
-		.from(subscription)
-		.where(eq(subscription.userId, referrerId));
-
-	if (!referrerSub?.referralDiscountActive) {
-		if (referrerSub) {
-			await db
-				.update(subscription)
-				.set({ referralDiscountActive: true, updatedAt: new Date() })
-				.where(eq(subscription.userId, referrerId));
-		} else {
-			await db.insert(subscription).values({
-				userId: referrerId,
-				tier: 'free',
-				status: 'active',
-				referralDiscountActive: true,
-				createdAt: new Date(),
-				updatedAt: new Date()
-			});
-		}
-
-		const stripe = getStripe();
-		if (
-			stripe &&
-			STRIPE_REFERRAL_COUPON_ID &&
-			referrerSub?.stripeSubscriptionId &&
-			referrerSub.status === 'active' &&
-			referrerSub.stripePriceId === STRIPE_PRICE_ID_ANNUAL
-		) {
-			await stripe.subscriptions.update(referrerSub.stripeSubscriptionId, {
-				discounts: [{ coupon: STRIPE_REFERRAL_COUPON_ID }]
-			});
-			// The coupon is now consumed — don't apply it again at a future checkout.
-			await db
-				.update(subscription)
-				.set({ referralDiscountUsedAt: new Date(), updatedAt: new Date() })
-				.where(eq(subscription.userId, referrerId));
-		}
-	}
+			status: subscription.status
+		});
 }

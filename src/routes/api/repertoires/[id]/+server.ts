@@ -4,16 +4,11 @@
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import {
-	repertoire,
-	userMove,
-	userRepertoireMove,
-	reviewedGame,
-	drillSession
-} from '$lib/db/schema';
+import { repertoire } from '$lib/db/schema';
 import { and, eq } from 'drizzle-orm';
 import { fenKey } from '$lib/fen';
 import { requireAuth, parseIntParam } from '$lib/server/api-helpers';
+import { isRepertoireLocked } from '$lib/stripe/tiers.server';
 import { parseBody } from '$lib/server/validation';
 import { updateRepertoireSchema } from '$lib/server/schemas/repertoires';
 
@@ -35,6 +30,12 @@ export const PATCH: RequestHandler = async ({ locals, request, params }) => {
 
 	if (!existing) throw error(404, 'Repertoire not found');
 
+	// Renaming or moving the start position is an edit like any other; only
+	// deleting a locked repertoire stays allowed.
+	if (await isRepertoireLocked(user.id, id, user.tier ?? 'free')) {
+		throw error(403, 'This repertoire is read-only. Upgrade your plan to edit it.');
+	}
+
 	const body = await parseBody(request, updateRepertoireSchema);
 
 	const updates: Partial<typeof repertoire.$inferInsert> = {};
@@ -54,14 +55,10 @@ export const PATCH: RequestHandler = async ({ locals, request, params }) => {
 };
 
 // ── DELETE ─────────────────────────────────────────────────────────────────────
-// Deletes the repertoire and ALL associated data in a single transaction.
-//
-// A transaction is an "all or nothing" operation — if any deletion fails,
-// the database rolls back to its state before the transaction started.
-// This prevents half-deleted repertoires with orphaned rows in other tables.
-//
-// Deletion order matters because of foreign key constraints:
-// child rows (moves, sessions) must be deleted before the parent (repertoire).
+// Deletes the repertoire and ALL associated data. Every table that references
+// a repertoire (moves, drill cards, reviews, drill and trainer sessions)
+// cascades on delete, so removing the repertoire row removes the rest in the
+// same statement.
 
 export const DELETE: RequestHandler = async ({ locals, params }) => {
 	const user = requireAuth(locals);
@@ -76,15 +73,7 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 
 	if (!existing) throw error(404, 'Repertoire not found');
 
-	await db.transaction(async (tx) => {
-		// Delete child rows first (foreign key references the repertoire row).
-		await tx.delete(userMove).where(eq(userMove.repertoireId, id));
-		await tx.delete(userRepertoireMove).where(eq(userRepertoireMove.repertoireId, id));
-		await tx.delete(reviewedGame).where(eq(reviewedGame.repertoireId, id));
-		await tx.delete(drillSession).where(eq(drillSession.repertoireId, id));
-		// Delete the repertoire itself last.
-		await tx.delete(repertoire).where(eq(repertoire.id, id));
-	});
+	await db.delete(repertoire).where(eq(repertoire.id, id));
 
 	return json({ success: true });
 };

@@ -1,8 +1,9 @@
 // POST /api/drill/session — create a new drill session record when the user
-// starts grading their first card.
+// starts drilling.
 //
-// We record start time here and leave completed_at null. The client will PATCH
-// the session via /api/drill/session/[id] when the session finishes.
+// We record start time here and leave completed_at null. Each grade sent with
+// the session's id adds to its counts, and the client PATCHes the session via
+// /api/drill/session/[id] when the session finishes.
 
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';

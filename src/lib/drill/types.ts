@@ -24,6 +24,12 @@ export interface DueCard {
 	lapses: number | null;
 	lastReview: string | null;
 	learningSteps: number;
+	/**
+	 * Whether the card is due. "Drill all" also loads cards that aren't: those
+	 * are practice, not graded, so cramming doesn't move their schedule.
+	 * Missing means due.
+	 */
+	isDue?: boolean;
 	intervalLabels: {
 		forgot: string;
 		unsure: string;
@@ -35,6 +41,8 @@ export interface DueCard {
 export interface UndoSnapshot {
 	cardId: number;
 	wasCorrect: boolean;
+	/** The grade's reviewedAt from the server; undo is refused once it's stale. */
+	reviewedAt: string;
 	previousState: {
 		due: string | null;
 		stability: number | null;

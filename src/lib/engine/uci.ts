@@ -29,8 +29,12 @@ export interface InfoLine extends EngineMove {
 // Parses an "info" line that carries a principal variation, e.g.
 //   info depth 15 seldepth 22 multipv 1 score cp 45 nodes 1234 pv e2e4 e7e5 ...
 // Returns null for every other line (progress lines, "info string", etc.).
+// Lines whose score is only a lowerbound or upperbound (a fail-high or
+// fail-low that Stockfish re-searches) are skipped too: a search cut off by
+// the timeout could otherwise report a bound as the move's score.
 export function parseInfoLine(line: string): InfoLine | null {
 	if (!line.startsWith('info') || !line.includes(' pv ')) return null;
+	if (/ (lowerbound|upperbound)\b/.test(line)) return null;
 	const depthMatch = line.match(/ depth (\d+)/);
 	const pvMatch = line.match(/ pv ([a-h][1-8][a-h][1-8][qrbn]?)/);
 	if (!depthMatch || !pvMatch) return null;

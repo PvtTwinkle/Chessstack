@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+	cardKeys,
 	computePlyDepths,
 	enumerateLines,
+	MAX_LINES,
 	formatNextSession,
 	getMoveNumber,
 	getSection,
@@ -12,6 +14,7 @@ import {
 } from './drill-logic';
 import type { DueCard, RepertoireMove } from './types';
 import { parseVariationPgn } from '$lib/pgn/parseVariations';
+import { STARTING_FEN } from '$lib/fen';
 
 function movesFrom(pgn: string, color: 'WHITE' | 'BLACK' = 'WHITE'): RepertoireMove[] {
 	return parseVariationPgn(pgn, color).edges.map((e, i) => ({
@@ -95,6 +98,27 @@ describe('lead-in moves before a custom start', () => {
 	});
 });
 
+describe('the line cap', () => {
+	it('counts only the lines that are kept, so later due lines still make it', () => {
+		// MAX_LINES + 100 one-move lines from the start (synthetic positions:
+		// only their identity matters). The due card is on the last one.
+		const moves: RepertoireMove[] = Array.from({ length: MAX_LINES + 100 }, (_, i) => ({
+			id: i + 1,
+			fromFen: STARTING_FEN,
+			toFen: `p${i} b - -`,
+			san: `m${i}`,
+			notes: null
+		}));
+		const last = moves[moves.length - 1];
+		const due = cardKeys([card(STARTING_FEN, last.san)]);
+
+		expect(enumerateLines(moves, 'WHITE')).toHaveLength(MAX_LINES);
+		expect(enumerateLines(moves, 'WHITE').some((l) => lineHasCard(l, due))).toBe(false);
+		const kept = enumerateLines(moves, 'WHITE', null, (l) => lineHasCard(l, due));
+		expect(kept.map(sans)).toEqual([last.san]);
+	});
+});
+
 describe('lineHasCard', () => {
 	const moves = movesFrom('1. e4 e5 (1... c5 2. Nf3) 2. Nf3 Nc6');
 	const lines = enumerateLines(moves, 'WHITE');
@@ -127,8 +151,10 @@ describe('scoreLine / sortLinesByWeakness', () => {
 		expect(scoreLine(main, [card(main[1].fromFen, 'e5')])).toBe(0); // opponent move
 	});
 
-	it('gives no extra weight to lapsed cards (documented limitation)', () => {
-		expect(scoreLine(main, [card(bb5.fromFen, 'Bb5', 3)])).toBe(3);
+	it('scores a lapsed card that is not due +1, and one never forgotten 0', () => {
+		expect(scoreLine(main, [card(bb5.fromFen, 'Bb5', 3)])).toBe(3); // due
+		expect(scoreLine(main, [{ ...card(bb5.fromFen, 'Bb5', 3), isDue: false }])).toBe(1);
+		expect(scoreLine(main, [{ ...card(bb5.fromFen, 'Bb5', 0), isDue: false }])).toBe(0);
 	});
 
 	it('puts the most urgent line first and breaks ties with the random source', () => {
