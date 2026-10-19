@@ -87,7 +87,7 @@ test.describe('accessibility (axe)', () => {
 	});
 
 	test('public pages', async ({ page }, testInfo) => {
-		test.skip(!IS_CLOUD, 'the marketing site is cloud edition only');
+		test.skip(true, 'the marketing site is not part of the open-source edition');
 		const paths = [...PUBLIC_PAGES];
 
 		// One opening family page and one blog post, whichever come first.
