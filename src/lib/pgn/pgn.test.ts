@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { parseVariationPgn } from './parseVariations';
+import { countPgnGames, parseVariationPgn } from './parseVariations';
 import { exportRepertoirePgn, type ExportMove } from './exportPgn';
-import { computeMatchDepth, parsePgn } from './index';
+import { computeMatchDepth, formatOpeningMoves, parsePgn } from './index';
 import { fenKey, sanitizeFen, toFullFen, STARTING_FEN } from '$lib/fen';
 
 const RUY_WITH_SIDELINES = `1. e4 e5 2. Nf3 Nc6 (2... d6 {Philidor} 3. d4) 3. Bb5 a6 (3... Nf6 4. O-O) 4. Ba4`;
@@ -33,6 +33,68 @@ describe('parseVariationPgn', () => {
 		const { edges, errors } = parseVariationPgn('1. e4 e5 (1... Qxh7) 2. Nf3', 'WHITE');
 		expect(errors.length).toBeGreaterThan(0);
 		expect(edges.map((e) => e.san)).toEqual(['e4', 'e5', 'Nf3']);
+	});
+
+	it('replays every game of a multi-game file from the start', () => {
+		const pgn = `[Event "Study: Chapter 1"]\n\n1. e4 e5 2. Nf3 *\n\n[Event "Study: Chapter 2"]\n\n1. d4 d5 *`;
+		const { edges, errors } = parseVariationPgn(pgn, 'WHITE');
+		expect(errors).toEqual([]);
+		expect(edges.map((e) => e.san)).toEqual(['e4', 'e5', 'Nf3', 'd4', 'd5']);
+		expect(edges.find((e) => e.san === 'd4')?.fromFen).toBe(STARTING_FEN);
+	});
+
+	it('splits games at a header block even without a result marker', () => {
+		const pgn = `[Event "A"]\n1. e4 e5\n\n[Event "B"]\n1. c4 e5`;
+		const { edges, errors } = parseVariationPgn(pgn, 'WHITE');
+		expect(errors).toEqual([]);
+		expect(edges.map((e) => e.san)).toEqual(['e4', 'e5', 'c4', 'e5']);
+	});
+
+	it('keeps a header whose value contains a closing bracket', () => {
+		const pgn = `[Event "Club [A] champs"]\n[Site "?"]\n\n1. e4 e5 *`;
+		const { edges, errors } = parseVariationPgn(pgn, 'WHITE');
+		expect(errors).toEqual([]);
+		expect(edges.map((e) => e.san)).toEqual(['e4', 'e5']);
+	});
+
+	it('keeps square brackets inside a comment', () => {
+		const { edges } = parseVariationPgn('1. e4 {see [note]} e5', 'WHITE');
+		expect(edges[0].annotation).toBe('see [note]');
+	});
+
+	it("reports a stray ')' and keeps the moves after it", () => {
+		const { edges, errors } = parseVariationPgn('1. e4 e5 ) 2. Nf3 Nc6', 'WHITE');
+		expect(edges.map((e) => e.san)).toEqual(['e4', 'e5', 'Nf3', 'Nc6']);
+		expect(errors).toEqual(["Unmatched ')' ignored"]);
+	});
+});
+
+describe('countPgnGames', () => {
+	it('counts games with moves', () => {
+		expect(countPgnGames('1. e4 e5 *')).toBe(1);
+		expect(countPgnGames('[Event "x"]\n1. e4 *\n[Event "y"]\n1. d4 *')).toBe(2);
+		expect(countPgnGames('[Event "x"]\n1. e4 e5 1-0')).toBe(1);
+	});
+});
+
+describe('parsePgn', () => {
+	it('asks for one game at a time when several are pasted', () => {
+		expect(() => parsePgn('[Event "x"]\n1. e4 e5 *\n\n[Event "y"]\n1. d4 d5 *')).toThrow(
+			/one game at a time/
+		);
+	});
+
+	it('still parses a single game with clock comments', () => {
+		const game = parsePgn('[Event "x"]\n\n1. e4 { [%clk 0:03:00] } 1... e5 { [%clk 0:03:00] } 1-0');
+		expect(game.moves.map((m) => m.san)).toEqual(['e4', 'e5']);
+	});
+});
+
+describe('formatOpeningMoves', () => {
+	it('numbers the first plies', () => {
+		const moves = ['e4', 'e5', 'Nf3', 'Nc6', 'Bb5'].map((san) => ({ san }));
+		expect(formatOpeningMoves(moves)).toBe('1. e4 e5 2. Nf3 Nc6');
+		expect(formatOpeningMoves([])).toBe('(empty game)');
 	});
 });
 

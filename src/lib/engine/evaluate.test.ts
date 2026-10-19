@@ -24,7 +24,8 @@ describe('evaluatePosition', () => {
 		const engine = fakeEngine({ [AFTER_E4]: { uci: 'c7c5', cp: -30 } });
 		expect(await evaluatePosition(engine, AFTER_E4, { depth: 20, timeoutMs: 1000 })).toEqual({
 			evalCp: 30,
-			evalMate: null
+			evalMate: null,
+			depth: 20
 		});
 		expect(engine.analyse).toHaveBeenCalledWith(
 			expect.objectContaining({ fen: AFTER_E4, numMoves: 1, depth: 20, timeoutMs: 1000 })

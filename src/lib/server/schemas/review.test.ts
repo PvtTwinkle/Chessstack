@@ -71,3 +71,17 @@ describe('saveReviewSchema', () => {
 		expect(validate(saveReviewSchema, body)).toEqual(fail(message));
 	});
 });
+
+describe('review size limits', () => {
+	it('caps notes at the shared notes limit', () => {
+		expect(
+			validate(saveReviewSchema, { repertoireId: 1, pgn: '1. e4', notes: 'x'.repeat(501) })
+		).toEqual(fail('notes must be 500 characters or fewer'));
+	});
+
+	it('rejects an oversized SAN', () => {
+		expect(
+			validate(reviewAddMoveSchema, { repertoireId: 1, fromFen: FEN, san: 'x'.repeat(11) })
+		).toEqual(fail('san must be at most 10 characters'));
+	});
+});

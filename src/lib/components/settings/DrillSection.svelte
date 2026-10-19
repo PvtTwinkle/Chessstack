@@ -7,6 +7,13 @@
 	import SettingSlider from './SettingSlider.svelte';
 	import SettingToggle from './SettingToggle.svelte';
 	import { formatMaxInterval, type SettingsState } from './settingsState.svelte';
+	import {
+		FSRS_MAX_INTERVAL_RANGE,
+		FSRS_RELEARNING_RANGE,
+		FSRS_RETENTION_RANGE,
+		PLAYBACK_SPEED_RANGE,
+		TEMPO_SECONDS_RANGE
+	} from '$lib/validation-limits';
 
 	let { settings }: { settings: SettingsState } = $props();
 </script>
@@ -24,11 +31,11 @@
 			id="tempo-slider"
 			label="Time Limit"
 			display="{settings.tempoSeconds.value}s"
-			min="3"
-			max="30"
+			min={TEMPO_SECONDS_RANGE.min}
+			max={TEMPO_SECONDS_RANGE.max}
 			step="1"
-			minLabel="3s"
-			maxLabel="30s"
+			minLabel="{TEMPO_SECONDS_RANGE.min}s"
+			maxLabel="{TEMPO_SECONDS_RANGE.max}s"
 			setting={settings.tempoSeconds}
 		>
 			<p class="setting-hint">Seconds per move. Shorter times make drills more challenging.</p>
@@ -39,9 +46,9 @@
 		id="playback-slider"
 		label="Playback Speed"
 		display="{settings.playbackSpeed.value}ms"
-		min="200"
-		max="2000"
-		step="50"
+		min={PLAYBACK_SPEED_RANGE.min}
+		max={PLAYBACK_SPEED_RANGE.max}
+		step={PLAYBACK_SPEED_RANGE.step}
 		minLabel="Fast"
 		maxLabel="Slow"
 		setting={settings.playbackSpeed}
@@ -53,11 +60,11 @@
 		id="retention-slider"
 		label="Desired Retention"
 		display="{Math.round(settings.fsrsRetention.value * 100)}%"
-		min="0.70"
-		max="0.97"
-		step="0.01"
-		minLabel="70%"
-		maxLabel="97%"
+		min={FSRS_RETENTION_RANGE.min}
+		max={FSRS_RETENTION_RANGE.max}
+		step={FSRS_RETENTION_RANGE.step}
+		minLabel="{Math.round(FSRS_RETENTION_RANGE.min * 100)}%"
+		maxLabel="{Math.round(FSRS_RETENTION_RANGE.max * 100)}%"
 		setting={settings.fsrsRetention}
 	>
 		<p class="setting-hint">
@@ -80,10 +87,10 @@
 		id="max-interval-slider"
 		label="Maximum Interval"
 		display={formatMaxInterval(settings.fsrsMaxInterval.value)}
-		min="30"
-		max="3650"
-		step="5"
-		minLabel="30d"
+		min={FSRS_MAX_INTERVAL_RANGE.min}
+		max={FSRS_MAX_INTERVAL_RANGE.max}
+		step={FSRS_MAX_INTERVAL_RANGE.step}
+		minLabel="{FSRS_MAX_INTERVAL_RANGE.min}d"
 		maxLabel="10yr"
 		setting={settings.fsrsMaxInterval}
 	>
@@ -97,11 +104,11 @@
 		id="relearning-slider"
 		label="Relearning Delay"
 		display="{settings.fsrsRelearningMinutes.value} min"
-		min="1"
-		max="60"
+		min={FSRS_RELEARNING_RANGE.min}
+		max={FSRS_RELEARNING_RANGE.max}
 		step="1"
-		minLabel="1m"
-		maxLabel="60m"
+		minLabel="{FSRS_RELEARNING_RANGE.min}m"
+		maxLabel="{FSRS_RELEARNING_RANGE.max}m"
 		setting={settings.fsrsRelearningMinutes}
 	>
 		<p class="setting-hint">

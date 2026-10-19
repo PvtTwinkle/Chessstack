@@ -7,7 +7,10 @@ import { validatePassword } from '$lib/auth/password';
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const INVALID_EMAIL = 'Please enter a valid email address.';
 
-/** PATCH /api/account/email. Stored trimmed and lowercased. */
+/**
+ * PATCH /api/account/email. Stored trimmed and lowercased. The current password
+ * is required so a stolen session cannot redirect the account's email.
+ */
 export const updateEmailSchema = z.object({
 	email: z
 		.string({ error: 'Email is required.' })
@@ -15,7 +18,8 @@ export const updateEmailSchema = z.object({
 		.toLowerCase()
 		.min(1, { error: 'Email is required.' })
 		.max(254, { error: INVALID_EMAIL })
-		.regex(EMAIL_RE, { error: INVALID_EMAIL })
+		.regex(EMAIL_RE, { error: INVALID_EMAIL }),
+	password: requiredPassword('Enter your current password to change your email.')
 });
 
 /** A password field that must be present and non-empty (strength is not checked). */

@@ -6,6 +6,10 @@
 //
 // If no SR card exists for the given position (possible if the card was deleted,
 // or predates FSRS), a new one is created in a due state so it appears promptly.
+//
+// A card already failed from Review in the last day isn't failed again: a retry
+// after a half-finished action, or reviewing the same game twice, would
+// otherwise grade one mistake as two lapses.
 
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
@@ -14,12 +18,13 @@ import { repertoire, userMove, userRepertoireMove } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { Rating } from '$lib/fsrs';
 import { loadFsrsConfig } from '$lib/server/fsrs-config';
-import { applyGrade } from '$lib/server/grading';
+import { applyGrade, REVIEW_FAIL_REPEAT_WINDOW_MS } from '$lib/server/grading';
 import { fenKey } from '$lib/fen';
 import { isRepertoireLocked } from '$lib/stripe/tiers.server';
 import { requireAuth } from '$lib/server/api-helpers';
 import { parseBody } from '$lib/server/validation';
 import { failCardSchema } from '$lib/server/schemas/review';
+import { newCard } from '$lib/server/repertoire-moves';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
 	const user = requireAuth(locals);
@@ -61,15 +66,22 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 
 	if (card) {
 		// Card exists — apply Again rating via FSRS.
-		const updated = await applyGrade(
+		const result = await applyGrade(
 			user.id,
-			card,
+			card.id,
 			Rating.Again,
 			'REVIEW_DEVIATION',
 			fsrsConfig,
-			now
+			{
+				now,
+				skipIfRecent: { source: 'REVIEW_DEVIATION', withinMs: REVIEW_FAIL_REPEAT_WINDOW_MS }
+			}
 		);
-		return json({ updated: true, due: updated.due });
+		if (result.status === 'not_found') throw error(404, 'Card not found');
+		if (result.status === 'skipped') {
+			return json({ updated: false, due: result.due, reason: 'Already failed from Review today' });
+		}
+		return json({ updated: true, due: result.updated.due });
 	}
 
 	// No SR card exists — find the corresponding userMove to get the SAN,
@@ -91,22 +103,13 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		return json({ updated: false, reason: 'No move found for this position' });
 	}
 
-	await db.insert(userRepertoireMove).values({
-		userId: user.id,
-		repertoireId,
-		fromFen,
-		san: moveRow.san,
-		due: now,
-		state: 0, // New — will enter the learning phase on first drill
-		reps: 0,
-		lapses: 0,
-		stability: null,
-		difficulty: null,
-		elapsedDays: null,
-		scheduledDays: null,
-		lastReview: null,
-		learningSteps: 0
-	});
+	// A second request racing this one may have created it already; one card is enough.
+	await db
+		.insert(userRepertoireMove)
+		.values({ ...newCard(user.id, repertoireId, fromFen, moveRow.san), due: now })
+		.onConflictDoNothing({
+			target: [userRepertoireMove.repertoireId, userRepertoireMove.fromFen]
+		});
 
 	return json({ updated: true, due: now });
 };

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
 	import { base } from '$app/paths';
 	import Seo from '$lib/components/Seo.svelte';
 
@@ -9,13 +9,13 @@
 		500: 'Something went wrong'
 	};
 
-	let status = $derived($page.status);
+	let status = $derived(page.status);
 	let title = $derived(titles[status] ?? 'Something went wrong');
-	let message = $derived($page.error?.message ?? 'An unexpected error occurred.');
+	let message = $derived(page.error?.message ?? 'An unexpected error occurred.');
 	// Set for unexpected server errors (see handleError in hooks.server.ts).
-	let requestId = $derived($page.error?.requestId);
+	let requestId = $derived(page.error?.requestId);
 	// Logged-out visitors (e.g. from a broken link in search) land on the home page.
-	let backLabel = $derived($page.data.user ? 'Back to dashboard' : 'Back to home');
+	let backLabel = $derived(page.data.user ? 'Back to dashboard' : 'Back to home');
 </script>
 
 <!-- The HTTP status is already 404/500; noindex is a second signal for crawlers. -->

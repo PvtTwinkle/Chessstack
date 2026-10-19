@@ -8,6 +8,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '$lib/db';
 import { subscription, user } from '$lib/db/schema';
 import { resetDb, createUser, createSubscription } from '$lib/test/db-helpers';
+import { effectiveTier } from './tiers';
 
 const stripeApi = vi.hoisted(() => ({
 	subscriptions: { retrieve: vi.fn(), update: vi.fn() },
@@ -22,6 +23,7 @@ vi.mock('$lib/stripe/client', async () => {
 		STRIPE_PRICE_ID_ANNUAL: 'price_annual',
 		STRIPE_WEBHOOK_SECRET: 'whsec_test',
 		STRIPE_REFERRAL_COUPON_ID: 'coupon_referral',
+		isBillingEnabled: () => true,
 		getStripe: () => ({ ...stripeApi, webhooks: real.webhooks })
 	};
 });
@@ -43,6 +45,12 @@ async function sendWebhook(type: string, object: unknown, secret = 'whsec_test')
 		body: payload
 	});
 	return webhookPOST({ request } as never);
+}
+
+// The webhook reads the subscription's current state back from Stripe.
+async function sendSubscriptionUpdated(sub: ReturnType<typeof stripeSubscription>) {
+	stripeApi.subscriptions.retrieve.mockResolvedValue(sub);
+	return sendWebhook('customer.subscription.updated', sub);
 }
 
 async function startCheckout(userId: number, plan: 'monthly' | 'annual') {
@@ -133,6 +141,39 @@ describe('activateReferralDiscount', () => {
 		expect((await getSub(referrer)).referralDiscountUsedAt).toBeInstanceOf(Date);
 	});
 
+	it('unflags the referrer when Stripe fails, so a later referral retries', async () => {
+		const referrer = await createUser();
+		await createSubscription(referrer, {
+			tier: 'paid',
+			stripeSubscriptionId: 'sub_referrer',
+			stripePriceId: 'price_annual'
+		});
+		const a = await createUser({ referredByUserId: referrer });
+		const b = await createUser({ referredByUserId: referrer });
+
+		stripeApi.subscriptions.update.mockRejectedValueOnce(new Error('Stripe down'));
+		await expect(activateReferralDiscount(a)).rejects.toThrow('Stripe down');
+		expect((await getSub(referrer)).referralDiscountActive).toBe(false);
+
+		await activateReferralDiscount(b);
+		expect(stripeApi.subscriptions.update).toHaveBeenCalledTimes(2);
+		expect((await getSub(referrer)).referralDiscountUsedAt).toBeInstanceOf(Date);
+	});
+
+	it('flags the referrer once when two referees verify at the same time', async () => {
+		const referrer = await createUser();
+		await createSubscription(referrer, {
+			tier: 'paid',
+			stripeSubscriptionId: 'sub_referrer',
+			stripePriceId: 'price_annual'
+		});
+		const a = await createUser({ referredByUserId: referrer });
+		const b = await createUser({ referredByUserId: referrer });
+
+		await Promise.all([activateReferralDiscount(a), activateReferralDiscount(b)]);
+		expect(stripeApi.subscriptions.update).toHaveBeenCalledTimes(1);
+	});
+
 	it('does not touch a monthly referrer subscription (discount waits for annual checkout)', async () => {
 		const referrer = await createUser();
 		await createSubscription(referrer, {
@@ -181,10 +222,36 @@ describe('POST /api/billing/checkout', () => {
 		expect(params.metadata).toBeUndefined();
 	});
 
-	it('refuses a second subscription for an active paid user', async () => {
+	it.each(['active', 'past_due'] as const)(
+		'refuses a second subscription when one is %s',
+		async (status) => {
+			const u = await createUser();
+			await createSubscription(u, { tier: 'paid', status, stripeSubscriptionId: 'sub_1' });
+			await expect(startCheckout(u, 'annual')).rejects.toMatchObject({ status: 400 });
+		}
+	);
+
+	it('lets a gifted user without a subscription check out', async () => {
 		const u = await createUser();
-		await createSubscription(u, { tier: 'paid', status: 'active' });
-		await expect(startCheckout(u, 'annual')).rejects.toMatchObject({ status: 400 });
+		await createSubscription(u, { giftExpiry: new Date(Date.now() + 24 * 60 * 60 * 1000) });
+		const params = await startCheckout(u, 'monthly');
+		expect(params.line_items).toEqual([{ price: 'price_monthly', quantity: 1 }]);
+	});
+
+	it('sends an idempotency key so a double click reuses the session', async () => {
+		const u = await createUser();
+		await startCheckout(u, 'annual');
+		const options = stripeApi.checkout.sessions.create.mock.lastCall![1];
+		expect(options.idempotencyKey).toMatch(/^checkout-\d+-annual-\d+$/);
+		expect(options.idempotencyKey.startsWith(`checkout-${u}-`)).toBe(true);
+	});
+
+	it('answers 502 when Stripe fails', async () => {
+		const u = await createUser();
+		stripeApi.checkout.sessions.create.mockRejectedValue(
+			new Stripe.errors.StripeConnectionError({ message: 'down' })
+		);
+		await expect(startCheckout(u, 'annual')).rejects.toMatchObject({ status: 502 });
 	});
 
 	it('rejects an unknown plan', async () => {
@@ -230,6 +297,38 @@ describe('POST /api/billing/webhook', () => {
 		expect(row.stripeCustomerId).toBe('cus_1');
 	});
 
+	it('a late checkout.session.completed for a canceled subscription leaves the user free', async () => {
+		const u = await createUser();
+		await createSubscription(u, { status: 'canceled', stripeSubscriptionId: 'sub_1' });
+		stripeApi.subscriptions.retrieve.mockResolvedValue(stripeSubscription('sub_1', 'canceled'));
+		await sendWebhook('checkout.session.completed', {
+			id: 'cs_test',
+			object: 'checkout.session',
+			client_reference_id: String(u),
+			customer: 'cus_1',
+			subscription: 'sub_1',
+			metadata: {}
+		});
+		expect(await getSub(u)).toMatchObject({ tier: 'free', status: 'canceled' });
+	});
+
+	it('checkout.session.completed for a deleted user is skipped, not retried', async () => {
+		const u = await createUser();
+		await db.delete(user).where(eq(user.id, u));
+		const res = await completeCheckout(u);
+		expect(res.status).toBe(200);
+		expect(await getSub(u)).toBeUndefined();
+	});
+
+	it('customer.subscription.updated writes the state Stripe has now, not the payload', async () => {
+		const u = await createUser();
+		await createSubscription(u, { tier: 'paid', stripeSubscriptionId: 'sub_1' });
+		// An old "active" update delivered after the subscription was canceled.
+		stripeApi.subscriptions.retrieve.mockResolvedValue(stripeSubscription('sub_1', 'canceled'));
+		await sendWebhook('customer.subscription.updated', stripeSubscription('sub_1', 'active'));
+		expect(await getSub(u)).toMatchObject({ tier: 'free', status: 'canceled' });
+	});
+
 	it('checkout.session.completed marks the referral coupon used when it was applied', async () => {
 		const u = await createUser();
 		await createSubscription(u, { referralDiscountActive: true });
@@ -246,7 +345,7 @@ describe('POST /api/billing/webhook', () => {
 	])('customer.subscription.updated %s -> %s/%s', async (stripeStatus, tier, status) => {
 		const u = await createUser();
 		await createSubscription(u, { tier: 'paid', stripeSubscriptionId: 'sub_1' });
-		await sendWebhook('customer.subscription.updated', stripeSubscription('sub_1', stripeStatus));
+		await sendSubscriptionUpdated(stripeSubscription('sub_1', stripeStatus));
 		expect(await getSub(u)).toMatchObject({ tier, status });
 	});
 
@@ -257,11 +356,26 @@ describe('POST /api/billing/webhook', () => {
 			stripeSubscriptionId: 'sub_1',
 			giftExpiry: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
 		});
-		await sendWebhook('customer.subscription.updated', stripeSubscription('sub_1', 'unpaid'));
-		expect(await getSub(u)).toMatchObject({ tier: 'paid', status: 'canceled' });
+		await sendSubscriptionUpdated(stripeSubscription('sub_1', 'unpaid'));
+		expect(await getSub(u)).toMatchObject({ tier: 'free', status: 'canceled' });
+		expect(effectiveTier(await getSub(u))).toBe('paid');
 
 		await sendWebhook('customer.subscription.deleted', stripeSubscription('sub_1', 'canceled'));
-		expect(await getSub(u)).toMatchObject({ tier: 'paid', status: 'canceled' });
+		expect(await getSub(u)).toMatchObject({ tier: 'free', status: 'canceled' });
+		expect(effectiveTier(await getSub(u))).toBe('paid');
+	});
+
+	it('a gift that expires after Stripe cancels leaves the user on free', async () => {
+		const u = await createUser();
+		await createSubscription(u, {
+			tier: 'paid',
+			stripeSubscriptionId: 'sub_1',
+			giftExpiry: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+		});
+		await sendWebhook('customer.subscription.deleted', stripeSubscription('sub_1', 'canceled'));
+
+		const afterExpiry = new Date(Date.now() + 31 * 24 * 60 * 60 * 1000);
+		expect(effectiveTier(await getSub(u), afterExpiry)).toBe('free');
 	});
 
 	it('customer.subscription.deleted downgrades a user without a gift', async () => {

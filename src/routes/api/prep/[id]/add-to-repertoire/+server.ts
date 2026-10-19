@@ -20,85 +20,73 @@ import {
 	userRepertoireMove
 } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { fenKey } from '$lib/fen';
+import { fenKey, STARTING_FEN } from '$lib/fen';
+import { connectingEdges, type Edge } from '$lib/prep/connect';
+import { walkableEdges } from '$lib/server/prep-connect';
 import { parseBody } from '$lib/server/validation';
 import { addPrepToRepertoireSchema } from '$lib/server/schemas/prep';
+import { isRepertoireLocked } from '$lib/stripe/tiers.server';
+import {
+	isUserTurn,
+	lockRepertoire,
+	newCard,
+	playMove,
+	replaceMove,
+	type Transaction
+} from '$lib/server/repertoire-moves';
+import { requireAuth, parseIntParam } from '$lib/server/api-helpers';
 
-export const POST: RequestHandler = async ({ locals, params, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+type PrepMoveRow = typeof prepMoves.$inferSelect;
+type OpponentMoveRow = typeof opponentMoves.$inferSelect;
 
-	const prepId = parseInt(params.id);
-	if (isNaN(prepId)) throw error(400, 'Invalid prep ID');
+interface ValidatedMove {
+	fromFen: string;
+	toFen: string;
+	san: string;
+	isUserTurn: boolean;
+}
 
-	const { mode, repertoireId, color, replacements } = await parseBody(
-		request,
-		addPrepToRepertoireSchema
-	);
+interface Conflict {
+	fromFen: string;
+	existingMove: string;
+	prepMove: string;
+}
 
-	const userId = locals.user.id;
+interface Plan {
+	validatedMoves: ValidatedMove[];
+	connectingMoves: ValidatedMove[];
+	conflicts: Conflict[];
+	duplicates: number;
+}
 
-	// Verify prep ownership
-	const [prep] = await db
-		.select()
-		.from(opponentPreps)
-		.where(and(eq(opponentPreps.id, prepId), eq(opponentPreps.userId, userId)));
-	if (!prep) throw error(404, 'Prep not found');
-
-	// Verify repertoire ownership
-	const [rep] = await db
-		.select()
-		.from(repertoire)
-		.where(and(eq(repertoire.id, repertoireId), eq(repertoire.userId, userId)));
-	if (!rep) throw error(404, 'Repertoire not found');
-
-	const repColor = rep.color as 'WHITE' | 'BLACK';
-
-	// Load prep moves for this color
-	const userPrepMoves = await db
-		.select()
-		.from(prepMoves)
-		.where(and(eq(prepMoves.prepId, prepId), eq(prepMoves.color, color)));
-
-	if (userPrepMoves.length === 0) {
-		throw error(400, `No prep moves for ${color}.`);
-	}
-
-	// Load existing repertoire moves for conflict detection
-	const existingMoves = await db
-		.select({ fromFen: userMove.fromFen, san: userMove.san })
-		.from(userMove)
-		.where(and(eq(userMove.userId, userId), eq(userMove.repertoireId, repertoireId)));
-
-	// Build lookup: fenKey → existing SAN
+/**
+ * Sorts the prep moves into new moves, duplicates and conflicts against the
+ * repertoire's existing moves, and finds the opponent moves that connect the
+ * prep lines to each other.
+ */
+function planMoves(
+	userPrepMoves: PrepMoveRow[],
+	oppMoves: OpponentMoveRow[],
+	existingMoves: Edge[],
+	repColor: 'WHITE' | 'BLACK',
+	walkable: Edge[]
+): Plan {
+	// fenKey → existing SAN. On the user's turn a position has one move, so the
+	// first one wins.
 	const existingByFen = new Map<string, string>();
+	const existingKeys = new Set<string>();
 	for (const m of existingMoves) {
 		const key = fenKey(m.fromFen);
-		// For user-turn positions, only one move exists, so first one wins
-		if (!existingByFen.has(key)) {
-			existingByFen.set(key, m.san);
-		}
-	}
-
-	// Also load opponent moves to include as connecting moves
-	const oppMoves = await db.select().from(opponentMoves).where(eq(opponentMoves.prepId, prepId));
-
-	// Validate all prep moves and detect conflicts
-	interface ValidatedMove {
-		fromFen: string;
-		toFen: string;
-		san: string;
-		isUserTurn: boolean;
-	}
-
-	interface Conflict {
-		fromFen: string;
-		existingMove: string;
-		prepMove: string;
+		if (!existingByFen.has(key)) existingByFen.set(key, m.san);
+		existingKeys.add(`${key}|${m.san}`);
 	}
 
 	const validatedMoves: ValidatedMove[] = [];
 	const conflicts: Conflict[] = [];
 	let duplicates = 0;
+	// The prep itself can't save a move twice, or two of the user's moves at one position.
+	const plannedKeys = new Set<string>();
+	const plannedUserFens = new Set<string>();
 
 	for (const pm of userPrepMoves) {
 		const from = fenKey(pm.fromFen);
@@ -117,51 +105,39 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 			continue;
 		}
 
+		if (existingKeys.has(`${from}|${pm.san}`)) {
+			duplicates++;
+			continue;
+		}
 		if (isUserTurn) {
 			const existing = existingByFen.get(from);
 			if (existing) {
-				if (existing === pm.san) {
-					duplicates++;
-					continue; // Already exists identically
-				}
-				// Conflict: different move at same position
 				conflicts.push({ fromFen: from, existingMove: existing, prepMove: pm.san });
-				continue;
-			}
-		} else {
-			// Opponent turn — check for exact duplicate
-			const isDup = existingMoves.some((m) => fenKey(m.fromFen) === from && m.san === pm.san);
-			if (isDup) {
-				duplicates++;
 				continue;
 			}
 		}
 
+		if (plannedKeys.has(`${from}|${pm.san}`)) continue;
+		if (isUserTurn && plannedUserFens.has(from)) continue;
+		plannedKeys.add(`${from}|${pm.san}`);
+		if (isUserTurn) plannedUserFens.add(from);
+
 		validatedMoves.push({ fromFen: from, toFen, san: pm.san, isUserTurn });
 	}
 
-	// Also prepare connecting opponent moves
 	const connectingMoves: ValidatedMove[] = [];
 	const prepFromFens = new Set(userPrepMoves.map((m) => fenKey(m.fromFen)));
+	const validatedKeys = new Set(validatedMoves.map((m) => `${m.fromFen}|${m.san}`));
 	const expectedOppColor = repColor === 'WHITE' ? 'b' : 'w';
 
 	for (const om of oppMoves) {
-		const resultKey = fenKey(om.resultingFen);
-		if (!prepFromFens.has(resultKey)) continue;
-
+		if (!prepFromFens.has(fenKey(om.resultingFen))) continue;
 		if (om.opponentColor !== expectedOppColor) continue;
-		const fenActiveSide = om.positionFen.split(' ')[1];
-		if (om.opponentColor !== fenActiveSide) continue;
+		if (om.opponentColor !== om.positionFen.split(' ')[1]) continue;
 
 		const from = fenKey(om.positionFen);
-
-		// Skip if already in repertoire
-		const isDup = existingMoves.some((m) => fenKey(m.fromFen) === from && m.san === om.moveSan);
-		if (isDup) continue;
-
-		// Skip if already in validated moves
-		const alreadyAdded = validatedMoves.some((m) => m.fromFen === from && m.san === om.moveSan);
-		if (alreadyAdded) continue;
+		const key = `${from}|${om.moveSan}`;
+		if (existingKeys.has(key) || validatedKeys.has(key)) continue;
 
 		try {
 			const chess = new Chess(from);
@@ -178,142 +154,173 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 		}
 	}
 
+	// Prep moves played after stepping through a game or repertoire move have
+	// no saved move leading to them; add the steps so they can be reached.
+	const linking = connectingEdges(
+		STARTING_FEN,
+		[...validatedMoves, ...connectingMoves],
+		existingMoves,
+		walkable,
+		(fen) => isUserTurn(repColor, fen)
+	);
+	for (const m of linking) {
+		const played = playMove(m.fromFen, m.san);
+		if (!played) continue;
+		connectingMoves.push({ ...played, isUserTurn: isUserTurn(repColor, played.fromFen) });
+	}
+
+	return { validatedMoves, connectingMoves, conflicts, duplicates };
+}
+
+function loadExistingMoves(tx: Transaction | typeof db, userId: number, repertoireId: number) {
+	return tx
+		.select({ fromFen: userMove.fromFen, toFen: userMove.toFen, san: userMove.san })
+		.from(userMove)
+		.where(and(eq(userMove.userId, userId), eq(userMove.repertoireId, repertoireId)));
+}
+
+export const POST: RequestHandler = async ({ locals, params, request }) => {
+	const user = requireAuth(locals);
+
+	const prepId = parseIntParam(params.id, 'prep ID');
+
+	const { mode, repertoireId, color, replacements } = await parseBody(
+		request,
+		addPrepToRepertoireSchema
+	);
+
+	const userId = user.id;
+
+	// Verify prep ownership
+	const [prep] = await db
+		.select()
+		.from(opponentPreps)
+		.where(and(eq(opponentPreps.id, prepId), eq(opponentPreps.userId, userId)));
+	if (!prep) throw error(404, 'Prep not found');
+
+	// Verify repertoire ownership
+	const [rep] = await db
+		.select()
+		.from(repertoire)
+		.where(and(eq(repertoire.id, repertoireId), eq(repertoire.userId, userId)));
+	if (!rep) throw error(404, 'Repertoire not found');
+
+	if (await isRepertoireLocked(userId, repertoireId, user.tier ?? 'free')) {
+		throw error(403, 'This repertoire is read-only. Upgrade your plan to edit it.');
+	}
+
+	const repColor = rep.color as 'WHITE' | 'BLACK';
+	// The prep's moves are one side's; added to the other side's repertoire
+	// they would be saved as the wrong player's moves.
+	if (repColor !== (color === 'white' ? 'WHITE' : 'BLACK')) {
+		throw error(400, `This repertoire is for ${repColor === 'WHITE' ? 'White' : 'Black'}.`);
+	}
+
+	// Load prep moves for this color
+	const userPrepMoves = await db
+		.select()
+		.from(prepMoves)
+		.where(and(eq(prepMoves.prepId, prepId), eq(prepMoves.color, color)));
+
+	if (userPrepMoves.length === 0) {
+		throw error(400, `No prep moves for ${color}.`);
+	}
+
+	// Opponent moves are included where they connect prep lines.
+	const oppMoves = await db.select().from(opponentMoves).where(eq(opponentMoves.prepId, prepId));
+	const walkable = await walkableEdges(userId, repColor, oppMoves);
+
 	if (mode === 'preview') {
+		const plan = planMoves(
+			userPrepMoves,
+			oppMoves,
+			await loadExistingMoves(db, userId, repertoireId),
+			repColor,
+			walkable
+		);
 		return json({
-			newMoves: validatedMoves.length,
-			connectingMoves: connectingMoves.length,
-			duplicates,
-			conflicts
+			newMoves: plan.validatedMoves.length,
+			connectingMoves: plan.connectingMoves.length,
+			duplicates: plan.duplicates,
+			conflicts: plan.conflicts
 		});
 	}
 
-	// Execute mode — insert moves with conflict resolutions
 	const replacementSet = new Set(replacements.map((r) => fenKey(r.fromFen) + '|' + r.san));
-
 	const now = new Date();
-	let inserted = 0;
-	let replaced = 0;
-	let skipped = 0;
 
-	await db.transaction(async (tx) => {
-		// Insert new prep moves
-		for (const vm of validatedMoves) {
-			await tx.insert(userMove).values({
-				userId,
-				repertoireId,
-				fromFen: vm.fromFen,
-				toFen: vm.toFen,
-				san: vm.san,
-				source: 'PREP_EXPORT',
-				notes: null,
-				createdAt: now
-			});
+	const target = { userId, repertoireId, color: repColor };
 
-			if (vm.isUserTurn) {
-				await tx.insert(userRepertoireMove).values({
-					userId,
-					repertoireId,
-					fromFen: vm.fromFen,
-					san: vm.san,
-					due: now,
-					state: 0,
-					reps: 0,
-					lapses: 0,
-					stability: null,
-					difficulty: null,
-					elapsedDays: null,
-					scheduledDays: null,
-					lastReview: null,
-					learningSteps: 0
-				});
-			}
-			inserted++;
+	const result = await db.transaction(async (tx) => {
+		await lockRepertoire(tx, repertoireId);
+
+		// Replace first, then plan the inserts against what is left: removing the
+		// old line can remove moves the prep would otherwise have counted as
+		// duplicates or conflicts.
+		const before = planMoves(
+			userPrepMoves,
+			oppMoves,
+			await loadExistingMoves(tx, userId, repertoireId),
+			repColor,
+			walkable
+		);
+
+		let replaced = 0;
+		for (const conflict of before.conflicts) {
+			if (!replacementSet.has(conflict.fromFen + '|' + conflict.prepMove)) continue;
+
+			const [existingRow] = await tx
+				.select()
+				.from(userMove)
+				.where(
+					and(
+						eq(userMove.repertoireId, repertoireId),
+						eq(userMove.fromFen, conflict.fromFen),
+						eq(userMove.san, conflict.existingMove)
+					)
+				);
+			// An earlier replacement may already have removed it with its line.
+			if (!existingRow) continue;
+
+			const played = playMove(conflict.fromFen, conflict.prepMove);
+			if (!played) continue;
+
+			await replaceMove(tx, target, existingRow, { ...played, source: 'PREP_EXPORT' });
+			replaced++;
 		}
 
-		// Handle conflicts — apply user's chosen replacements
-		for (const conflict of conflicts) {
-			const key = fenKey(conflict.fromFen) + '|' + conflict.prepMove;
-			if (replacementSet.has(key)) {
-				// User chose the prep move — delete existing move's subtree and replace
-				const [existingRow] = await tx
-					.select()
-					.from(userMove)
-					.where(
-						and(
-							eq(userMove.repertoireId, repertoireId),
-							eq(userMove.fromFen, conflict.fromFen),
-							eq(userMove.san, conflict.existingMove)
-						)
-					);
+		const plan = planMoves(
+			userPrepMoves,
+			oppMoves,
+			await loadExistingMoves(tx, userId, repertoireId),
+			repColor,
+			walkable
+		);
 
-				if (existingRow) {
-					// Delete old SR card
-					await tx
-						.delete(userRepertoireMove)
-						.where(
-							and(
-								eq(userRepertoireMove.userId, userId),
-								eq(userRepertoireMove.repertoireId, repertoireId),
-								eq(userRepertoireMove.fromFen, conflict.fromFen),
-								eq(userRepertoireMove.san, conflict.existingMove)
-							)
-						);
-					// Update the move in place
-					await tx
-						.update(userMove)
-						.set({
-							san: conflict.prepMove,
-							toFen: (() => {
-								try {
-									const chess = new Chess(conflict.fromFen);
-									const r = chess.move(conflict.prepMove);
-									return r ? fenKey(chess.fen()) : existingRow.toFen;
-								} catch {
-									return existingRow.toFen;
-								}
-							})(),
-							source: 'PREP_EXPORT',
-							createdAt: now
-						})
-						.where(eq(userMove.id, existingRow.id));
-					// Create new SR card
-					await tx.insert(userRepertoireMove).values({
-						userId,
-						repertoireId,
-						fromFen: conflict.fromFen,
-						san: conflict.prepMove,
-						due: now,
-						state: 0,
-						reps: 0,
-						lapses: 0,
-						stability: null,
-						difficulty: null,
-						elapsedDays: null,
-						scheduledDays: null,
-						lastReview: null,
-						learningSteps: 0
-					});
-					replaced++;
-				}
-			} else {
-				skipped++; // Keep existing move
-			}
-		}
+		const moveRows = [...plan.validatedMoves, ...plan.connectingMoves].map((m) => ({
+			userId,
+			repertoireId,
+			fromFen: m.fromFen,
+			toFen: m.toFen,
+			san: m.san,
+			source: 'PREP_EXPORT',
+			notes: null,
+			createdAt: now
+		}));
+		if (moveRows.length > 0) await tx.insert(userMove).values(moveRows);
 
-		// Insert connecting opponent moves
-		for (const cm of connectingMoves) {
-			await tx.insert(userMove).values({
-				userId,
-				repertoireId,
-				fromFen: cm.fromFen,
-				toFen: cm.toFen,
-				san: cm.san,
-				source: 'PREP_EXPORT',
-				notes: null,
-				createdAt: now
-			});
-		}
+		const cardRows = [...plan.validatedMoves, ...plan.connectingMoves]
+			.filter((m) => m.isUserTurn)
+			.map((m) => newCard(userId, repertoireId, m.fromFen, m.san));
+		if (cardRows.length > 0) await tx.insert(userRepertoireMove).values(cardRows);
+
+		return {
+			inserted: plan.validatedMoves.length,
+			replaced,
+			skipped: plan.conflicts.length,
+			connecting: plan.connectingMoves.length
+		};
 	});
 
-	return json({ inserted, replaced, skipped, connecting: connectingMoves.length });
+	return json(result);
 };

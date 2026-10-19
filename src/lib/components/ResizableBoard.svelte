@@ -48,6 +48,9 @@
 	 */
 	let localWidth = $state<number | null>(null);
 
+	/** Rendered width, so the splitter always reports a value, even in auto mode. */
+	let renderedWidth = $state(0);
+
 	// If the parent passes an updated boardSize (e.g. after navigation), clear
 	// the local override so we respect the prop. Skip during an active drag so
 	// an async data reload can't snap the board back mid-resize.
@@ -63,6 +66,17 @@
 		if (w <= 0) return 'calc(100vh - 100px)';
 		return `min(${w}px, calc(100vh - 100px))`;
 	});
+
+	// A focusable separator must carry aria-valuenow, so report the rendered
+	// width when no size is set, kept within the advertised range.
+	let ariaValueNow = $derived(
+		Math.round(
+			Math.max(
+				MIN_SIZE,
+				Math.min(MAX_SIZE, localWidth ?? (boardSize > 0 ? boardSize : renderedWidth))
+			)
+		)
+	);
 
 	// ---------------------------------------------------------------------------
 	// Drag handlers
@@ -91,6 +105,32 @@
 		localWidth = newWidth;
 	}
 
+	// Arrow keys resize in steps. The size is saved once the keys stop, not on
+	// every press.
+	const KEY_STEP = 20;
+	const KEY_SAVE_DELAY_MS = 600;
+	let keySaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function onKeyDown(e: KeyboardEvent) {
+		const step =
+			e.key === 'ArrowRight' || e.key === 'ArrowUp'
+				? KEY_STEP
+				: e.key === 'ArrowLeft' || e.key === 'ArrowDown'
+					? -KEY_STEP
+					: 0;
+		if (step === 0) return;
+		e.preventDefault();
+		const current = localWidth ?? containerEl.getBoundingClientRect().width;
+		const maxForViewport = Math.min(MAX_SIZE, window.innerHeight - 100);
+		localWidth = Math.max(MIN_SIZE, Math.min(maxForViewport, Math.round(current + step)));
+		clearTimeout(keySaveTimer);
+		keySaveTimer = setTimeout(() => {
+			if (localWidth !== null) onResize?.(localWidth);
+		}, KEY_SAVE_DELAY_MS);
+	}
+
+	$effect(() => () => clearTimeout(keySaveTimer));
+
 	function onPointerUp() {
 		if (!dragging) return;
 		dragging = false;
@@ -102,15 +142,29 @@
 	}
 </script>
 
-<div bind:this={containerEl} class="resizable-board" class:dragging style:width={effectiveWidth}>
+<div
+	bind:this={containerEl}
+	bind:clientWidth={renderedWidth}
+	class="resizable-board"
+	class:dragging
+	style:width={effectiveWidth}
+>
 	{@render children()}
 
-	<!-- Drag handle — hidden on mobile where the board is always full-width -->
+	<!-- Drag handle — hidden on mobile where the board is always full-width.
+	     A focusable splitter between the board and what's beside it, so the
+	     arrow keys resize it too. -->
+	<!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 	<div
 		class="resize-handle"
 		role="separator"
-		aria-orientation="horizontal"
+		tabindex="0"
+		aria-orientation="vertical"
 		aria-label="Resize chessboard"
+		aria-valuemin={MIN_SIZE}
+		aria-valuemax={MAX_SIZE}
+		aria-valuenow={ariaValueNow}
+		onkeydown={onKeyDown}
 		onpointerdown={onPointerDown}
 		onpointermove={onPointerMove}
 		onpointerup={onPointerUp}
@@ -166,8 +220,14 @@
 	}
 
 	.resizable-board:hover .resize-handle,
-	.resize-handle:hover {
+	.resize-handle:hover,
+	.resize-handle:focus-visible {
 		opacity: 1;
+	}
+
+	.resize-handle:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
 	}
 
 	.resize-handle:hover::after,

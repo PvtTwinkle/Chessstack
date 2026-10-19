@@ -1,9 +1,14 @@
 // Request bodies for /api/repertoires routes.
 
 import { z } from 'zod';
+import { NAME_MAX_LENGTH } from '$lib/validation-limits';
 import { fen, id } from './common';
 
-const name = z.string().trim().min(1, { error: 'name must be a non-empty string' });
+const name = z
+	.string()
+	.trim()
+	.min(1, { error: 'name must be a non-empty string' })
+	.max(NAME_MAX_LENGTH, { error: `name must be ${NAME_MAX_LENGTH} characters or fewer` });
 
 /** POST /api/repertoires */
 export const createRepertoireSchema = z.object({

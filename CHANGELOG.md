@@ -11,6 +11,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.6.0] -- 2026-10-19
+
+### Added
+
+- Opening Report (Report in the menu): see how your repertoire holds up in your imported and reviewed games. It shows your score in each opening line, and the positions where games leave book, split into moves you played instead of your repertoire move, opponent moves you have no reply to, and places your prep runs out. Each has links to drill it, open it in Build and see the games. Filter by period, speed and rated games
+- The Opening Report also shows how well you remember the repertoire (the share of drill and review grades you got right, week by week, and the moves you forget most), and a "Fix this next" card with the one exit or forgotten move that has cost you the most, with a button to drill it or prepare a reply
+- Importing games from Lichess or Chess.com keeps fetching until it has caught up (up to 300 games per click, with a count while it runs), instead of stopping at 50, so the first import brings in the last three months for the Opening Report
+- The dashboard has an Opening Report tile with your "Fix this next" pick and how much of the repertoire you remember, and the tutorial ends with a step on the report
+- `NOINDEX=true` keeps a copy of the site out of search engines, and `PUBLIC_SENTRY_ENVIRONMENT` names the environment on Sentry events, so a staging copy can run alongside the live site
+- Promoting a pawn opens a picker for the queen, knight, rook or bishop instead of always making a queen, in Build, Train, Prep and Puzzles, so underpromotion puzzles can be solved
+- The board, the evaluation bar and the board-resize handle can be used with a screen reader: the board announces each move and the evaluation bar reads out the score; the resize handle works with the arrow keys
+- Puzzles: any checkmate counts as solving a puzzle, as on Lichess, not just the listed one
+- Prep: deleting a prep move also deletes the moves only it leads to, and asks first when there are any
+
+### Changed
+
+- The Docker image no longer carries the build tools (Vite, TypeScript and others) that npm kept as peer dependencies, so its `node_modules` is about 115 MB smaller
+- On first boot the app starts answering straight away and loads the reference datasets (Masters, Players, Stars and Puzzles) in the background, instead of being unreachable for several minutes. A failed load is now reported as failed and retried on the next start, and two instances starting together no longer both migrate or load
+- API requests without a valid session get a `401` JSON answer (and non-admins a `403`) instead of a redirect to the sign-in page, and every API endpoint answers bad input with a `400`, an oversized body with a `413` and too many requests with a `429` and `Retry-After`. Requests are limited to 2 MB (`BODY_SIZE_LIMIT`), and new rate limits cover the Players, Stars, computer-move, PGN preview and opponent-prep endpoints (see the README)
+- `docker-compose.production.yml` reads `POSTGRES_PASSWORD` and `DEFAULT_PASSWORD` from `.env` and won't start without them, so no install runs on the published example password. If you use it, put your current database password (`chessstack_secret` unless you changed it) in `.env` as `POSTGRES_PASSWORD`. It also passes `ADDRESS_HEADER` and `XFF_DEPTH` through for reverse proxies
+- The backup command in the README leaves out the reference datasets' rows (about 7 GB), which the app reloads by itself after a restore
+- `SEED_DATA_DIR` may be a relative path, and a directory that doesn't exist is reported instead of silently skipped
+- The self-hosted edition's support links point to the instance's administrator rather than chessstack.app's support address
+- "Drill all" and subtree drills only grade the cards that are actually due. Cards that aren't due are practice: you play them as usual, but they're not graded, so cramming doesn't move their schedule. The drill says "Practice: not due yet, so not graded", and the end screen counts them separately
+- A drill session's counts are saved with each grade instead of only at the end screen, so they match the grades the server actually saved
+- The first Lichess import fetches the last 90 days of games, like Chess.com's last three months, instead of starting from the account's oldest games
+- Review's import tab lists every game still waiting for review, however many imports ago it arrived, with reviewed and skipped games loaded 50 at a time behind a "Load more" button
+- Failing a card from Review twice within a day (a retry, or reviewing the same game again) counts as one lapse, not two
+- The drill buttons' interval labels ("Unsure · 2 days") match the interval a grade actually gets
+- The board moves without animation when the system asks for reduced motion, and the move list scrolls without smooth scrolling
+- The home page and sounds load less up front: sounds load the first time one plays, and only when sound is on
+- Puzzles open and pick the next puzzle much faster on a full puzzle database
+- Prep dialogs (export, refresh, add to repertoire, delete) can be closed with Escape, keep keyboard focus inside them and stop the board moving behind them
+- Prep filter changes are saved once after you stop changing them, and an error shows if a save fails
+- The dashboard counts your streak and weekly goal in your own time zone instead of UTC, and loads its numbers faster. The puzzle goal counts different puzzles solved, so repeating one puzzle no longer fills it
+- Trouble spots on the dashboard show the line they come from, with a link to it in Build, and an empty repertoire gets a pointer to Build instead of a row of zeros
+- Every dialog outside Prep (Delete Account, Manage repertoires, Delete move, Import PGN, move notes) works the same way: Escape and a click outside close it, keyboard focus stays inside it and returns to where you were, and on a phone it fills the screen
+- The tutorial now says which page each step is on, and moving it on no longer reloads the page (which could reset a drill)
+
+### Fixed
+
+- Usernames are unique regardless of case: registering, renaming or creating `Kevin` when `kevin` exists is refused. Two sign-ups racing for the same username or email get the friendly "already in use" message instead of an error
+- Disabling or enabling a user in the admin panel shows an error when it fails (for example on your own account), and the admin search treats `%` and `_` as plain text
+- Blue links, tabs and the current page in the menu are easier to read in the dark theme, as are the green "fully covered" and toggle text in the light theme, Build's turn hint and the Delete buttons: they were below the recommended contrast. The links under the sign-in and sign-up forms are underlined so they don't rely on colour alone
+- Build, Drill, Review, Train, Puzzles, Prep and Settings now set their own browser tab title, and screen readers can name the dashboard's goal and Gap Finder controls, the starting-rating box on Train and the referral code in Settings
+- Voice control users can switch the Settings toggles by saying their On or Off text, which is now part of each toggle's accessible name
+- You stay signed in while you keep using Chessstack. Sessions used to end 14 days after you signed in, even if you used the app every day; now they end after two weeks without a visit
+- The README and contributing guide said Node.js 22.12 or later works for building from source, but installing the dependencies needs Node.js 24. `package.json` now asks for Node 24, so an older Node gets a clear version error
+- Sign out can be reached on every screen size. On screens narrower than about 1,310 pixels (most laptops) the Sign out button was pushed off the right edge of the header, and the phone menu didn't include it. The header now switches to the menu button below 1,200 pixels, with Sign out in the menu, and Escape closes the menu
+- Keyboard users can skip past the header with a "Skip to content" link, and the "Please add an email address" banner no longer covers the top of the page
+- Self-hosted instances without password reset emails set up no longer show the "Please add an email address" banner: without them an email can't be used to recover the account
+- Faint grey text (hints, labels, counts) is easier to read: it was below the recommended contrast in both themes
+- Train no longer changes your rating when the engine runs out of time before finishing its end-of-game evaluation (most likely on slower phones), since a cut-off search can be far from the real score. The end screen says why the rating didn't change
+- Deleting a move in Build, or replacing one through a PGN import, no longer hangs when the line comes back to an earlier position (for example 2.Nf3 Nf6 3.Ng1 Ng8), and no longer deletes the other moves from that position. Drill and Train no longer freeze on a repertoire with such a line
+- Opponent Prep can create and refresh preps again: the browser blocked the step that reads the downloaded games, so Fetch & Analyze and Refresh Games stopped with "Worker error"
+- Refreshing an opponent prep no longer loses its data if the refresh fails partway: the old games stay until the new ones are fully saved, and the chosen time window is kept for the next refresh. A new prep that fails to save no longer appears half-filled in the list
+- Adding prep moves to a repertoire and choosing the prep move over an existing one now removes the moves that followed the old move, and their drill cards, instead of leaving them behind where they couldn't be reached
+- Deleting a move no longer deletes the moves of a position that another line still reaches by transposition. Build's delete confirmation counts the same moves the server deletes
+- Saving a move twice at once (a double click, or two tabs) no longer saves it twice or gives it two drill cards, and two different moves can no longer both be saved as your reply in one position
+- Replacing a move from game review, a PGN import or opponent prep now gives the new move a fresh drill card instead of carrying over the old move's schedule, removes the moves that only the old move led to, and clears the old move's note. Updating the repertoire from game review no longer also counts the deviation as a failed review
+- Settings and the game import watermark are saved with one row per user even when two first saves arrive together
+- Automatic game import (`GAME_IMPORT_INTERVAL_MINUTES`) no longer shuts the server down when the database is briefly unreachable, and no longer stops importing after a while because its lock was left held. A cycle that runs longer than the interval is no longer started twice
+- The move tree in Build marks a move that transposes into a line shown elsewhere in the tree (⇄), so it no longer looks like the line ends there
+- Drill: pressing Next twice quickly after a wrong answer no longer grades the following card, which you hadn't seen yet, as forgotten
+- Drill Lines mode grades a move once per session even when several lines share it. Before, a new move at the start of three lines was graded three times in a row and jumped straight past its first short review interval. The board also stops taking moves while a line shows the right answer, so an extra move there no longer counts as another attempt
+- Drill tells you when a grade couldn't be saved (for example after losing your connection or being signed out) and lets you retry it or skip the card, instead of counting it as reviewed. Undo is only offered for grades that were saved
+- Drill no longer restarts your session halfway through when the tutorial moves on, or when anything else on the page reloads its data
+- A correct answer after using a hint now counts as not correct in the session summary, matching the Forgot grade it gets
+- Train: pressing Stop while the computer is about to move no longer plays that move after the game has ended, and can no longer update your rating twice. A game that ends in checkmate shows "Mate for White" or "Mate for Black" instead of N/A as the evaluation
+- Self-hosted instances opened over plain HTTP at a network address (such as `http://192.168.1.10:3000`) load again: a security header made browsers fetch the app's own scripts over HTTPS, so the page never finished loading. HTTPS-only headers are now sent only when `ORIGIN` is `https://`, and self-hosted instances no longer ask browsers to force HTTPS on every subdomain of their domain
+- Importing a PGN with several games (a Lichess study export, for example) imports every game; only the first one was imported before. A header with `]` in its value, square brackets inside a comment, and a stray `)` no longer break or silently cut the import
+- Importing a large PGN no longer fails on save after a successful preview: the moves are saved 1,000 at a time. Saving them and resolving conflicts in a big file are also much faster
+- A Chess.com import after a busy month no longer skips games for good, and an import whose game failed to save no longer fails with an error after a misleading count
+- Lichess or Chess.com not answering no longer leaves the import (or the automatic import) hanging: it gives up after 15 seconds and says the site didn't respond
+- Changing your Lichess or Chess.com username starts that platform's import from scratch, so the new account's earlier games are fetched
+- Pasting a PGN with several games into Review says to paste one game at a time instead of "Invalid PGN"
+- Reviewing an imported game no longer offers repertoires your plan has locked, a reviewed game can't be put back in the queue, and renaming a locked repertoire is refused like any other edit
+- Errors on Review's issue cards show the message instead of raw JSON
+- Leaving Review while it is still analysing a game stops the engine, which kept Build's and Prep's Engine tab waiting. Deviation evaluations no longer hold up the accuracy colours
+- Undoing a drill grade can no longer delete an earlier grade from your history, or undo a grade made since in another tab
+- Two grades of the same card at the same moment (two tabs, or Drill and Review) no longer lose one of them
+- Lines mode offers every line with something due in a very large repertoire; lines past the first 500 were left out
+- Drill results, blindfold moves and the trainer's moves are announced to screen readers
+- Turning sound off on Train while offline no longer causes an error, and a starting rating the server refused no longer closes the rating prompt
+- A crashed engine is reported straight away instead of showing "no suggestions" for several seconds; Stockfish's bound-only lines no longer flicker into the engine lines; the threaded engine is only used when the device has more than one core
+- A move the app refuses (a wrong drill answer, a failed save) goes back on the board without reloading it
+- Prep fetches only standard games in the chosen time window from Lichess and Chess.com, ignores variant and custom-position games, and says when a site is rate-limiting; leaving the page stops a fetch in progress
+- Exporting a prep, or adding it to a repertoire, links its lines to the start position through the opponent's moves and your repertoire instead of leaving unreachable moves, creates review cards for all of them, respects the repertoire limit and locked repertoires, and refuses a repertoire of the other colour
+- Puzzles: Space and Enter work on the focused button, checkbox or field instead of always loading the next puzzle; the solved and incorrect messages are announced to screen readers; rate-limit and "no puzzle matches" messages are shown instead of nothing
+- Prep: the W/D/L figures say which is which, gap markers don't rely on colour alone, and icon-only buttons have names
+- Settings tells you when a change didn't save, and puts a toggle or theme back as it was, instead of always showing "Saved"; the form fields keep what you typed while you edit, and every field has a label screen readers can read
+- A failed save of the dashboard goal or Gap Finder threshold now shows an error instead of nothing
+- Success, error and evaluation colours (green, red, cyan, the inaccuracy and mistake shades) are easier to read in the light theme
+- Screen readers announce wrong-move feedback, the trend on dashboard cards and the move being shown in an opening guide's summary
+- The browser's address bar takes the theme's colour on phones
+- The Mastered count on the dashboard is no longer shown in red for a repertoire with nothing to master yet
+
+### Security
+
+- Session tokens are stored hashed, so a copy of the database can't be used to sign in as anyone. Existing sessions are converted and nobody is signed out
+- Pages allow only scripts carrying a per-request nonce instead of any inline script, and redirects carry the same security headers as pages
+- Expired sessions, email and password-reset tokens and old rate-limit records are deleted regularly
+- Server logs no longer contain usernames typed at sign-in or email addresses
+- Changing your email now needs your current password, and on instances that send email the new address has to be verified before you can carry on. Verification and password reset links sent to the old address stop working
+- Failed sign-ins are now also counted per account, and signing in to one account no longer clears the count for everyone on the same network address: 10 attempts per account and 30 per address every 15 minutes
+- Confirming your password to change your password or email, or to delete your account, is limited to 10 tries per 15 minutes
+- Changing your password signs out every other session and gives the current one a new session token
+- A mistyped email can be corrected on the "Verify your email" page, which used to offer only resending to the wrong address
+- Resetting your password also verifies your email address and lifts any sign-in lockout on the account
+- The forgot-password form takes the same time to answer whether or not the email has an account
+
+---
+
 ## [1.5.0] -- 2026-10-08
 
 ### Added
@@ -616,7 +729,8 @@ game review, puzzle training, and a local masters database — all running offli
 
 ---
 
-[Unreleased]: https://github.com/PvtTwinkle/chessstack/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/PvtTwinkle/chessstack/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/PvtTwinkle/chessstack/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/PvtTwinkle/chessstack/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/PvtTwinkle/chessstack/releases/tag/v1.4.0
 [1.3.1]: https://github.com/PvtTwinkle/Chessstack/compare/v1.3.0...v1.3.1

@@ -1,72 +1,63 @@
-// POST /api/prep/:id/refresh — fetch new games since the last watermark.
+// POST /api/prep/:id/refresh — fetch an opponent's games and replace a prep's
+// move data with them.
 //
-// Step 1: Returns PGN strings for client-side worker parsing (same as /api/prep/fetch).
-// Step 2: Client re-parses and calls POST /api/prep/:id/merge with new aggregated data.
-//
-// This endpoint only handles Step 1. The merge is a separate endpoint to keep
-// the request/response cycle simple (worker parsing happens client-side).
+// 1. mode 'fetch' returns PGN strings for client-side worker parsing (same as
+//    /api/prep/fetch), using the chosen time window.
+// 2. mode 'merge-start' opens a pending upload for the new data and returns
+//    its id. 'merge-batch' (on the upload's id) adds a chunk of moves, and
+//    'merge-commit' swaps them in, so a refresh that fails partway leaves the
+//    old data untouched. A new prep uses the last two steps the same way: POST
+//    /api/prep creates it as a pending upload.
 
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { opponentPreps, opponentMoves } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { fetchLichessGames, LichessApiError } from '$lib/lichess';
-import { fetchChesscomGames, ChesscomApiError } from '$lib/chesscom';
+import { LichessApiError } from '$lib/lichess';
+import { ChesscomApiError } from '$lib/chesscom';
 import { fenKey } from '$lib/fen';
-import { timeWindowToSince } from '$lib/prep/timeWindow';
+import { fetchOpponentGames } from '$lib/server/prep-fetch';
 import { parseBody } from '$lib/server/validation';
 import { refreshPrepSchema } from '$lib/server/schemas/prep';
-
-// ── POST (mode: fetch) — return new PGNs since watermark ─────────────────────
-// ── POST (mode: merge) — upsert new aggregated move data ─────────────────────
+import { deleteStaleUploads, publishPrepUpload } from '$lib/server/prep-upload';
+import { parseIntParam, rateLimitResponse, requireAuth } from '$lib/server/api-helpers';
+import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
 
 export const POST: RequestHandler = async ({ locals, params, request }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	const prepId = parseInt(params.id);
-	if (isNaN(prepId)) throw error(400, 'Invalid prep ID');
+	const prepId = parseIntParam(params.id, 'prep ID');
 
 	// Verify ownership
 	const [prep] = await db
 		.select()
 		.from(opponentPreps)
-		.where(and(eq(opponentPreps.id, prepId), eq(opponentPreps.userId, locals.user.id)));
+		.where(and(eq(opponentPreps.id, prepId), eq(opponentPreps.userId, user.id)));
 
 	if (!prep) throw error(404, 'Prep not found');
 
 	const body = await parseBody(request, refreshPrepSchema);
 
-	if (body.mode === 'fetch') {
-		// Return PGNs — use time window if provided, otherwise watermark
-		const timeWindow = body.timeWindow ?? undefined;
-		const sinceFromWindow = timeWindowToSince(timeWindow);
-		// Use time window if provided, 0 for "all time", or watermark as fallback
-		const since = sinceFromWindow ?? (timeWindow === 'all' ? 0 : prep.lastFetchedAt.getTime() + 1);
+	const pending = prep.pendingSince !== null;
+	// Batches and the commit go to a pending upload; everything else to a live prep.
+	if (pending !== (body.mode === 'merge-batch' || body.mode === 'merge-commit')) {
+		throw error(409, pending ? 'This upload is not finished' : 'This prep is not an upload');
+	}
 
-		const sinceDate = new Date(since);
-		const { maxGames } = body;
+	if (body.mode === 'fetch') {
+		const limited = await rateLimitResponse(user.id, RATE_LIMITS.prepFetch);
+		if (limited) return limited;
+
+		// A refresh replaces the data, so it re-reads the whole window (the
+		// prep's own one when none is given), not just games since the last fetch.
+		const timeWindow = body.timeWindow ?? prep.timeWindow ?? undefined;
+		const platform = prep.platform === 'LICHESS' ? 'LICHESS' : 'CHESSCOM';
 
 		try {
-			let games;
-			if (prep.platform === 'LICHESS') {
-				// Fetch max+1 to detect if more games are available
-				games = await fetchLichessGames(prep.platformUsername, {
-					since,
-					max: maxGames + 1,
-					sort: 'dateDesc'
-				});
-			} else {
-				games = await fetchChesscomGames(prep.platformUsername, {
-					since: sinceDate,
-					max: maxGames + 1
-				});
-			}
-
-			const hasMore = games.length > maxGames;
-			const trimmed = hasMore ? games.slice(0, maxGames) : games;
-			const pgns = trimmed.map((g) => g.pgn);
-			return json({ pgns, gameCount: pgns.length, hasMore });
+			return json(
+				await fetchOpponentGames(platform, prep.platformUsername, timeWindow, body.maxGames)
+			);
 		} catch (e) {
 			if (e instanceof LichessApiError || e instanceof ChesscomApiError) {
 				if (e.status === 429) {
@@ -82,27 +73,25 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 			throw error(502, `Failed to fetch games: ${e instanceof Error ? e.message : String(e)}`);
 		}
 	} else if (body.mode === 'merge-start') {
-		// Phase 1 of chunked merge: delete old data and update metadata.
-		// The client then sends move data in merge-batch requests.
-		const { gamesAsWhite, gamesAsBlack } = body;
+		await deleteStaleUploads(user.id, prepId);
 
-		const now = new Date();
+		const [upload] = await db
+			.insert(opponentPreps)
+			.values({
+				userId: user.id,
+				opponentName: prep.opponentName,
+				platform: prep.platform,
+				platformUsername: prep.platformUsername,
+				timeWindow: prep.timeWindow,
+				lastFetchedAt: prep.lastFetchedAt,
+				createdAt: new Date(),
+				pendingSince: new Date(),
+				replacesPrepId: prepId
+			})
+			.returning({ id: opponentPreps.id });
 
-		await db.transaction(async (tx) => {
-			await tx.delete(opponentMoves).where(eq(opponentMoves.prepId, prepId));
-			await tx
-				.update(opponentPreps)
-				.set({
-					lastFetchedAt: now,
-					gamesAsWhite,
-					gamesAsBlack
-				})
-				.where(eq(opponentPreps.id, prepId));
-		});
-
-		return json({ started: true });
-	} else {
-		// Phase 2 of chunked merge: insert a batch of moves (called repeatedly).
+		return json({ uploadId: upload.id });
+	} else if (body.mode === 'merge-batch') {
 		const { moves } = body;
 
 		await db.insert(opponentMoves).values(
@@ -120,5 +109,15 @@ export const POST: RequestHandler = async ({ locals, params, request }) => {
 		);
 
 		return json({ inserted: moves.length });
+	} else {
+		const { timeWindow, gamesAsWhite, gamesAsBlack } = body;
+		const livePrepId = await publishPrepUpload(user.id, prepId, {
+			timeWindow,
+			gamesAsWhite,
+			gamesAsBlack
+		});
+		if (livePrepId === null) throw error(404, 'Prep not found');
+
+		return json({ prepId: livePrepId });
 	}
 };

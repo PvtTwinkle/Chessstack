@@ -45,12 +45,3 @@ const NOTE_PREVIEW_CHARS = 80;
 export function notePreview(notes: string): string {
 	return notes.length > NOTE_PREVIEW_CHARS ? notes.slice(0, NOTE_PREVIEW_CHARS) + '…' : notes;
 }
-
-/** Fire-and-forget PATCH of the user's settings (board size, tab preferences, tutorial step). */
-export function patchSettings(body: Record<string, unknown>): Promise<Response> {
-	return fetch('/api/settings', {
-		method: 'PATCH',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(body)
-	});
-}

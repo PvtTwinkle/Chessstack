@@ -1,32 +1,34 @@
 // GET /api/stars?fen=<fen>&player=<slug>
 //
 // Returns move statistics for a specific famous player at the given position.
-// Queries the local celebrity_moves table — no external API calls.
+// Queries the local celebrity_moves table (no external API calls), rate-limited
+// per user like the other lookup tabs.
 //
 // The input FEN is normalized to 4 fields (stripping halfmove clock and
 // fullmove number) to match the storage format.
 
-import { json, error } from '@sveltejs/kit';
+import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { celebrityMoves } from '$lib/db/schema';
 import { eq, and, desc } from 'drizzle-orm';
 import { fenKey } from '$lib/fen';
-import type { MastersMove, MastersResponse } from '../masters/+server';
+import type { MastersMove, MastersResponse } from '$lib/api-types';
+import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
+import { rateLimitResponse, requireAuth } from '$lib/server/api-helpers';
+import { parseQuery } from '$lib/server/validation';
+import { starsQuerySchema } from '$lib/server/schemas/lookups';
 
 const MAX_MOVES = 12;
 const EMPTY_RESPONSE: MastersResponse = { moves: [], totalGames: 0 };
 
 export const GET: RequestHandler = async ({ url, locals }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
-	const fen = url.searchParams.get('fen');
-	if (!fen) throw error(400, 'fen query parameter is required');
-	if (fen.length > 100) throw error(400, 'fen is too long');
+	const limited = await rateLimitResponse(user.id, RATE_LIMITS.stars);
+	if (limited) return limited;
 
-	const player = url.searchParams.get('player');
-	if (!player) throw error(400, 'player query parameter is required');
-	if (player.length > 50) throw error(400, 'player slug is too long');
+	const { fen, player } = parseQuery(url, starsQuerySchema);
 
 	const normalizedFen = fenKey(fen);
 

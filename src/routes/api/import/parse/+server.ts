@@ -16,18 +16,23 @@ import { repertoire, userMove } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { parseVariationPgn } from '$lib/pgn/parseVariations';
 import { detectConflicts } from '$lib/pgn/detectConflicts';
-import { requireAuth } from '$lib/server/api-helpers';
+import { rateLimitResponse, requireAuth } from '$lib/server/api-helpers';
+import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
+import { PGN_MAX_BYTES } from '$lib/validation-limits';
 import { parseBody } from '$lib/server/validation';
 import { parseImportSchema } from '$lib/server/schemas/import';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
 	const user = requireAuth(locals);
 
+	const limited = await rateLimitResponse(user.id, RATE_LIMITS.importParse);
+	if (limited) return limited;
+
 	const { repertoireId, pgn } = await parseBody(request, parseImportSchema);
 
-	// Reject oversized PGN to prevent CPU/memory abuse during parsing
-	const MAX_PGN_BYTES = 1_048_576; // 1 MB
-	if (new TextEncoder().encode(pgn).byteLength > MAX_PGN_BYTES) {
+	// The schema caps characters; this caps bytes, since parsing cost follows
+	// the byte size and non-ASCII comments take several bytes per character.
+	if (new TextEncoder().encode(pgn).byteLength > PGN_MAX_BYTES) {
 		throw error(413, 'PGN is too large — maximum size is 1 MB');
 	}
 

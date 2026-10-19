@@ -10,15 +10,18 @@ import { getRawSql } from '$lib/db';
 const DB_TIMEOUT_MS = 2000;
 
 export const GET: RequestHandler = async () => {
+	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
 		await Promise.race([
 			getRawSql()`SELECT 1`,
-			new Promise((_, reject) =>
-				setTimeout(() => reject(new Error('database check timed out')), DB_TIMEOUT_MS)
-			)
+			new Promise((_, reject) => {
+				timer = setTimeout(() => reject(new Error('database check timed out')), DB_TIMEOUT_MS);
+			})
 		]);
 		return json({ status: 'ok', db: 'ok' });
 	} catch {
 		return json({ status: 'error', db: 'unreachable' }, { status: 503 });
+	} finally {
+		clearTimeout(timer);
 	}
 };

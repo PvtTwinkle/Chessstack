@@ -21,6 +21,7 @@ import { reconstructPath } from '$lib/repertoire';
 import { setSoundEnabled, playMove, playCapture } from '$lib/sounds';
 import type { TrainerEvalResult } from '$lib/trainer';
 import { RATING_BRACKETS } from '$lib/ratings';
+import { patchSettings } from '$lib/settings-client';
 
 export type Phase = 'setup' | 'playing' | 'ended';
 export type SetupMode = 'repertoire' | 'custom' | 'saved';
@@ -62,11 +63,11 @@ export interface TrainPageData {
 
 // ── Pure helpers ─────────────────────────────────────────────────────────────
 
-/** Format a centipawn eval (white's perspective) for display, or null if missing. */
+/** Format a centipawn eval (White's perspective, ±99999 for mate) for display, or null if missing. */
 export function formatEval(cp: number | null | undefined): string | null {
 	if (!cp && cp !== 0) return null;
-	if (cp === 99999) return 'Mate (winning)';
-	if (cp === -99999) return 'Mate (losing)';
+	if (cp === 99999) return 'Mate for White';
+	if (cp === -99999) return 'Mate for Black';
 	const pawns = (cp / 100).toFixed(2);
 	return cp >= 0 ? `+${pawns}` : pawns;
 }
@@ -143,6 +144,9 @@ export function createTrainState(getData: () => TrainPageData) {
 	let moveCount = $state(0); // total half-moves played by both sides during interactive phase
 	let leadInLength = $state(0); // half-moves replayed before interactive play
 	let endReason = $state('');
+	// Bumped for every new game, so a computer reply still in flight when the
+	// game was stopped or replaced is dropped instead of played.
+	let gameId = 0;
 
 	// Sound
 	let soundEnabled = $state(true);
@@ -155,6 +159,8 @@ export function createTrainState(getData: () => TrainPageData) {
 	// End screen state
 	let evalResult = $state<TrainerEvalResult | null>(null);
 	let evaluating = $state(false);
+	// A rated game whose final eval ran out of time before reaching full depth.
+	let ratingSkipped = $state(false);
 
 	// ── Derived ──────────────────────────────────────────────────────────────
 
@@ -221,31 +227,18 @@ export function createTrainState(getData: () => TrainPageData) {
 	function toggleSound() {
 		soundEnabled = !soundEnabled;
 		setSoundEnabled(soundEnabled);
-		try {
-			fetch('/api/settings', {
-				method: 'PATCH',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ soundEnabled })
-			});
-		} catch {
-			// Non-critical
-		}
+		// Non-critical: the toggle works for this session even if the save fails.
+		void patchSettings({ soundEnabled });
 	}
 
 	// ── Rating setup ─────────────────────────────────────────────────────────
 
 	async function saveInitialRating() {
 		const clamped = Math.max(100, Math.min(3000, Math.round(initialRating)));
-		try {
-			await fetch('/api/settings', {
-				method: 'PATCH',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ trainerRating: clamped })
-			});
+		// If the save fails the prompt stays open so the user can retry.
+		if (await patchSettings({ trainerRating: clamped })) {
 			trainerRating = clamped;
 			showRatingSetup = false;
-		} catch {
-			// If save fails, let user retry
 		}
 	}
 
@@ -382,6 +375,7 @@ export function createTrainState(getData: () => TrainPageData) {
 		const leadIn = getLeadInMoves();
 
 		gameChess = new Chess();
+		gameId++;
 
 		// Set PGN headers so the game is identifiable in review
 		const username = data.user?.username ?? 'Player';
@@ -422,6 +416,7 @@ export function createTrainState(getData: () => TrainPageData) {
 		endReason = '';
 		evalResult = null;
 		evaluating = false;
+		ratingSkipped = false;
 		boardKey++;
 		phase = 'playing';
 
@@ -457,6 +452,9 @@ export function createTrainState(getData: () => TrainPageData) {
 	// ── Computer move ────────────────────────────────────────────────────────
 
 	async function fetchComputerMove() {
+		const game = gameId;
+		// False once Stop, Play again or a new game has moved on from this one.
+		const current = () => game === gameId && phase === 'playing';
 		waitingForComputer = true;
 
 		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- non-reactive one-shot usage
@@ -471,6 +469,7 @@ export function createTrainState(getData: () => TrainPageData) {
 		try {
 			const res = await fetch(`/api/train/computer-move?${params}`);
 			const result = await res.json();
+			if (!current()) return;
 
 			if (result.noMoves) {
 				endReason = 'The database has no more moves for this position.';
@@ -480,6 +479,7 @@ export function createTrainState(getData: () => TrainPageData) {
 
 			// Brief delay for natural feel
 			await new Promise((r) => setTimeout(r, getData().settings?.playbackSpeed ?? 500));
+			if (!current()) return;
 
 			// Apply the computer's move on the persistent Chess instance
 			const moveResult = gameChess.move(result.san);
@@ -505,10 +505,11 @@ export function createTrainState(getData: () => TrainPageData) {
 			// Check end conditions after computer's move
 			checkEndConditions();
 		} catch {
+			if (!current()) return;
 			endReason = 'Failed to fetch computer move.';
 			endGame();
 		} finally {
-			waitingForComputer = false;
+			if (game === gameId) waitingForComputer = false;
 		}
 	}
 
@@ -541,6 +542,7 @@ export function createTrainState(getData: () => TrainPageData) {
 	// ── Stop button (manual end) ─────────────────────────────────────────────
 
 	function stopTraining() {
+		if (phase !== 'playing') return;
 		endReason = 'Training stopped manually.';
 		endGame();
 	}
@@ -548,6 +550,8 @@ export function createTrainState(getData: () => TrainPageData) {
 	// ── End game + evaluate ──────────────────────────────────────────────────
 
 	async function endGame() {
+		// Once per game: the result and rating are recorded only once.
+		if (phase !== 'playing') return;
 		const data = getData();
 		phase = 'ended';
 		evaluating = true;
@@ -574,19 +578,19 @@ export function createTrainState(getData: () => TrainPageData) {
 		try {
 			// The browser scores the final position; the server turns that into
 			// the result and rating change and saves the session.
-			const score = await evaluatePosition(
-				getEngine(),
-				currentFen,
-				engineSettings(data.settings)
-			).catch(() => null);
+			const settings = engineSettings(data.settings);
+			const score = await evaluatePosition(getEngine(), currentFen, settings).catch(() => null);
+			// A search cut off by the time limit (common on slow phones) can be
+			// far from the real score, so it shouldn't move the rating.
+			const isRated = rated && trainerRating !== null;
+			ratingSkipped = isRated && score !== null && score.depth < settings.depth;
 			const res = await fetch('/api/train/evaluate', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					evalCp: score?.evalCp ?? null,
 					evalMate: score?.evalMate ?? null,
-					fen: currentFen,
-					rated: rated && trainerRating !== null,
+					rated: isRated && !ratingSkipped,
 					repertoireId: data.repertoire.id,
 					pgn: gameChess.pgn(),
 					movesPlayed: userMoves,
@@ -596,7 +600,7 @@ export function createTrainState(getData: () => TrainPageData) {
 					ratingBracket: moveSource === 'PLAYERS' ? selectedBracket : null
 				})
 			});
-			evalResult = await res.json();
+			evalResult = res.ok ? await res.json() : null;
 			if (evalResult?.ratingAfter != null) {
 				trainerRating = evalResult.ratingAfter;
 			}
@@ -622,6 +626,8 @@ export function createTrainState(getData: () => TrainPageData) {
 	// ── Play again ───────────────────────────────────────────────────────────
 
 	function playAgain() {
+		gameId++;
+		waitingForComputer = false;
 		phase = 'setup';
 		currentFen = STARTING_FEN;
 		lastMove = undefined;
@@ -747,6 +753,9 @@ export function createTrainState(getData: () => TrainPageData) {
 		},
 		get evaluating() {
 			return evaluating;
+		},
+		get ratingSkipped() {
+			return ratingSkipped;
 		},
 
 		// Derived

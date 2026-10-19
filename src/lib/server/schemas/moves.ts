@@ -2,7 +2,7 @@
 
 import { z } from 'zod';
 import { NOTES_MAX_LENGTH } from '$lib/validation-limits';
-import { fen, id } from './common';
+import { fen, id, san } from './common';
 
 /**
  * POST /api/moves. There is deliberately no toFen: the server computes it by
@@ -12,7 +12,7 @@ import { fen, id } from './common';
 export const createMoveSchema = z.object({
 	repertoireId: id,
 	fromFen: fen,
-	san: z.string().min(1)
+	san
 });
 
 /** PATCH /api/moves/[id]. An empty or blank note is stored as null. */

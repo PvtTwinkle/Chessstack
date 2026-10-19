@@ -8,6 +8,11 @@
 //   - customer.subscription.updated → sync status, period end, cancellation flag
 //   - customer.subscription.deleted → revert to free tier
 //   - invoice.payment_failed       → mark subscription as past_due
+//
+// Stripe doesn't guarantee delivery order and retries failed deliveries, so
+// the checkout and update handlers fetch the subscription's current state
+// from Stripe rather than trusting the event payload. A late or repeated
+// event then writes the same, current state instead of rolling it back.
 
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
@@ -17,6 +22,7 @@ import { eq } from 'drizzle-orm';
 import { getStripe, STRIPE_WEBHOOK_SECRET } from '$lib/stripe/client';
 import type Stripe from 'stripe';
 import { mapStripeStatus } from '$lib/stripe/status';
+import { log } from '$lib/server/log';
 
 export const POST: RequestHandler = async ({ request }) => {
 	const stripe = getStripe();
@@ -35,6 +41,7 @@ export const POST: RequestHandler = async ({ request }) => {
 	try {
 		event = stripe.webhooks.constructEvent(rawBody, signature, STRIPE_WEBHOOK_SECRET);
 	} catch {
+		log.warn('Stripe webhook with an invalid signature', { reason: 'invalid signature' });
 		return new Response('Invalid signature', { status: 400 });
 	}
 
@@ -44,7 +51,7 @@ export const POST: RequestHandler = async ({ request }) => {
 			break;
 
 		case 'customer.subscription.updated':
-			await handleSubscriptionUpdated(event.data.object as Stripe.Subscription);
+			await handleSubscriptionUpdated(stripe, event.data.object as Stripe.Subscription);
 			break;
 
 		case 'customer.subscription.deleted':
@@ -66,22 +73,39 @@ export const POST: RequestHandler = async ({ request }) => {
 
 async function handleCheckoutCompleted(stripe: Stripe, session: Stripe.Checkout.Session) {
 	const userId = session.client_reference_id ? parseInt(session.client_reference_id, 10) : null;
-	if (!userId) return;
+	if (!userId) {
+		log.warn('Stripe checkout without a user id', { stripeSessionId: session.id });
+		return;
+	}
 
 	const stripeCustomerId =
 		typeof session.customer === 'string' ? session.customer : session.customer?.id;
 	const stripeSubscriptionId =
 		typeof session.subscription === 'string' ? session.subscription : session.subscription?.id;
 
-	if (!stripeSubscriptionId) return;
+	if (!stripeSubscriptionId) {
+		log.warn('Stripe checkout without a subscription', { stripeSessionId: session.id, userId });
+		return;
+	}
+
+	// The account may have been deleted since checkout started. Inserting its
+	// subscription row would fail on the foreign key and Stripe would retry
+	// the event for days, so skip it.
+	const [owner] = await db.select({ id: user.id }).from(user).where(eq(user.id, userId));
+	if (!owner) {
+		log.warn('Stripe checkout for a deleted user', { stripeSessionId: session.id, userId });
+		return;
+	}
 
 	// Save the Stripe customer ID on the user record.
 	if (stripeCustomerId) {
 		await db.update(user).set({ stripeCustomerId }).where(eq(user.id, userId));
 	}
 
-	// Fetch the full subscription from Stripe to get period details.
+	// The subscription's current state, which may already be canceled if this
+	// delivery is late.
 	const stripeSub = await stripe.subscriptions.retrieve(stripeSubscriptionId);
+	const { tier, status } = mapStripeStatus(stripeSub.status);
 
 	const now = new Date();
 	// In Stripe API v2025+, current_period_end lives on subscription items.
@@ -102,12 +126,12 @@ async function handleCheckoutCompleted(stripe: Stripe, session: Stripe.Checkout.
 		await db
 			.update(subscription)
 			.set({
-				tier: 'paid',
-				status: 'active',
+				tier,
+				status,
 				stripeSubscriptionId,
 				stripePriceId: priceId,
 				currentPeriodEnd: periodEnd,
-				cancelAtPeriodEnd: false,
+				cancelAtPeriodEnd: isCancelling(stripeSub),
 				...(referralDiscountUsedAt ? { referralDiscountUsedAt } : {}),
 				updatedAt: now
 			})
@@ -115,12 +139,12 @@ async function handleCheckoutCompleted(stripe: Stripe, session: Stripe.Checkout.
 	} else {
 		await db.insert(subscription).values({
 			userId,
-			tier: 'paid',
-			status: 'active',
+			tier,
+			status,
 			stripeSubscriptionId,
 			stripePriceId: priceId,
 			currentPeriodEnd: periodEnd,
-			cancelAtPeriodEnd: false,
+			cancelAtPeriodEnd: isCancelling(stripeSub),
 			referralDiscountUsedAt: referralDiscountUsedAt ?? null,
 			createdAt: now,
 			updatedAt: now
@@ -128,8 +152,9 @@ async function handleCheckoutCompleted(stripe: Stripe, session: Stripe.Checkout.
 	}
 }
 
-async function handleSubscriptionUpdated(stripeSub: Stripe.Subscription) {
-	const stripeSubId = stripeSub.id;
+async function handleSubscriptionUpdated(stripe: Stripe, eventSub: Stripe.Subscription) {
+	const stripeSubId = eventSub.id;
+	const stripeSub = await stripe.subscriptions.retrieve(stripeSubId);
 
 	const { tier, status } = mapStripeStatus(stripeSub.status);
 
@@ -138,47 +163,47 @@ async function handleSubscriptionUpdated(stripeSub: Stripe.Subscription) {
 	const periodEnd = firstItem ? new Date(firstItem.current_period_end * 1000) : null;
 	const priceId = firstItem?.price?.id ?? null;
 
-	// If an active gift exists, don't overwrite the tier — the admin
-	// intentionally granted paid access independent of Stripe. We still update
-	// status and billing metadata so admins can see the Stripe-side state.
-	const [existing] = await db
-		.select({ giftExpiry: subscription.giftExpiry })
-		.from(subscription)
-		.where(eq(subscription.stripeSubscriptionId, stripeSubId));
-
-	const giftActive = existing?.giftExpiry != null && existing.giftExpiry > new Date();
-
-	await db
+	// `tier` only tracks Stripe; an admin gift lives in giftExpiry and is
+	// combined with it when the user's access is worked out.
+	const updated = await db
 		.update(subscription)
 		.set({
-			...(giftActive ? {} : { tier }),
+			tier,
 			status,
 			stripePriceId: priceId,
 			currentPeriodEnd: periodEnd,
-			cancelAtPeriodEnd: stripeSub.cancel_at_period_end || stripeSub.cancel_at !== null,
+			cancelAtPeriodEnd: isCancelling(stripeSub),
 			updatedAt: new Date()
 		})
-		.where(eq(subscription.stripeSubscriptionId, stripeSubId));
+		.where(eq(subscription.stripeSubscriptionId, stripeSubId))
+		.returning({ id: subscription.id });
+	if (updated.length === 0) warnUnknownSubscription('customer.subscription.updated', stripeSubId);
+}
+
+// Set to cancel, either at the end of the period or on a chosen date.
+function isCancelling(stripeSub: Stripe.Subscription): boolean {
+	return stripeSub.cancel_at_period_end || stripeSub.cancel_at !== null;
 }
 
 async function handleSubscriptionDeleted(stripeSub: Stripe.Subscription) {
-	// Don't downgrade tier if an active gift exists.
-	const [existing] = await db
-		.select({ giftExpiry: subscription.giftExpiry })
-		.from(subscription)
-		.where(eq(subscription.stripeSubscriptionId, stripeSub.id));
-
-	const giftActive = existing?.giftExpiry != null && existing.giftExpiry > new Date();
-
-	await db
+	// An admin gift, if any, keeps paid access through giftExpiry.
+	const updated = await db
 		.update(subscription)
 		.set({
-			...(giftActive ? {} : { tier: 'free' }),
+			tier: 'free',
 			status: 'canceled',
 			cancelAtPeriodEnd: false,
 			updatedAt: new Date()
 		})
-		.where(eq(subscription.stripeSubscriptionId, stripeSub.id));
+		.where(eq(subscription.stripeSubscriptionId, stripeSub.id))
+		.returning({ id: subscription.id });
+	if (updated.length === 0) warnUnknownSubscription('customer.subscription.deleted', stripeSub.id);
+}
+
+// Expected after an account is deleted, or for a subscription replaced by a
+// newer one, but worth seeing in the logs if it keeps happening.
+function warnUnknownSubscription(eventType: string, stripeSubscriptionId: string) {
+	log.warn('Stripe event for an unknown subscription', { eventType, stripeSubscriptionId });
 }
 
 async function handlePaymentFailed(invoice: Stripe.Invoice) {

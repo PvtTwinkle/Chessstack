@@ -56,12 +56,12 @@
 	import { createBuildState } from '$lib/components/build/buildState.svelte';
 	import { createBuildKeyboard } from '$lib/components/build/buildKeyboard.svelte';
 	import { createPgnExport } from '$lib/components/build/buildExport.svelte';
-	import { patchSettings } from '$lib/components/build/buildView';
+	import { patchSettings, saveBoardSize } from '$lib/settings-client';
 	import { invalidateAll } from '$app/navigation';
 	import { onMount, untrack } from 'svelte';
 	import type { PageData } from './$types';
 	import { initSounds, setSoundEnabled } from '$lib/sounds';
-	import { tutorialStep } from '$lib/stores/tutorial';
+	import { tutorial } from '$lib/stores/tutorial.svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -95,12 +95,6 @@
 	);
 
 	// ── Board resize ─────────────────────────────────────────────────────────
-	// Fire-and-forget: the ResizableBoard component already shows the new size
-	// via localWidth; no invalidateAll() needed (which would reset nav state).
-	function handleBoardResize(size: number) {
-		patchSettings({ boardSize: size });
-	}
-
 	// Keep the sounds module in sync with the user's saved preference.
 	// This reacts to changes from the settings page (via invalidateAll).
 	$effect(() => {
@@ -144,39 +138,39 @@
 
 	// ── Tutorial: advance after 8 half-moves ─────────────────────────────────
 	$effect(() => {
-		if ($tutorialStep !== 1) return;
+		if (!tutorial.isAt('build-first-moves')) return;
 		// navHistory length = number of half-moves in the current line
 		if (s.navHistory.length >= 8) {
-			patchSettings({ tutorialStep: 2 }).then(() => invalidateAll());
+			void tutorial.goTo('build-tools');
 		}
 	});
 </script>
+
+<svelte:head>
+	<title>Build | Chessstack</title>
+</svelte:head>
 
 <svelte:window onkeydown={keys.handleKeydown} />
 
 <div class="page">
 	<!-- ── Board column ─────────────────────────────────────────────────────── -->
 	<!--
-		{#key boardKey} remounts the board when boardKey increments.
-		We increment boardKey to reject a move visually — it forces
-		Chessground to reinitialize with `currentFen`, snapping the
-		piece back to where it was.
+		A rejected move (a conflict, a failed save) leaves `currentFen` as it
+		was, and ChessBoard puts the piece back by itself.
 	-->
 	<div class="board-col">
-		<ResizableBoard boardSize={data.settings?.boardSize ?? 0} onResize={handleBoardResize}>
+		<ResizableBoard boardSize={data.settings?.boardSize ?? 0} onResize={saveBoardSize}>
 			<div class="board-inner">
 				<EvalBar {evalCp} {evalMate} {orientation} />
-				{#key s.boardKey}
-					<ChessBoard
-						fen={s.currentFen}
-						{orientation}
-						boardTheme={data.settings?.boardTheme ?? 'blue'}
-						interactive={!s.saving}
-						lastMove={s.lastMove}
-						onMove={s.handleMove}
-						autoShapes={keys.boardShapes}
-					/>
-				{/key}
+				<ChessBoard
+					fen={s.currentFen}
+					{orientation}
+					boardTheme={data.settings?.boardTheme ?? 'blue'}
+					interactive={!s.saving}
+					lastMove={s.lastMove}
+					onMove={s.handleMove}
+					autoShapes={keys.boardShapes}
+				/>
 			</div>
 		</ResizableBoard>
 	</div>
@@ -240,11 +234,11 @@
 			}}
 			playersRatingBracket={data.settings?.playersRatingBracket ?? 3}
 			onPlayersSettingsChanged={(bracket) => {
-				patchSettings({ playersRatingBracket: bracket });
+				void patchSettings({ playersRatingBracket: bracket });
 			}}
 			starsPlayerSlug={data.settings?.starsPlayerSlug ?? null}
 			onStarsSettingsChanged={(slug) => {
-				patchSettings({ starsPlayerSlug: slug });
+				void patchSettings({ starsPlayerSlug: slug });
 			}}
 		/>
 

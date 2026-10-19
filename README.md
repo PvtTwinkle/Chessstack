@@ -161,8 +161,9 @@ startup - no extra steps required:
 | **Stars Database**   | Moves from famous players throughout chess history. Powers the "Stars" tab.                                                                                     | ~34 MB       |
 | **Players Database** | Most-played moves from the Lichess Open Database by rating bracket. Powers the "Players" tab. Filtered to positions that have only occurred at least 100 times. | ~14 MB       |
 
-The first boot takes a little longer while the data loads into PostgreSQL.
-Check `docker compose logs -f app` for progress. Subsequent startups skip this step
+On the first boot the data loads into PostgreSQL in the background, which takes several
+minutes; the app is usable meanwhile, but those tabs and the Puzzles page stay empty until it
+finishes. Check `docker compose logs -f app` for progress. Subsequent startups skip this step
 entirely.
 
 ---
@@ -180,8 +181,11 @@ entirely.
 | `ADDRESS_HEADER` / `XFF_DEPTH` | No        | Behind a reverse proxy: the header carrying the client IP, so login rate limits apply per visitor. See [Reverse Proxy](#reverse-proxy). |
 
 [`.env.example`](.env.example) lists every variable with comments, including log format, rate
-limits and CORS. Optional email (Loops) and error reporting (Sentry) stay switched off unless you
-set their variables; nothing is sent anywhere by default.
+limits, request size and CORS. Optional email (Loops) and error reporting (Sentry) stay switched
+off unless you set their variables; nothing is sent anywhere by default. Without email, an admin
+resets forgotten passwords from the admin panel. To let users reset their own, set
+`LOOPS_API_KEY` and `LOOPS_PASSWORD_RESET_ID` for a [Loops](https://loops.so) account with a
+password-reset email.
 
 ---
 
@@ -201,14 +205,18 @@ release. Take a backup first (see below).
 Your data lives in the PostgreSQL container's named volume (`pgdata`).
 
 ```bash
-# Back up
-docker exec chessstack-postgres pg_dump -U chessstack chessstack > backup.sql
+# Back up (without the reference data, which the app reloads by itself)
+docker exec chessstack-postgres pg_dump -U chessstack chessstack \
+  --exclude-table-data=chessmont_moves --exclude-table-data=lichess_moves \
+  --exclude-table-data=celebrity_moves --exclude-table-data=star_players \
+  --exclude-table-data=puzzle > backup.sql
 
 # Restore
 docker compose down
 docker volume rm chessstack_pgdata
 docker compose up -d
 docker exec -i chessstack-postgres psql -U chessstack chessstack < backup.sql
+docker compose restart app   # reloads the reference data in the background
 ```
 
 ---

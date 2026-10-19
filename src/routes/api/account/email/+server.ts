@@ -1,6 +1,9 @@
 // PATCH /api/account/email — update the authenticated user's email address.
 //
-// Validates format, enforces uniqueness, and stores lowercase.
+// Requires the current password. Validates format, enforces uniqueness, and
+// stores lowercase. The new address must be verified again: when email
+// verification is on, the user is sent a link and kept on /verify-email until
+// they click it (verificationRequired tells the client to go there).
 // Lives under /api/account (not /api/settings) because email is on the
 // user table, not the user_settings table.
 
@@ -9,7 +12,10 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { user } from '$lib/db/schema';
 import { eq, and, ne } from 'drizzle-orm';
-import { updateContactEmail } from '$lib/loops';
+import { isEmailVerificationEnabled, updateContactEmail } from '$lib/loops';
+import { isUniqueViolation } from '$lib/server/db-errors';
+import { changeEmail, verifyCurrentPassword } from '$lib/auth/account';
+import { createAndSendVerification } from '$lib/auth/email-verification';
 import { requireAuth } from '$lib/server/api-helpers';
 import { log } from '$lib/server/log';
 import { parseBody } from '$lib/server/validation';
@@ -18,7 +24,11 @@ import { updateEmailSchema } from '$lib/server/schemas/account';
 export const PATCH: RequestHandler = async ({ locals, request }) => {
 	const authedUser = requireAuth(locals);
 
-	const { email } = await parseBody(request, updateEmailSchema);
+	const { email, password } = await parseBody(request, updateEmailSchema);
+
+	// Checked before the uniqueness lookup, so the 409 below can't be used to
+	// find out which addresses have accounts without knowing the password.
+	await verifyCurrentPassword(authedUser.id, password);
 
 	// Check uniqueness — make sure no other user has this email.
 	const [existing] = await db
@@ -29,24 +39,46 @@ export const PATCH: RequestHandler = async ({ locals, request }) => {
 		throw error(409, 'That email address is already in use.');
 	}
 
-	const oldEmail = authedUser.email;
+	const hadEmail = authedUser.email !== null;
 
-	await db.update(user).set({ email }).where(eq(user.id, authedUser.id));
+	let changed: boolean;
+	try {
+		changed = await changeEmail(authedUser.id, email);
+	} catch (e) {
+		// Another account took the address between the check above and now.
+		if (isUniqueViolation(e)) throw error(409, 'That email address is already in use.');
+		throw e;
+	}
+	if (!changed) {
+		return json({ updated: false, email, verificationRequired: false });
+	}
 
-	// Update contact email in Loops if it actually changed.
-	if (oldEmail && oldEmail !== email) {
+	// Update the contact's email in Loops (it has one only if the account did).
+	if (hadEmail) {
 		try {
-			await updateContactEmail(oldEmail, email);
+			await updateContactEmail(authedUser.username, email);
 		} catch (e) {
-			log.error('Failed to update Loops contact email', {
+			log.warn('Failed to update Loops contact email', {
 				tag: 'LOOPS_CONTACT_FAILURE',
 				userId: authedUser.id,
-				oldEmail,
-				newEmail: email,
+				reason: e instanceof Error ? e.message : String(e)
+			});
+		}
+	}
+
+	const verificationRequired = isEmailVerificationEnabled();
+	if (verificationRequired) {
+		// A failed send is not fatal: /verify-email has a resend button.
+		try {
+			await createAndSendVerification(authedUser.id, email);
+		} catch (e) {
+			log.error('Verification email for a changed address failed', {
+				tag: 'EMAIL_SEND_FAILURE',
+				userId: authedUser.id,
 				err: e
 			});
 		}
 	}
 
-	return json({ updated: true, email });
+	return json({ updated: true, email, verificationRequired });
 };

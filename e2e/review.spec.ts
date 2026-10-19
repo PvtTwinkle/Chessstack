@@ -29,7 +29,9 @@ test('paste a game → deviation found → save → review another', async ({ pa
 	await expect(issue.locator('.issue-san-played')).toHaveText('Bc4');
 
 	// The in-browser engine scores every position; White's two moves show theirs.
-	await expect(page.locator('.move-eval')).toHaveText([/\d/, /\d/], { timeout: 30_000 });
+	// A level position shows as "(=)" rather than a number.
+	const score = /\d|\(=\)/;
+	await expect(page.locator('.move-eval')).toHaveText([score, score], { timeout: 30_000 });
 
 	await page.locator('.notes-input').fill('Forgot my prep');
 	await page.getByRole('button', { name: 'Save Review' }).click();
@@ -86,6 +88,37 @@ test('import tab without usernames', async ({ page }) => {
 	await expect(page.getByText('No skipped games.')).toBeVisible();
 	await page.getByRole('button', { name: 'Paste PGN' }).click();
 	await expect(page.getByRole('heading', { name: 'Review a Game' })).toBeVisible();
+});
+
+test('an import keeps fetching batches until the platform has no more', async ({ page }) => {
+	const errors = trackErrors(page);
+	const username = await registerUser(page, 'batches');
+	await createFirstRepertoire(page);
+	const sql = postgres(process.env.DATABASE_URL!);
+	try {
+		await sql`update user_settings set lichess_username = 'someone'
+			where user_id = (select id from "user" where username = ${username})`;
+	} finally {
+		await sql.end();
+	}
+
+	// Lichess isn't reachable from the tests, so the server's answers are faked:
+	// two full batches, then the last few games.
+	const answers = [
+		{ imported: 50, skipped: 0, total: 50, more: true },
+		{ imported: 48, skipped: 2, total: 50, more: true },
+		{ imported: 12, skipped: 0, total: 12, more: false }
+	];
+	let calls = 0;
+	await page.route('**/api/import/fetch', (route) => route.fulfill({ json: answers[calls++] }));
+
+	await page.goto('/review');
+	await page.getByRole('button', { name: 'Import Games' }).click();
+	await page.getByRole('button', { name: 'Import from Lichess' }).click();
+	await expect(page.getByText('110 new games imported from Lichess.')).toBeVisible();
+	await expect(page.getByText('2 already imported.')).toBeVisible();
+	expect(calls).toBe(3);
+	expect(errors).toEqual([]);
 });
 
 test('imported games: filters, skip/un-skip, and review against a chosen repertoire', async ({

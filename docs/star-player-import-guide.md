@@ -572,10 +572,11 @@ python scripts/celebrity-download.py --status
 
 ### Export for distribution
 
-After all imports are done, create the dump for the Docker image:
+After all imports are done, create the dumps for the Docker image (this writes all four,
+including `celebrity-moves-dump.sql.gz`):
 
 ```bash
-./scripts/celebrity-export.sh
+./scripts/data-export.sh --output-dir ./dumps
 ```
 
 ### Remove a player

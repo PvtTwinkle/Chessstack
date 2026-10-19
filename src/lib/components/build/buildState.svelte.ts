@@ -7,10 +7,11 @@
  */
 
 import { untrack } from 'svelte';
-import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+import { SvelteMap } from 'svelte/reactivity';
 import { Chess } from 'chess.js';
 import { playMove, playCapture } from '$lib/sounds';
 import { fenKey, STARTING_FEN } from '$lib/fen';
+import { movesRemovedByDelete } from '$lib/repertoire';
 
 export { fenKey, STARTING_FEN };
 
@@ -66,7 +67,6 @@ export function createBuildState(params: CreateBuildStateParams) {
 	let conflictSan = $state<string | null>(null);
 	let errorMsg = $state<string | null>(null);
 	let transpositionDismissed = $state(false);
-	let boardKey = $state(0);
 	let startFen = $state<string | null>(null);
 
 	// ── Explore mode ─────────────────────────────────────────────────────────
@@ -143,22 +143,6 @@ export function createBuildState(params: CreateBuildStateParams) {
 	});
 
 	// ── Helpers ──────────────────────────────────────────────────────────────
-
-	// Collect all normalised FEN keys reachable from a given position.
-	function collectSubtreeFens(startFen: string): SvelteSet<string> {
-		const visited = new SvelteSet<string>();
-		const queue = [startFen];
-		while (queue.length > 0) {
-			const fen = queue.shift()!;
-			const key = fenKey(fen);
-			if (visited.has(key)) continue;
-			visited.add(key);
-			for (const child of movesFromFen.get(key) ?? []) {
-				queue.push(child.toFen);
-			}
-		}
-		return visited;
-	}
 
 	// Replay a sequence of SAN moves from the starting position.
 	function replayLine(sans: string[]): void {
@@ -302,7 +286,6 @@ export function createBuildState(params: CreateBuildStateParams) {
 		// On the user's turn, only one move per position is allowed.
 		if (isUserTurn && movesFromCurrentPosition.length > 0) {
 			conflictSan = movesFromCurrentPosition[0].san;
-			boardKey += 1;
 			return;
 		}
 
@@ -322,13 +305,11 @@ export function createBuildState(params: CreateBuildStateParams) {
 			if (res.status === 409) {
 				const body = await res.json();
 				conflictSan = body.existing?.san ?? '?';
-				boardKey += 1;
 				return;
 			}
 
 			if (!res.ok) {
 				errorMsg = 'Failed to save move. Please try again.';
-				boardKey += 1;
 				return;
 			}
 
@@ -341,7 +322,6 @@ export function createBuildState(params: CreateBuildStateParams) {
 			else playMove();
 		} catch {
 			errorMsg = 'Network error. Please try again.';
-			boardKey += 1;
 		} finally {
 			saving = false;
 		}
@@ -419,24 +399,6 @@ export function createBuildState(params: CreateBuildStateParams) {
 
 	// ── Deletion ─────────────────────────────────────────────────────────────
 
-	// Count how many moves exist in the subtree rooted at a given position.
-	function countSubtreeMoves(rootFen: string): number {
-		let count = 0;
-		const queue = [rootFen];
-		const visited = new SvelteSet<string>();
-		while (queue.length > 0) {
-			const fen = queue.shift()!;
-			const key = fenKey(fen);
-			if (visited.has(key)) continue;
-			visited.add(key);
-			for (const child of movesFromFen.get(key) ?? []) {
-				count++;
-				queue.push(child.toFen);
-			}
-		}
-		return count;
-	}
-
 	function confirmDelete(move: RepertoireMove): void {
 		pendingDelete = move;
 	}
@@ -464,19 +426,15 @@ export function createBuildState(params: CreateBuildStateParams) {
 				return;
 			}
 
-			const deletedFens = collectSubtreeFens(move.toFen);
+			const { removed } = movesRemovedByDelete(moves, move);
+			moves = moves.filter((m) => !removed.has(m.id));
 
-			moves = moves.filter((m) => {
-				if (m.id === move.id) return false;
-				if (deletedFens.has(fenKey(m.fromFen))) return false;
-				return true;
-			});
-
-			if (fenKey(currentFen) === fenKey(move.toFen) || deletedFens.has(fenKey(currentFen))) {
-				const entryIdx = navHistory.findIndex((e) => e.toFen === move.toFen);
-				if (entryIdx >= 0) {
-					navHistory = navHistory.slice(0, entryIdx);
-				}
+			// Step back to just before the deleted move if the current line used it.
+			const entryIdx = navHistory.findIndex(
+				(e) => fenKey(e.fromFen) === fenKey(move.fromFen) && e.san === move.san
+			);
+			if (entryIdx >= 0) {
+				navHistory = navHistory.slice(0, entryIdx);
 				currentFen = move.fromFen;
 				lastMove =
 					navHistory.length > 0
@@ -735,9 +693,6 @@ export function createBuildState(params: CreateBuildStateParams) {
 		get transpositionDismissed() {
 			return transpositionDismissed;
 		},
-		get boardKey() {
-			return boardKey;
-		},
 
 		// Explore mode
 		get exploreMode() {
@@ -796,7 +751,7 @@ export function createBuildState(params: CreateBuildStateParams) {
 		},
 		get pendingDeleteSubtreeCount() {
 			if (!pendingDelete) return 0;
-			return countSubtreeMoves(pendingDelete.toFen);
+			return movesRemovedByDelete(moves, pendingDelete).removed.size - 1;
 		},
 
 		// Actions

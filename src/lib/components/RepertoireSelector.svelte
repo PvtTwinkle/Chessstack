@@ -15,7 +15,7 @@
 
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
-	import { manageRepertoiresOpen } from '$lib/stores/manageRepertoires';
+	import { manageRepertoires } from '$lib/stores/manageRepertoires.svelte';
 
 	// The shape of one repertoire row as returned by the server.
 	interface Repertoire {
@@ -143,7 +143,7 @@
 				class="dropdown-action"
 				onclick={() => {
 					dropdownOpen = false;
-					manageRepertoiresOpen.set(true);
+					manageRepertoires.open = true;
 				}}
 			>
 				⚙ Manage repertoires

@@ -13,5 +13,7 @@ https://github.com/nmrugg/stockfish.js/tree/v19.0.0.
 They are served by `src/routes/engine/[file]/+server.ts` and driven by `src/lib/engine/`.
 
 To update: `npm pack stockfish@<version>`, copy the four lite files from `package/bin/`, rename
-the file names in the route and in `src/lib/engine/engine.ts`, and update this README and
-THIRD-PARTY-NOTICES.md.
+the file names in the route, in `src/lib/engine/engine.ts` and its test, and in the end-to-end
+specs that load them (`e2e/build.spec.ts`, `e2e/smoke.spec.ts`), and update this README and
+THIRD-PARTY-NOTICES.md. The new file names also give browsers that failed to start the threaded
+build another try (the failure is remembered per file name).

@@ -54,8 +54,9 @@ services:
       - DEFAULT_PASSWORD=changeme
 
       # ── Optional tweaks ─────────────────────────────────────────────────────
-      # Increase if you plan to upload large PGN files (default is 512kb).
-      # Example: - BODY_SIZE_LIMIT=5242880  # 5 MB
+      # Largest request body accepted. The image sets 2M, which fits the 1 MB
+      # PGN import limit; there is no need to change it.
+      # Example: - BODY_SIZE_LIMIT=2M
 
       # ── Registration ────────────────────────────────────────────────────────
       # Controls who can create accounts:
@@ -65,6 +66,13 @@ services:
 
       # Cookie security is derived automatically from the ORIGIN env var above.
       # If ORIGIN starts with https://, cookies are marked secure automatically.
+
+      # ── Reverse proxy / client IP ───────────────────────────────────────────
+      # Behind Nginx, Caddy or Traefik every request seems to come from the
+      # proxy, so login rate limits would lock out everyone at once. Tell the
+      # app which header carries the visitor's IP (see .env.example):
+      # - ADDRESS_HEADER=X-Forwarded-For
+      # - XFF_DEPTH=1
 
       # ── Game Import ───────────────────────────────────────────────────────
       # Auto-import interval in minutes. When set to a positive number, the

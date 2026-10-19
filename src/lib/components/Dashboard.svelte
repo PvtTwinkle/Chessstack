@@ -3,6 +3,10 @@
 	import { invalidateAll } from '$app/navigation';
 	import { formatLine, gapSection } from '$lib/gaps';
 	import type { DrillSection } from '$lib/drill/types';
+	import { patchSettings } from '$lib/settings-client';
+	import { healthFactors, weakestFactor } from '$lib/dashboard/stats';
+	import type { ReportSummary } from '$lib/server/report';
+	import { fixNextHeadline, formatScore } from '$lib/components/report/reportFormat';
 
 	interface CardStates {
 		new_: number;
@@ -21,6 +25,8 @@
 		fromFen: string;
 		san: string;
 		lapses: number;
+		// SAN moves to the position plus the move, for Build's ?line=; null if unreachable.
+		line: string | null;
 	}
 
 	interface GapItem {
@@ -33,6 +39,7 @@
 
 	interface DashboardData {
 		gaps: GapItem[];
+		moveCount: number;
 		dueCount: number;
 		masteredCount: number;
 		totalCards: number;
@@ -44,6 +51,7 @@
 		puzzleGoal: { count: number; frequency: string; solved: number } | null;
 		healthScore: number;
 		troubleCount?: number;
+		report?: ReportSummary | null;
 		settings?: { gapMinGames?: number } | null;
 	}
 
@@ -71,47 +79,48 @@
 			: data.gaps.filter((g) => gapSection(g.depth) === gapSectionFilter)
 	);
 
+	// The same factors the server scored, so the prompt names the real weak spot.
 	let healthPrompt = $derived.by(() => {
-		if (data.totalCards === 0 || data.healthScore >= 80) return null;
+		if (data.healthScore >= 80) return null;
+		const trouble = data.troubleCount ?? 0;
+		const factors = healthFactors({
+			totalCards: data.totalCards,
+			gapCount: data.gaps.length,
+			masteredCount: data.masteredCount,
+			dueCount: data.dueCount,
+			troubleCount: trouble
+		});
+		if (!factors) return null;
 
 		const gapCount = data.gaps.length;
-		const coverage = Math.max(0, 100 - gapCount * 5);
-		const mastery = Math.round((data.masteredCount / data.totalCards) * 100);
-		const freshness = Math.round((1 - data.dueCount / data.totalCards) * 100);
-		const trouble = data.troubleCount ?? 0;
-		const stability = Math.round((1 - trouble / data.totalCards) * 100);
 		const learningCount = data.cardStates.new_ + data.cardStates.learning;
-
-		const factors = [
-			{
-				score: freshness,
+		const prompts = {
+			freshness: {
 				text: `Drill ${data.dueCount} due card${data.dueCount === 1 ? '' : 's'} to improve`,
 				href: `${base}/drill`
 			},
-			{
-				score: coverage,
+			coverage: {
 				text: `Fix ${gapCount} gap${gapCount === 1 ? '' : 's'} to improve`,
 				href: `${base}/build`
 			},
-			{
-				score: mastery,
+			mastery: {
 				text: `Learn ${learningCount} new card${learningCount === 1 ? '' : 's'} to improve`,
 				href: `${base}/drill`
 			},
-			{
-				score: stability,
+			stability: {
 				text: `Review ${trouble} trouble card${trouble === 1 ? '' : 's'} to improve`,
 				href: `${base}/drill`
 			}
-		];
-
-		return factors.reduce((worst, f) => (f.score < worst.score ? f : worst));
+		};
+		return prompts[weakestFactor(factors)];
 	});
 
 	let editingGoal = $state(false);
 	let goalCountInput = $state<number | undefined>(undefined);
 	let goalFreqInput = $state<string>('daily');
 	let savingGoal = $state(false);
+	let goalError = $state('');
+	let gapThresholdError = $state('');
 
 	$effect(() => {
 		if (data.puzzleGoal) {
@@ -122,48 +131,50 @@
 
 	async function updateGapThreshold(e: Event) {
 		const value = Number((e.target as HTMLSelectElement).value);
-		await fetch(`${base}/api/settings`, {
-			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ gapMinGames: value })
-		});
+		gapThresholdError = '';
+		if (!(await patchSettings({ gapMinGames: value as 10 | 100 | 1000 | 10000 | 100000 }))) {
+			gapThresholdError = "Couldn't save the threshold. Please try again.";
+		}
+		// Also puts the select back to the saved value when the save failed.
 		await invalidateAll();
+	}
+
+	// The form stays open with a message if the save fails, so nothing typed is lost.
+	async function saveGoalSettings(
+		patch: { puzzleGoalCount: number | null; puzzleGoalFrequency?: 'daily' | 'weekly' | 'monthly' },
+		onSaved: () => void
+	) {
+		savingGoal = true;
+		goalError = '';
+		try {
+			if (!(await patchSettings(patch))) {
+				goalError = "Couldn't save your goal. Please try again.";
+				return;
+			}
+			editingGoal = false;
+			onSaved();
+			await invalidateAll();
+		} finally {
+			savingGoal = false;
+		}
 	}
 
 	async function saveGoal() {
 		if (!goalCountInput || goalCountInput < 1) return;
-		savingGoal = true;
-		try {
-			await fetch(`${base}/api/settings`, {
-				method: 'PATCH',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					puzzleGoalCount: goalCountInput,
-					puzzleGoalFrequency: goalFreqInput
-				})
-			});
-			editingGoal = false;
-			await invalidateAll();
-		} finally {
-			savingGoal = false;
-		}
+		await saveGoalSettings(
+			{
+				puzzleGoalCount: goalCountInput,
+				puzzleGoalFrequency: goalFreqInput as 'daily' | 'weekly' | 'monthly'
+			},
+			() => {}
+		);
 	}
 
 	async function clearGoal() {
-		savingGoal = true;
-		try {
-			await fetch(`${base}/api/settings`, {
-				method: 'PATCH',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ puzzleGoalCount: null })
-			});
-			editingGoal = false;
+		await saveGoalSettings({ puzzleGoalCount: null }, () => {
 			goalCountInput = undefined;
 			goalFreqInput = 'daily';
-			await invalidateAll();
-		} finally {
-			savingGoal = false;
-		}
+		});
 	}
 
 	function relativeTime(unixSeconds: number): string {
@@ -190,6 +201,21 @@
 	}
 </script>
 
+{#snippet gapThreshold()}
+	<select
+		class="gap-threshold"
+		aria-label="Only show gaps played in at least"
+		value={gapMinGames}
+		onchange={updateGapThreshold}
+	>
+		<option value={100000}>100,000+ games</option>
+		<option value={10000}>10,000+ games</option>
+		<option value={1000}>1,000+ games</option>
+		<option value={100}>100+ games</option>
+		<option value={10}>10+ games</option>
+	</select>
+{/snippet}
+
 <div class="page-wrapper">
 	<h1>Dashboard</h1>
 
@@ -210,13 +236,16 @@
 		<!-- Mastered -->
 		<div class="widget">
 			<div class="widget-label">Mastered</div>
-			<div class="widget-value mastered-value">
+			<!-- No green for 0/0: an empty repertoire has mastered nothing. -->
+			<div class="widget-value" class:mastered-value={data.totalCards > 0}>
 				{data.masteredCount}<span class="widget-denom">/{data.totalCards}</span>
 			</div>
 			{#if data.totalCards > 0}
 				<div class="widget-hint">
 					{Math.round((data.masteredCount / data.totalCards) * 100)}% of cards
 				</div>
+			{:else}
+				<div class="widget-hint">No cards yet</div>
 			{/if}
 		</div>
 
@@ -299,6 +328,8 @@
 				<div class="widget-value" class:goal-met={met} class:goal-progress={!met}>
 					{data.puzzleGoal.solved}<span class="widget-denom">/{data.puzzleGoal.count}</span>
 				</div>
+				<!-- Each puzzle counts once, however often it comes round again. -->
+				<div class="widget-hint">Different puzzles solved {freqLabel}</div>
 
 				<div class="goal-bar">
 					<div class="goal-bar-fill" class:goal-bar-complete={met} style="width: {pct}%"></div>
@@ -320,14 +351,18 @@
 							max="999"
 							placeholder="10"
 							class="goal-input"
+							aria-label="Different puzzles to solve"
 							bind:value={goalCountInput}
 						/>
-						<select class="goal-freq-select" bind:value={goalFreqInput}>
+						<select class="goal-freq-select" aria-label="Goal period" bind:value={goalFreqInput}>
 							<option value="daily">daily</option>
 							<option value="weekly">weekly</option>
 							<option value="monthly">monthly</option>
 						</select>
 					</div>
+					{#if goalError}
+						<p class="goal-error" role="alert">{goalError}</p>
+					{/if}
 					<div class="goal-form-actions">
 						<button
 							class="goal-save-btn"
@@ -342,7 +377,10 @@
 							</button>
 							<button
 								class="goal-clear-btn"
-								onclick={() => (editingGoal = false)}
+								onclick={() => {
+									editingGoal = false;
+									goalError = '';
+								}}
 								disabled={savingGoal}
 							>
 								Cancel
@@ -420,7 +458,13 @@
 								session.cardsReviewed,
 								session.cardsCorrect
 							)}% ({session.cardsCorrect}/{session.cardsReviewed})"
-						></div>
+						>
+							<!-- The title only shows on hover; this reaches touch and screen-reader users. -->
+							<span class="visually-hidden"
+								>{accuracy(session.cardsReviewed, session.cardsCorrect)}% ({session.cardsCorrect} of
+								{session.cardsReviewed})</span
+							>
+						</div>
 					{/each}
 				</div>
 				<div class="trend-legend">
@@ -433,20 +477,45 @@
 			{/if}
 		</div>
 
+		<!-- Opening Report -->
+		{#if data.report}
+			{@const report = data.report}
+			<a href="{base}/report" class="widget widget-wide widget-link report-tile">
+				<div class="widget-label">Opening Report</div>
+				{#if report.fixNext || report.retention !== null}
+					<div class="report-row">
+						{#if report.fixNext}
+							<div class="report-fix">
+								<div class="widget-hint">Fix this next</div>
+								<p class="report-headline">{fixNextHeadline(report.fixNext)}</p>
+							</div>
+						{/if}
+						{#if report.retention !== null}
+							<div class="report-memory">
+								<div class="widget-value">{formatScore(report.retention)}</div>
+								<div class="widget-hint">remembered in the last {report.weeks} weeks</div>
+							</div>
+						{/if}
+					</div>
+				{:else if report.games > 0}
+					<p class="widget-empty">See how your lines hold up in your games</p>
+				{:else}
+					<p class="widget-empty">Import your games to see how your repertoire holds up</p>
+				{/if}
+			</a>
+		{/if}
+
 		<!-- Gap Finder -->
 		{#if data.gaps.length > 0}
 			<div class="widget widget-wide">
 				<div class="widget-label">
 					<span class="gap-badge">{data.gaps.length}</span>
 					Gap{data.gaps.length === 1 ? '' : 's'} Found
-					<select class="gap-threshold" value={gapMinGames} onchange={updateGapThreshold}>
-						<option value={100000}>100,000+ games</option>
-						<option value={10000}>10,000+ games</option>
-						<option value={1000}>1,000+ games</option>
-						<option value={100}>100+ games</option>
-						<option value={10}>10+ games</option>
-					</select>
+					{@render gapThreshold()}
 				</div>
+				{#if gapThresholdError}
+					<p class="gap-threshold-error" role="alert">{gapThresholdError}</p>
+				{/if}
 				<div class="gap-sections" role="group" aria-label="Filter gaps by depth">
 					{#each GAP_SECTIONS as section (section.id)}
 						<button
@@ -488,15 +557,17 @@
 			<div class="widget widget-wide gap-covered">
 				<div class="widget-label">
 					Gap Finder
-					<select class="gap-threshold" value={gapMinGames} onchange={updateGapThreshold}>
-						<option value={100000}>100,000+ games</option>
-						<option value={10000}>10,000+ games</option>
-						<option value={1000}>1,000+ games</option>
-						<option value={100}>100+ games</option>
-						<option value={10}>10+ games</option>
-					</select>
+					{@render gapThreshold()}
 				</div>
-				<p>No gaps — repertoire fully covered</p>
+				{#if gapThresholdError}
+					<p class="gap-threshold-error" role="alert">{gapThresholdError}</p>
+				{/if}
+				{#if data.moveCount === 0}
+					<!-- With no moves there is nothing to find gaps in; "fully covered" would mislead. -->
+					<p class="gap-empty">Add moves in Build to find gaps</p>
+				{:else}
+					<p>No gaps — repertoire fully covered</p>
+				{/if}
 			</div>
 		{/if}
 
@@ -507,9 +578,17 @@
 				<ul class="trouble-list">
 					{#each data.troubleSpots as spot (spot.fromFen + spot.san)}
 						<li class="trouble-item">
-							<span class="trouble-move">{spot.san}</span>
-							<span class="trouble-fen">{spot.fromFen.split(' ')[0].slice(0, 20)}…</span>
+							{#if spot.line}
+								<span class="trouble-line">{formatLine(spot.line)}</span>
+							{:else}
+								<span class="trouble-line">{spot.san}</span>
+							{/if}
 							<span class="trouble-lapses">{spot.lapses} lapses</span>
+							{#if spot.line}
+								<a href="{base}/build?line={encodeURIComponent(spot.line)}" class="gap-link">
+									Build
+								</a>
+							{/if}
 						</li>
 					{/each}
 				</ul>
@@ -606,6 +685,30 @@
 	.widget-hint {
 		font-size: 12px;
 		color: var(--color-text-muted);
+	}
+
+	.report-row {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: flex-end;
+		justify-content: space-between;
+		gap: var(--space-4);
+	}
+
+	.report-fix {
+		flex: 1 1 240px;
+		min-width: 0;
+	}
+
+	.report-headline {
+		margin: var(--space-1) 0 0;
+		font-size: 14px;
+		font-weight: 600;
+		color: var(--color-text-primary);
+	}
+
+	.report-memory {
+		text-align: right;
 	}
 
 	.widget-empty {
@@ -856,6 +959,29 @@
 		font-size: 13px;
 	}
 
+	.gap-covered p.gap-empty {
+		color: var(--color-text-secondary);
+	}
+
+	.goal-error,
+	.gap-threshold-error {
+		margin: var(--space-1) 0 0;
+		font-size: 12px;
+		color: var(--color-danger);
+	}
+
+	.visually-hidden {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		margin: -1px;
+		padding: 0;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
+		border: 0;
+	}
+
 	.trouble-list {
 		list-style: none;
 		margin: var(--space-2) 0 0;
@@ -875,14 +1001,9 @@
 		font-size: 13px;
 	}
 
-	.trouble-move {
+	.trouble-line {
 		color: var(--color-text-primary);
 		font-weight: 600;
-	}
-
-	.trouble-fen {
-		color: var(--color-text-muted);
-		font-size: 11px;
 		flex: 1;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -1043,6 +1164,11 @@
 	@media (max-width: 479px) {
 		.page-wrapper {
 			padding: 0;
+		}
+
+		/* The retention wraps under the headline here, so it lines up with it. */
+		.report-memory {
+			text-align: left;
 		}
 
 		.widget-grid {

@@ -53,11 +53,16 @@
 
 	// ── Toggle Enabled ─────────────────────────────────────────────────────
 	async function toggleEnabled(userId: number, currentEnabled: boolean) {
-		await fetch(`/api/admin/users/${userId}`, {
+		const res = await fetch(`/api/admin/users/${userId}`, {
 			method: 'PATCH',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ enabled: !currentEnabled })
 		});
+		if (!res.ok) {
+			const err = await res.json().catch(() => ({ message: 'Failed' }));
+			alert(err.message ?? 'Failed to change account status');
+			return;
+		}
 		await invalidateAll();
 	}
 

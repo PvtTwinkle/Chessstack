@@ -11,14 +11,18 @@
 	--color-surface-alt: #1f2128;
 	--color-border: #1e3a56;
 	--color-border-strong: #2a4a66;
-	--color-accent: #4a8ac2;
+	/* Accent text needs 4.5:1 on the header and on every surface. */
+	--color-accent: #5b9bd5;
 	--color-accent-dim: #3a6d9e;
 	--color-accent-glow: rgba(74, 138, 194, 0.18);
 	--color-text-primary: #ececef;
-	--color-text-secondary: #a0a2ac;
-	--color-text-muted: #5c5c66;
+	--color-text-secondary: #a8aab4;
+	/* Muted text still needs 4.5:1 against surface, surface-alt and base. */
+	--color-text-muted: #8a8a95;
 	--color-success: #3fb06e;
 	--color-danger: #e05454;
+	/* Background for buttons with white text: --color-danger is too light. */
+	--color-danger-fill: #c43c3c;
 	--color-explore: #67b8d4;
 	--color-explore-glow: rgba(103, 184, 212, 0.15);
 	--color-eval-best: #5ba3d9;
@@ -109,16 +113,19 @@
 	--color-accent-glow: rgba(37, 99, 168, 0.1);
 	--color-text-primary: #1f2328;
 	--color-text-secondary: #59636e;
-	--color-text-muted: #8b949e;
-	--color-success: #16a34a;
-	--color-danger: #dc2626;
-	--color-explore: #0891b2;
+	--color-text-muted: #5a636d;
+	/* Text colours keep 4.5:1 on base (#e9ecf0), the darkest background they
+	   sit on, as well as on white. */
+	--color-success: #166534;
+	--color-danger: #b91c1c;
+	--color-danger-fill: #b91c1c;
+	--color-explore: #0e7490;
 	--color-explore-glow: rgba(8, 145, 178, 0.12);
 	--color-eval-best: #2563a8;
-	--color-eval-good: #16a34a;
-	--color-eval-inaccuracy: #ca8a04;
-	--color-eval-mistake: #ea580c;
-	--color-eval-blunder: #dc2626;
+	--color-eval-good: #15803d;
+	--color-eval-inaccuracy: #8a5a00;
+	--color-eval-mistake: #9a3412;
+	--color-eval-blunder: #b91c1c;
 
 	/* ── Header / Drawer backgrounds ─────────────────────────── */
 	--color-header-bg: #dfe3e9;

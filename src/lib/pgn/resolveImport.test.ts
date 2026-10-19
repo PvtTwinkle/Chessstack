@@ -4,7 +4,13 @@ import { fenKey } from '$lib/fen';
 import { parseVariationPgn } from './parseVariations';
 import { detectConflicts } from './detectConflicts';
 import { linesToPgn } from './linesToPgn';
-import { abandonedPositions, buildImportRequest, openConflicts } from './resolveImport';
+import {
+	abandonedPositions,
+	buildImportRequest,
+	chunkImportRequest,
+	openConflicts,
+	sendImportInChunks
+} from './resolveImport';
 
 const NAJDORF = ['e4', 'c5', 'Nf3', 'd6', 'd4', 'cxd4', 'Nxd4', 'Nf6', 'Nc3', 'a6', 'Be3', 'e5'];
 const DRAGON = ['e4', 'c5', 'Nf3', 'd6', 'd4', 'cxd4', 'Nxd4', 'Nf6', 'Nc3', 'g6', 'Be3', 'Bg7'];
@@ -117,5 +123,79 @@ describe('resolving an import', () => {
 		const { moves } = buildImportRequest(p, resolved);
 		expect(moves.map((m) => m.san)).toContain('Nc3');
 		expect(moves.map((m) => m.san)).not.toContain('e4');
+	});
+});
+
+describe('abandonedPositions on a large preview', () => {
+	it('walks thousands of edges in linear time', () => {
+		// A 5,000-move chain hanging off 1.e4, abandoned by choosing 1.d4. The
+		// chain's positions are synthetic keys: only their identity matters here.
+		const root = after(['e4']);
+		const chain = Array.from({ length: 5000 }, (_, i) => `p${i} w - -`);
+		const edge = (fromFen: string, toFen: string) => ({
+			fromFen,
+			toFen,
+			san: 'x',
+			isUserTurn: false,
+			annotation: null
+		});
+		const p = {
+			newUserMoves: [],
+			newOpponentMoves: chain.map((to, i) => edge(i === 0 ? root : chain[i - 1], to)),
+			duplicates: 0,
+			conflicts: [
+				{
+					fromFen: after([]),
+					existingMove: null,
+					alternatives: ['e4', 'd4'],
+					source: 'PGN_INTERNAL' as const
+				}
+			],
+			parseErrors: []
+		};
+		const started = performance.now();
+		const dead = abandonedPositions(p, new Map([[after([]), 'd4']]));
+		expect(dead.size).toBe(5001);
+		expect(performance.now() - started).toBeLessThan(1000);
+	});
+});
+
+describe('chunked import requests', () => {
+	const move = (i: number) => ({ fromFen: `p${i} w - -`, san: `m${i}`, annotation: null });
+
+	it('splits moves into chunks, replacing moves first with their own replacements', () => {
+		const moves = Array.from({ length: 2500 }, (_, i) => move(i));
+		const replacements = [{ fromFen: 'p2400 w - -', san: 'm2400' }];
+		const chunks = chunkImportRequest({ moves, replacements }, 1000);
+		expect(chunks.map((c) => c.moves.length)).toEqual([1000, 1000, 500]);
+		expect(chunks[0].moves[0].san).toBe('m2400');
+		expect(chunks[0].replacements).toEqual(replacements);
+		expect(chunks[1].replacements).toEqual([]);
+		expect(new Set(chunks.flatMap((c) => c.moves.map((m) => m.san))).size).toBe(2500);
+	});
+
+	it('sends the chunks in order and adds up the counts', async () => {
+		const moves = Array.from({ length: 2001 }, (_, i) => move(i));
+		const sizes: number[] = [];
+		const total = await sendImportInChunks({ moves, replacements: [] }, async (chunk) => {
+			sizes.push(chunk.moves.length);
+			return { inserted: chunk.moves.length, replaced: 0, skipped: 1 };
+		});
+		expect(sizes).toEqual([1000, 1000, 1]);
+		expect(total).toEqual({ inserted: 2001, replaced: 0, skipped: 3 });
+	});
+
+	it('stops at the first failed chunk', async () => {
+		const moves = Array.from({ length: 2500 }, (_, i) => move(i));
+		let calls = 0;
+		const send = async () => {
+			calls++;
+			if (calls === 2) throw new Error('Import failed (500)');
+			return { inserted: 1, replaced: 0, skipped: 0 };
+		};
+		await expect(sendImportInChunks({ moves, replacements: [] }, send)).rejects.toThrow(
+			'Import failed (500)'
+		);
+		expect(calls).toBe(2);
 	});
 });

@@ -84,7 +84,6 @@ function setup(): ReviewState {
 			getRepertoireId: () => ACTIVE_REPERTOIRE,
 			getMoves: () => moves,
 			getPlaybackSpeed: () => 100,
-			getEngineSettings: () => ({ depth: 20, timeoutMs: 10_000 }),
 			engine
 		});
 	});
@@ -196,9 +195,46 @@ describe('loading an analysis', () => {
 		const s = setup();
 		load(s, game);
 		await vi.waitFor(() => expect(s.deviationEvals.get(3)).toEqual({ played: -40, correct: 35 }));
+		// The played move's score comes from the batch: the engine searched each
+		// game position once, then only the alternative, after the batch.
+		const searched = engine.analyse.mock.calls.map(([options]) => options.fen);
+		expect(searched).toEqual([...game.fenHistory, correct.fen()]);
+		expect(engine.analyse.mock.calls.at(-1)![0].signal).toBeInstanceOf(AbortSignal);
 		expect(s.boardShapes).toEqual([]); // board is still at the start
 		s.currentPlyIdx = 3;
 		expect(s.boardShapes.map((shape) => shape.brush)).toEqual(['red', 'green']);
+	});
+});
+
+describe('leaving the page', () => {
+	it('destroy() stops the batch and the deviation evals', async () => {
+		const game = gameAnalysis(
+			['e4', 'e5', 'Bc4'],
+			[{ type: 'DEVIATION', ply: 3, repertoireSan: 'Nf3' }]
+		);
+		for (const fen of game.fenHistory) engineScores.set(fen, 10);
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => (release = resolve));
+		const signals: AbortSignal[] = [];
+		const realAnalyse = engine.analyse.getMockImplementation()!;
+		engine.analyse.mockImplementation(async (options: AnalyseOptions) => {
+			if (options.signal) signals.push(options.signal);
+			await gate;
+			return realAnalyse(options);
+		});
+		try {
+			const s = setup();
+			load(s, game);
+			await vi.waitFor(() => expect(engine.analyse).toHaveBeenCalledTimes(1));
+			s.destroy();
+			expect(signals[0].aborted).toBe(true);
+			release();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(engine.analyse).toHaveBeenCalledTimes(1);
+			expect(s.deviationEvals.size).toBe(0);
+		} finally {
+			engine.analyse.mockImplementation(realAnalyse);
+		}
 	});
 });
 
@@ -240,12 +276,21 @@ describe('deviation actions', () => {
 	});
 
 	it('shows the server error and leaves the issue open when an action fails', async () => {
-		routes['/api/review/fail-card'] = () => new Response('Card not found', { status: 404 });
+		routes['/api/review/fail-card'] = () => json({ message: 'Card not found' }, 404);
 		const s = setup();
 		load(s, game());
 		await s.handleFailCard(s.analysis!.issues[0]);
 		expect(s.actionError.get(3)).toBe('Card not found');
 		expect(s.resolvedIssues.has(3)).toBe(false);
+	});
+
+	it('falls back to the status when the error body is not JSON', async () => {
+		routes['/api/review/fail-card'] = () =>
+			new Response('<html>Bad gateway</html>', { status: 502 });
+		const s = setup();
+		load(s, game());
+		await s.handleFailCard(s.analysis!.issues[0]);
+		expect(s.actionError.get(3)).toBe('Request failed (502)');
 	});
 
 	it('replaces the book move with the played move', async () => {
@@ -259,6 +304,8 @@ describe('deviation actions', () => {
 			san: 'Bc4',
 			forceReplace: true
 		});
+		// The replaced move's card is deleted with it, so there is nothing to fail.
+		expect(calls.map((c) => c.path)).toEqual(['/api/review/add-move']);
 		expect(s.resolvedIssues.has(3)).toBe(true);
 	});
 

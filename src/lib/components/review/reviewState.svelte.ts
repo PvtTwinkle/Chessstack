@@ -43,18 +43,18 @@ import {
 	type RepertoireMoveRow
 } from '$lib/review/analysis';
 import { getEngine, type Engine } from '$lib/engine/engine';
-import { evaluateGame, evaluatePosition } from '$lib/engine/evaluate';
+import {
+	evaluateGame,
+	evaluatePosition,
+	GAME_EVAL_DEPTH,
+	GAME_EVAL_TIMEOUT_MS
+} from '$lib/engine/evaluate';
 
 export type { ChainLeg };
 
-// Lichess Masters top-move row for DEVIATION issues (lazy-loaded on expand).
-export interface MastersMove {
-	san: string;
-	white: number;
-	draws: number;
-	black: number;
-	totalGames: number;
-}
+// Masters top-move rows for DEVIATION issues (lazy-loaded on expand).
+import type { MastersMove } from '$lib/api-types';
+export type { MastersMove };
 
 interface CreateReviewStateParams {
 	// The active repertoire (used unless the server or the user picked another).
@@ -63,8 +63,6 @@ interface CreateReviewStateParams {
 	getMoves: () => readonly RepertoireMoveRow[];
 	// Auto-play delay between moves in ms (Settings → Drill).
 	getPlaybackSpeed: () => number;
-	// Depth and time limit for single-position evals (Settings → Analysis).
-	getEngineSettings: () => { depth: number; timeoutMs: number };
 	// The in-browser Stockfish; tests pass a fake.
 	engine?: Pick<Engine, 'analyse'>;
 }
@@ -327,27 +325,25 @@ export function createReviewState(params: CreateReviewStateParams) {
 			loaded.issues.length > 0 ? loaded.issues[0].ply : loaded.fenHistory.length - 1;
 		startAutoPlay(targetPly);
 
-		// Fetch evals for DEVIATION issues in the background (fire and forget).
-		for (const issue of loaded.issues) {
-			if (issue.type === 'DEVIATION') fetchDeviationEvals(issue);
-		}
-
-		// Kick off full-game engine evaluation for CPL classification.
+		// Kick off full-game engine evaluation for CPL classification; the
+		// deviation evals follow it (fire and forget).
 		startBatchEval(loaded);
 	}
 
 	// ── Engine and masters data ─────────────────────────────────────────────────
 
-	// Fetch Stockfish evals for a DEVIATION issue (wrong move and correct alternative).
-	// Both positions are evaluated in parallel and results stored in deviationEvals.
+	// Evals for a DEVIATION issue: the move played and the repertoire's move.
+	// The played move's score is the batch's score for that position, so only
+	// the alternative needs a search, at the batch's depth so the two compare
+	// fairly. Runs after the batch, on the shared engine, and stops with it.
 	// evalCp is always from White's perspective (positive = White better).
-	async function fetchDeviationEvals(issue: GameIssue): Promise<void> {
+	async function fetchDeviationEvals(issue: GameIssue, signal: AbortSignal): Promise<void> {
 		if (deviationFetching.has(issue.ply)) return;
 		deviationFetching.add(issue.ply);
 		try {
-			// Compute the FEN after the correct repertoire move.
-			let correctToFen: string | null = null;
+			let correctEval: number | null = null;
 			if (issue.repertoireSan) {
+				let correctToFen: string | null = null;
 				try {
 					const chess = new Chess(issue.fromFen);
 					chess.move(issue.repertoireSan);
@@ -355,23 +351,23 @@ export function createReviewState(params: CreateReviewStateParams) {
 				} catch {
 					/* ignore */
 				}
-			}
-
-			const evalPos = async (fen: string): Promise<number | null> => {
-				try {
-					const score = await evaluatePosition(engine(), fen, params.getEngineSettings());
-					return score?.evalCp ?? null;
-				} catch {
-					return null;
+				if (correctToFen) {
+					try {
+						const score = await evaluatePosition(engine(), correctToFen, {
+							depth: GAME_EVAL_DEPTH,
+							timeoutMs: GAME_EVAL_TIMEOUT_MS,
+							signal
+						});
+						correctEval = score?.evalCp ?? null;
+					} catch {
+						/* no score */
+					}
 				}
-			};
+			}
+			if (signal.aborted) return;
 
-			const [playedEval, correctEval] = await Promise.all([
-				evalPos(issue.toFen),
-				correctToFen ? evalPos(correctToFen) : Promise.resolve(null)
-			]);
-
-			deviationEvals.set(issue.ply, { played: playedEval, correct: correctEval });
+			const played = positionEvals.get(issue.ply)?.evalCp ?? null;
+			deviationEvals.set(issue.ply, { played, correct: correctEval });
 		} finally {
 			deviationFetching.delete(issue.ply);
 		}
@@ -406,6 +402,21 @@ export function createReviewState(params: CreateReviewStateParams) {
 			// A newer analysis may already have taken over the progress bar.
 			if (evalAbortController === controller) evalProgress = null;
 		}
+
+		// One at a time, so the engine isn't asked for several searches at once.
+		for (const issue of gameAnalysis.issues) {
+			if (controller.signal.aborted) return;
+			if (issue.type === 'DEVIATION') await fetchDeviationEvals(issue, controller.signal);
+		}
+	}
+
+	// Stop background engine work. The engine is shared by every page in the
+	// tab, so a Review left mid-analysis would otherwise keep it busy and make
+	// the Engine tab on Build or Prep wait behind it.
+	function destroy(): void {
+		evalAbortController?.abort();
+		evalAbortController = null;
+		stopAutoPlay();
 	}
 
 	// Fetch Lichess Masters top moves for a DEVIATION's position (lazy, cache-first).
@@ -467,8 +478,12 @@ export function createReviewState(params: CreateReviewStateParams) {
 			body: JSON.stringify(body)
 		});
 		if (!res.ok) {
-			const text = await res.text().catch(() => '');
-			throw new Error(text || `Request failed (${res.status})`);
+			// Error bodies are JSON ({ message }); show the message, not the JSON.
+			const data = await res.json().catch(() => null);
+			const message = data?.message ?? data?.error;
+			throw new Error(
+				typeof message === 'string' && message ? message : `Request failed (${res.status})`
+			);
 		}
 	}
 
@@ -502,16 +517,12 @@ export function createReviewState(params: CreateReviewStateParams) {
 		});
 	}
 
-	// Case 1 — DEVIATION: update repertoire to the move the user actually played,
-	// and also fail the SR card.
+	// Case 1 — DEVIATION: update repertoire to the move the user actually played.
+	// The replaced move's drill card goes with it and the new move starts on a
+	// fresh one, so there is no card left to fail. One request, so a retry
+	// after a failure can't grade anything twice.
 	function handleUpdateRepertoire(issue: GameIssue): Promise<void> {
 		return runIssueAction(issue.ply, 'Failed to update repertoire', async () => {
-			// Fail the card first (it's a deviation regardless of what we do with the repertoire).
-			await callApi('/api/review/fail-card', {
-				repertoireId: targetRepertoireId(),
-				fromFen: issue.fromFen
-			});
-			// Replace the existing move in the repertoire with what the user played.
 			await callApi('/api/review/add-move', {
 				repertoireId: targetRepertoireId(),
 				fromFen: issue.fromFen,
@@ -887,7 +898,8 @@ export function createReviewState(params: CreateReviewStateParams) {
 		handleTranspositionFailCard,
 		handleTranspositionReplace,
 		saveReview,
-		reviewAnother
+		reviewAnother,
+		destroy
 	};
 }
 

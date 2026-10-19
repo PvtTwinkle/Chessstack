@@ -7,7 +7,20 @@
 import { z } from 'zod';
 import { TOTAL_STEPS } from '$lib/components/tutorial/tutorialSteps';
 import { clampedInt } from './common';
-import { MAX_STOCKFISH_DEPTH, MIN_STOCKFISH_DEPTH } from '$lib/validation-limits';
+import {
+	MAX_STOCKFISH_DEPTH,
+	MAX_STOCKFISH_TIMEOUT_S,
+	MIN_STOCKFISH_DEPTH,
+	MIN_STOCKFISH_TIMEOUT_S,
+	PLATFORM_USERNAME_MAX_LENGTH,
+	TEMPO_SECONDS_RANGE,
+	PLAYBACK_SPEED_RANGE,
+	FSRS_RETENTION_RANGE,
+	FSRS_MAX_INTERVAL_RANGE,
+	FSRS_RELEARNING_RANGE,
+	TRAINER_RATING_RANGE,
+	PUZZLE_GOAL_RANGE
+} from '$lib/validation-limits';
 
 /** A username or slug; empty, blank or null clears it. */
 function handle(field: string, maxLength: number) {
@@ -26,17 +39,17 @@ export const updateSettingsSchema = z
 	.object({
 		soundEnabled: z.boolean(),
 		stockfishDepth: clampedInt(MIN_STOCKFISH_DEPTH, MAX_STOCKFISH_DEPTH),
-		stockfishTimeout: clampedInt(3, 30),
+		stockfishTimeout: clampedInt(MIN_STOCKFISH_TIMEOUT_S, MAX_STOCKFISH_TIMEOUT_S),
 		boardTheme: z.enum(['brown', 'blue', 'green', 'purple', 'grey']),
-		lichessUsername: handle('lichessUsername', 25),
-		chesscomUsername: handle('chesscomUsername', 25),
+		lichessUsername: handle('lichessUsername', PLATFORM_USERNAME_MAX_LENGTH),
+		chesscomUsername: handle('chesscomUsername', PLATFORM_USERNAME_MAX_LENGTH),
 		// null clears the goal (the route also clears its frequency).
-		puzzleGoalCount: clampedInt(1, 999).nullable(),
+		puzzleGoalCount: clampedInt(PUZZLE_GOAL_RANGE.min, PUZZLE_GOAL_RANGE.max).nullable(),
 		puzzleGoalFrequency: z.enum(['daily', 'weekly', 'monthly']),
 		tempoEnabled: z.boolean(),
-		tempoSeconds: clampedInt(3, 30),
+		tempoSeconds: clampedInt(TEMPO_SECONDS_RANGE.min, TEMPO_SECONDS_RANGE.max),
 		// Auto-play delay in milliseconds.
-		playbackSpeed: clampedInt(200, 2000),
+		playbackSpeed: clampedInt(PLAYBACK_SPEED_RANGE.min, PLAYBACK_SPEED_RANGE.max),
 		appTheme: z.enum(['dark', 'light']),
 		// Gap finder minimum master games.
 		gapMinGames: z.literal([10, 100, 1000, 10000, 100000]),
@@ -48,13 +61,18 @@ export const updateSettingsSchema = z
 		}),
 		fsrsDesiredRetention: z
 			.number()
-			.transform((v) => Math.max(0.7, Math.min(0.97, Math.round(v * 100) / 100))),
+			.transform((v) =>
+				Math.max(
+					FSRS_RETENTION_RANGE.min,
+					Math.min(FSRS_RETENTION_RANGE.max, Math.round(v * 100) / 100)
+				)
+			),
 		// Days.
-		fsrsMaximumInterval: clampedInt(30, 3650),
+		fsrsMaximumInterval: clampedInt(FSRS_MAX_INTERVAL_RANGE.min, FSRS_MAX_INTERVAL_RANGE.max),
 		// Minutes.
-		fsrsRelearningMinutes: clampedInt(1, 60),
+		fsrsRelearningMinutes: clampedInt(FSRS_RELEARNING_RANGE.min, FSRS_RELEARNING_RANGE.max),
 		starsPlayerSlug: handle('starsPlayerSlug', 50),
-		trainerRating: clampedInt(100, 3000).nullable(),
+		trainerRating: clampedInt(TRAINER_RATING_RANGE.min, TRAINER_RATING_RANGE.max).nullable(),
 		// null means the tutorial was completed or skipped.
 		tutorialStep: clampedInt(0, TOTAL_STEPS - 1).nullable()
 	})

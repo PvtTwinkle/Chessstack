@@ -1,7 +1,7 @@
 # GitHub Actions CI workflow
 #
-# This file tells GitHub to run automated checks on every push to main and
-# every pull request that targets main. If any step fails, GitHub marks the
+# This file tells GitHub to run automated checks on every push to main
+# and every pull request that targets it. If any step fails, GitHub marks the
 # commit or PR as broken — so a red X is visible before anyone merges bad code.
 #
 # GitHub reads any .yml files in .github/workflows/ automatically. No other
@@ -10,7 +10,7 @@
 name: CI
 
 on:
-  # Run when code is pushed directly to main
+  # Run when code is pushed to main
   push:
     branches: [main]
   # Run when a pull request is opened or updated against main
@@ -30,6 +30,7 @@ jobs:
   ci:
     name: Build, Type Check, Tests & Migrations
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     # PostgreSQL service container for the migration smoke test.
     # GitHub Actions spins this up before the job steps run and tears it down
@@ -61,7 +62,7 @@ jobs:
       # cache: 'npm' tells GitHub to save the npm cache between runs so that
       # repeated CI runs don't have to re-download every package from scratch.
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -76,9 +77,22 @@ jobs:
       # Step 4: TypeScript and Svelte type checking.
       # Runs `svelte-kit sync && svelte-check` — this checks that all TypeScript
       # types are correct across the entire project, including inside .svelte files.
-      # Catches type errors that the build step alone might not surface.
+      # Catches type errors that the build step alone might not surface. It also
+      # type-checks the Playwright specs in e2e/ (e2e/tsconfig.json).
       - name: Type check
         run: npm run check
+
+      # ESLint's cache (see the lint script) skips files whose content hasn't
+      # changed since the last run, which saves most of its run time. It is
+      # restored after `npm ci`, which empties node_modules. The key moves with
+      # every commit so the cache is saved each run; a new lockfile or config
+      # starts it from scratch.
+      - name: Cache ESLint results
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: node_modules/.cache/eslint
+          key: eslint-${{ runner.os }}-${{ hashFiles('package-lock.json', 'eslint.config.js') }}-${{ github.sha }}
+          restore-keys: eslint-${{ runner.os }}-${{ hashFiles('package-lock.json', 'eslint.config.js') }}-
 
       # Step 5: Formatting and lint.
       # `npm run lint` runs `prettier --check` and ESLint, so a file that was
@@ -99,19 +113,40 @@ jobs:
             exit 1
           fi
 
-      # Step 6: Unit tests, with a coverage report.
-      # Pure-logic tests (FSRS scheduling, PGN parsing, Stripe status mapping,
-      # trainer ratings, password rules…). No database needed. Coverage is
-      # reported, not enforced: the totals go in the job summary and the
-      # per-file HTML report is uploaded below.
-      - name: Unit tests
-        run: npm run test:coverage
+      # Step 6: Production build.
+      # Runs `vite build` with the adapter-node adapter to produce a self-contained
+      # Node.js server in the build/ directory. If any import fails, a component
+      # is malformed, or a SvelteKit API route has a problem, this step fails.
+      - name: Build
+        run: npm run build
+
+      # Step 7: Migration smoke test.
+      # Runs our custom script that applies every migration file in drizzle/migrations/
+      # against the PostgreSQL service container. If any SQL file has a syntax error,
+      # a missing table reference, or a constraint problem, this step fails.
+      - name: Smoke test migrations
+        run: node scripts/test-migrations.mjs
+        env:
+          DATABASE_URL: postgresql://chessstack:chessstack@localhost:5432/chessstack
+
+      # Step 8: Unit and database tests, in one run so coverage counts both.
+      # Unit tests are pure logic (FSRS scheduling, PGN parsing, Stripe status
+      # mapping, trainer ratings…). Database tests run against the service
+      # container (migrations applied automatically, tables truncated between
+      # tests): rate limiting, single-use tokens, repertoire locking, referrals,
+      # checkout and the Stripe webhook (Stripe API mocked). Coverage must stay
+      # at or above the floor set in the test:ci script; raise the floor as
+      # tests are added, never lower it to get a change through.
+      - name: Unit and database tests
+        run: npm run test:ci
+        env:
+          DATABASE_URL: postgresql://chessstack:chessstack@localhost:5432/chessstack
 
       - name: Coverage summary
         if: always() && hashFiles('coverage/summary.txt') != ''
         run: |
           {
-            echo '### Unit-test coverage'
+            echo '### Test coverage (unit and database tests)'
             echo '```'
             cat coverage/summary.txt
             echo '```'
@@ -125,45 +160,34 @@ jobs:
 
       - name: Upload coverage report
         if: always() && hashFiles('coverage/index.html') != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-report
           path: coverage/
           retention-days: 14
 
-      # Step 7: Production build.
-      # Runs `vite build` with the adapter-node adapter to produce a self-contained
-      # Node.js server in the build/ directory. If any import fails, a component
-      # is malformed, or a SvelteKit API route has a problem, this step fails.
-      - name: Build
-        run: npm run build
-
-      # Step 8: Migration smoke test.
-      # Runs our custom script that applies every migration file in drizzle/migrations/
-      # against the PostgreSQL service container. If any SQL file has a syntax error,
-      # a missing table reference, or a constraint problem, this step fails.
-      - name: Smoke test migrations
-        run: node scripts/test-migrations.mjs
-        env:
-          DATABASE_URL: postgresql://chessstack:chessstack@localhost:5432/chessstack
-
-      # Step 9: Database integration tests.
-      # Runs against the same PostgreSQL service container (migrations are
-      # applied automatically; tables are truncated between tests). Covers rate
-      # limiting, single-use email/reset tokens, repertoire locking, referral
-      # activation, checkout and the Stripe webhook (Stripe API mocked).
-      - name: Database integration tests
-        run: npm run test:db
-        env:
-          DATABASE_URL: postgresql://chessstack:chessstack@localhost:5432/chessstack
-
   # The end-to-end tests only need a production build, so they run as their
-  # own job, alongside the type check and unit tests above rather than after
-  # them. Both jobs install dependencies and build; running side by side still
-  # finishes sooner than one job doing everything in turn.
+  # own jobs, alongside the type check and unit tests above rather than after
+  # them. Each edition gets its own runner and database, so the two suites run
+  # side by side and a failure in one doesn't stop the other. The cloud leg
+  # keeps the original check name, "End-to-end tests".
   e2e:
-    name: End-to-end tests
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The critical path (register → build a line → drill it), drill,
+          # review, puzzle and trainer modes, account and settings flows,
+          # admin, the opening guides and the public pages' SEO.
+          - name: End-to-end tests
+            edition: cloud
+          # A self-hosted instance: its first run creates the default admin.
+          - name: End-to-end tests (self-hosted)
+            edition: selfhosted
 
     # The e2e server applies migrations to this empty database on startup.
     services:
@@ -186,7 +210,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -218,33 +242,20 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: npx playwright install-deps chromium
 
-      # Starts the production build and drives it in headless Chromium: the
-      # critical path (register → build a line → drill it), drill, review,
-      # puzzle and trainer modes, account and settings flows, admin, the
-      # opening guides and the public pages' SEO.
-      - name: End-to-end tests (cloud edition)
+      # Starts the production build and drives it in headless Chromium.
+      - name: End-to-end tests
         run: npm run test:e2e
         env:
-          EDITION: cloud
+          EDITION: ${{ matrix.edition }}
+          # Fail on serious or critical accessibility violations.
+          AXE_ENFORCE: '1'
           DATABASE_URL: postgresql://chessstack:chessstack@localhost:5432/chessstack
-
-      # The same suite against a self-hosted instance (EDITION=selfhosted), on a
-      # database of its own so its first run creates the default admin. Kept in
-      # this job rather than a matrix so the check keeps its name.
-      - name: Create the self-hosted test database
-        run: psql postgresql://chessstack:chessstack@localhost:5432/chessstack -c 'CREATE DATABASE chessstack_selfhosted'
-
-      - name: End-to-end tests (self-hosted edition)
-        run: npm run test:e2e
-        env:
-          EDITION: selfhosted
-          DATABASE_URL: postgresql://chessstack:chessstack@localhost:5432/chessstack_selfhosted
 
       - name: Upload Playwright report on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.edition }}
           path: |
             playwright-report/
             test-results/

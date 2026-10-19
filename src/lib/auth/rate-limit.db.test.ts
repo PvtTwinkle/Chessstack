@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { isRateLimited, resetRateLimit } from './rate-limit';
+import { isRateLimited, pruneRateLimits, resetRateLimit } from './rate-limit';
 import { getRawSql } from '$lib/db';
 import { resetDb } from '$lib/test/db-helpers';
 
@@ -42,5 +42,20 @@ describe('isRateLimited', () => {
 		for (let i = 0; i < 4; i++) await isRateLimited('7.7.7.7', opts);
 		await resetRateLimit('7.7.7.7', 'login');
 		expect(await isRateLimited('7.7.7.7', opts)).toBe(false);
+	});
+});
+
+describe('pruneRateLimits', () => {
+	beforeEach(resetDb);
+
+	it('deletes only counters whose window is a day old', async () => {
+		await isRateLimited('old', opts);
+		await isRateLimited('new', opts);
+		await getRawSql()`
+			UPDATE rate_limit SET window_start = NOW() - INTERVAL '25 hours' WHERE key = 'login:old'
+		`;
+		expect(await pruneRateLimits()).toBe(1);
+		const keys = await getRawSql()`SELECT key FROM rate_limit`;
+		expect(keys.map((r) => r.key)).toEqual(['login:new']);
 	});
 });

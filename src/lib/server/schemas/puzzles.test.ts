@@ -21,3 +21,13 @@ describe('puzzleAttemptSchema', () => {
 		expect(validate(puzzleAttemptSchema, body)).toEqual({ success: false, message });
 	});
 });
+
+describe('puzzleAttemptSchema bounds', () => {
+	it.each([
+		[{ puzzleId: 'x'.repeat(17), solved: true }, 'puzzleId must be at most 16 characters'],
+		[{ puzzleId: 'abc', solved: true, timeMs: -1 }, 'timeMs must be at least 0'],
+		[{ puzzleId: 'abc', solved: true, timeMs: 1e12 }, 'timeMs must be at most 3600000']
+	])('rejects %j', (body, message) => {
+		expect(validate(puzzleAttemptSchema, body)).toEqual({ success: false, message });
+	});
+});

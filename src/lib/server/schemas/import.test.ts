@@ -63,3 +63,19 @@ describe('executeImportSchema', () => {
 		expect(validate(executeImportSchema, body)).toEqual(fail(message));
 	});
 });
+
+describe('import size limits', () => {
+	const move = { fromFen: FEN, san: 'e4' };
+
+	it('caps one execute request at 1,000 moves', () => {
+		expect(
+			validate(executeImportSchema, { repertoireId: 1, moves: Array(1001).fill(move) })
+		).toEqual(fail('moves must have at most 1000 items'));
+	});
+
+	it('rejects a PGN over 1 MB with a readable message', () => {
+		expect(
+			validate(parseImportSchema, { repertoireId: 1, pgn: 'x'.repeat(1024 * 1024 + 1) })
+		).toEqual(fail('PGN is too large (max 1 MB)'));
+	});
+});

@@ -7,24 +7,12 @@
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { importedGame, repertoire, userMove } from '$lib/db/schema';
+import { importedGame } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { parsePgn, analyzeGame, computeMatchDepth } from '$lib/pgn';
-import { isRateLimited } from '$lib/auth/rate-limit';
+import { parsePgn, analyzeGame, computeMatchDepth, formatOpeningMoves } from '$lib/pgn';
 import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
-import { requireAuth, parseIntParam } from '$lib/server/api-helpers';
-
-/** Format the first N half-moves as readable notation, e.g. "1. e4 e5 2. Nf3 Nc6". */
-function formatOpeningMoves(moves: { san: string }[], plies = 4): string {
-	const slice = moves.slice(0, plies);
-	let result = '';
-	for (let i = 0; i < slice.length; i++) {
-		if (i % 2 === 0) result += `${Math.floor(i / 2) + 1}. `;
-		result += slice[i].san;
-		if (i < slice.length - 1) result += ' ';
-	}
-	return result || '(empty game)';
-}
+import { requireAuth, parseIntParam, rateLimitResponse } from '$lib/server/api-helpers';
+import { loadReviewRepertoires } from '$lib/server/review-repertoires';
 
 interface RepertoireAnalysis {
 	repertoireId: number;
@@ -37,9 +25,8 @@ interface RepertoireAnalysis {
 export const POST: RequestHandler = async ({ locals, params }) => {
 	const user = requireAuth(locals);
 
-	if (await isRateLimited(String(user.id), RATE_LIMITS.importAnalyze)) {
-		return json({ error: 'Too many requests. Please try again later.' }, { status: 429 });
-	}
+	const limited = await rateLimitResponse(user.id, RATE_LIMITS.importAnalyze);
+	if (limited) return limited;
 
 	const id = parseIntParam(params.id, 'game ID');
 
@@ -63,12 +50,10 @@ export const POST: RequestHandler = async ({ locals, params }) => {
 	// which opening they need a repertoire for.
 	const openingMoves = formatOpeningMoves(parsed.moves);
 
-	// Find all repertoires matching the player color.
+	// Find all repertoires matching the player color that the user's plan
+	// lets them use: a locked one would only fail once picked.
 	const color = game.playerColor as 'WHITE' | 'BLACK';
-	const matchingReps = await db
-		.select()
-		.from(repertoire)
-		.where(and(eq(repertoire.userId, user.id), eq(repertoire.color, color)));
+	const matchingReps = await loadReviewRepertoires(user.id, user.tier ?? 'free', color);
 
 	if (matchingReps.length === 0) {
 		return json({
@@ -81,12 +66,7 @@ export const POST: RequestHandler = async ({ locals, params }) => {
 	// Analyze against each matching repertoire, scoring by opening overlap.
 	const analyses: RepertoireAnalysis[] = [];
 
-	for (const rep of matchingReps) {
-		const moves = await db
-			.select()
-			.from(userMove)
-			.where(and(eq(userMove.userId, user.id), eq(userMove.repertoireId, rep.id)));
-
+	for (const { rep, moves } of matchingReps) {
 		const matchDepth = computeMatchDepth(parsed.moves, moves, color);
 
 		// Skip repertoires that don't cover the game's opening at all.

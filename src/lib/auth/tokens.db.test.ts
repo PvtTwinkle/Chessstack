@@ -6,6 +6,7 @@ import { resetDb, createUser } from '$lib/test/db-helpers';
 import { hashToken } from './token-hash';
 import { verifyEmailToken } from './email-verification';
 import { validatePasswordResetToken } from './password-reset';
+import { cleanExpiredTokens } from './index';
 
 const HOUR = 60 * 60 * 1000;
 
@@ -84,5 +85,19 @@ describe('validatePasswordResetToken', () => {
 			Array.from({ length: 8 }, () => validatePasswordResetToken('race'))
 		);
 		expect(results.filter((r) => r.success)).toHaveLength(1);
+	});
+});
+
+describe('cleanExpiredTokens', () => {
+	beforeEach(resetDb);
+
+	it('deletes expired tokens of both kinds and keeps live ones', async () => {
+		const userId = await createUser();
+		await insertToken(emailVerificationToken, userId, 'old-verify', -1000);
+		await insertToken(passwordResetToken, userId, 'old-reset', -1000);
+		await insertToken(passwordResetToken, userId, 'live-reset');
+		expect(await cleanExpiredTokens()).toBe(2);
+		const left = await db.select().from(passwordResetToken);
+		expect(left.map((t) => t.tokenHash)).toEqual([hashToken('live-reset')]);
 	});
 });

@@ -5,6 +5,8 @@
 <script lang="ts">
 	import SettingsSection from './SettingsSection.svelte';
 	import type { SettingsState, UsernameSetting } from './settingsState.svelte';
+	import { PLATFORM_USERNAME_MAX_LENGTH } from '$lib/validation-limits';
+	import StatusMessage from './StatusMessage.svelte';
 
 	let { settings }: { settings: SettingsState } = $props();
 </script>
@@ -18,23 +20,27 @@
 )}
 	<div class="setting-row">
 		<label class="setting-label" for={id}>{label}</label>
-		<div class="username-input-row">
+		<form
+			class="username-input-row"
+			onsubmit={(e) => {
+				e.preventDefault();
+				setting.save();
+			}}
+		>
 			<input
 				{id}
 				type="text"
 				{placeholder}
 				bind:value={setting.value}
-				maxlength="25"
+				maxlength={PLATFORM_USERNAME_MAX_LENGTH}
 				class="username-input"
 			/>
-			<button class="btn-save" onclick={setting.save} disabled={setting.saving}>
+			<button type="submit" class="btn-save" disabled={setting.saving}>
 				{setting.saving ? 'Saving...' : 'Save'}
 			</button>
-		</div>
+		</form>
 		<p class="setting-hint">{hint}</p>
-		{#if setting.status}
-			<span class="status-msg">{setting.status}</span>
-		{/if}
+		<StatusMessage status={setting.status} />
 	</div>
 {/snippet}
 

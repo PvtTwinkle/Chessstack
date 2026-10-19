@@ -29,6 +29,15 @@ describe('parseInfoLine', () => {
 		expect(parseInfoLine('info string NNUE evaluation using nn.bin')).toBeNull();
 		expect(parseInfoLine('bestmove e2e4 ponder e7e5')).toBeNull();
 	});
+
+	it('ignores lines whose score is only a bound', () => {
+		expect(
+			parseInfoLine('info depth 22 seldepth 30 multipv 1 score cp 80 lowerbound nodes 9 pv e2e4')
+		).toBeNull();
+		expect(
+			parseInfoLine('info depth 22 seldepth 30 multipv 1 score cp 10 upperbound nodes 9 pv d2d4')
+		).toBeNull();
+	});
 });
 
 describe('createCollector', () => {
@@ -74,6 +83,19 @@ describe('createCollector', () => {
 				{ uci: 'e2e4', scoreCp: 30, scoreMate: null },
 				{ uci: 'd2d4', scoreCp: 20, scoreMate: null }
 			]
+		});
+	});
+
+	it('does not let a bound line complete a depth', () => {
+		const c = createCollector(1);
+		expect(c.push(line(1, 1, 'e2e4', 30))).toMatchObject({ depth: 1 });
+		expect(
+			c.push('info depth 2 seldepth 4 multipv 1 score cp 90 lowerbound nodes 9 pv d2d4')
+		).toBeNull();
+		expect(c.finish()).toEqual({
+			depth: 1,
+			done: true,
+			moves: [{ uci: 'e2e4', scoreCp: 30, scoreMate: null }]
 		});
 	});
 });

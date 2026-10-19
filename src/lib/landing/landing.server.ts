@@ -3,10 +3,10 @@
 // /login before the page renders; this only runs with EDITION=cloud.
 
 export interface LandingData {
-	guides: never[];
+	posts: never[];
 	openings: { slug: string; name: string }[];
 }
 
 export function loadLanding(): LandingData {
-	return { guides: [], openings: [] };
+	return { posts: [], openings: [] };
 }

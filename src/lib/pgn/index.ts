@@ -10,6 +10,7 @@
 
 import { Chess } from 'chess.js';
 import { fenKey, STARTING_FEN } from '$lib/fen';
+import { countPgnGames } from './parseVariations';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -65,10 +66,19 @@ export interface RepertoireMoveRow {
 	san: string;
 }
 
-// ─── FEN key helper ───────────────────────────────────────────────────────────
-// Canonical implementation lives in $lib/fen.ts — re-exported here for
-// backwards compatibility with existing imports.
-export { fenKey };
+// ─── formatOpeningMoves ──────────────────────────────────────────────────────
+
+/** Format the first N half-moves as readable notation, e.g. "1. e4 e5 2. Nf3 Nc6". */
+export function formatOpeningMoves(moves: { san: string }[], plies = 4): string {
+	const slice = moves.slice(0, plies);
+	let result = '';
+	for (let i = 0; i < slice.length; i++) {
+		if (i % 2 === 0) result += `${Math.floor(i / 2) + 1}. `;
+		result += slice[i].san;
+		if (i < slice.length - 1) result += ' ';
+	}
+	return result || '(empty game)';
+}
 
 // ─── computeMatchDepth ───────────────────────────────────────────────────────
 
@@ -145,6 +155,12 @@ export function parsePgn(rawPgn: string): ParsedGame {
 		throw new Error(
 			'Custom starting positions are not supported — only standard games can be reviewed'
 		);
+	}
+
+	// chess.js reads only one game, so a pasted file of several would fail
+	// with a generic parse error; say what's actually wrong instead.
+	if (countPgnGames(pgn) > 1) {
+		throw new Error('This PGN holds several games — paste one game at a time');
 	}
 
 	const chess = new Chess();

@@ -28,7 +28,6 @@ export const POST: RequestHandler = async ({ locals, getClientAddress }) => {
 		log.error('Resend verification email failed', {
 			tag: 'EMAIL_SEND_FAILURE',
 			userId: user.id,
-			email: user.email,
 			err: e
 		});
 		throw error(502, 'Could not send verification email. Please try again later.');

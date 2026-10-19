@@ -67,14 +67,20 @@ function buildTreeDFS(
 
 	return edges.map((edge) => {
 		const nodePath = [...pathSans, edge.san];
+		const toFenKey = fenKey(edge.toFen);
+		// A position is only expanded once, so a second move order into it ends
+		// here. Flag it when the line actually continues, so it doesn't read as
+		// the end of the line.
+		const transposition = visited.has(toFenKey) && adj.has(toFenKey);
 		return {
 			san: edge.san,
 			fromFen: edge.fromFen,
 			toFen: edge.toFen,
-			toFenKey: fenKey(edge.toFen),
+			toFenKey,
 			ply,
 			children: buildTreeDFS(edge.toFen, adj, visited, ply + 1, nodePath),
-			pathSans: nodePath
+			pathSans: nodePath,
+			transposition
 		};
 	});
 }

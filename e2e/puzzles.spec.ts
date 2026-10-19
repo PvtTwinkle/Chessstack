@@ -55,5 +55,12 @@ test('a puzzle from the repertoire opening can be solved', async ({ page }) => {
 	expect((await recorded).ok()).toBe(true);
 	await expect(page.locator('.stat-value.correct')).toHaveText('1');
 
+	// Space on a focused filter ticks it rather than loading the next puzzle.
+	const theme = page.getByRole('checkbox', { name: 'Opening' });
+	await theme.focus();
+	await page.keyboard.press('Space');
+	await expect(theme).toBeChecked();
+	await expect(page.locator('.result-banner.solved')).toBeVisible();
+
 	expect(errors).toEqual([]);
 });

@@ -1,9 +1,24 @@
 <script lang="ts">
-	import type { PrepState } from './prepState.svelte';
+	import type { PrepState, PrepMoveRow } from './prepState.svelte';
 	import GapIndicator from './GapIndicator.svelte';
 
-	let { state, highlightedIdx = null }: { state: PrepState; highlightedIdx?: number | null } =
-		$props();
+	let {
+		state,
+		highlightedIdx = null,
+		onDeleteMove
+	}: {
+		state: PrepState;
+		highlightedIdx?: number | null;
+		/** Asks before deleting a prep move that has moves after it. */
+		onDeleteMove: (move: PrepMoveRow) => void;
+	} = $props();
+
+	// The stats are from the games' point of view (White wins, draws, Black
+	// wins), the same whichever side the user preps, so the labels say so
+	// rather than "W/D/L", which read as the user's own results.
+	function wdlTitle(pct: { winPct: number; drawPct: number; lossPct: number }): string {
+		return `${pct.winPct.toFixed(1)}% White wins, ${pct.drawPct.toFixed(1)}% draws, ${pct.lossPct.toFixed(1)}% Black wins`;
+	}
 
 	function wdlPcts(
 		w: number,
@@ -40,8 +55,9 @@
 							</button>
 							<button
 								class="remove-btn"
-								onclick={() => state.deletePrepMove(move.id)}
+								onclick={() => onDeleteMove(move)}
 								title="Remove prep move"
+								aria-label="Remove prep move {move.san}"
 							>
 								&times;
 							</button>
@@ -56,7 +72,8 @@
 			<section class="panel-section">
 				<h3 class="section-title">Played against your opponent</h3>
 				<p class="section-hint">
-					Moves others played here — W/D/L shows results against your opponent.
+					Moves others played here against your opponent. The bar shows White wins, draws and Black
+					wins.
 				</p>
 				<div class="move-list">
 					{#each state.suggestionsAtPosition as move, idx (idx)}
@@ -65,9 +82,7 @@
 							class="move-row wdl-row"
 							class:highlighted={highlightedIdx === idx && state.prepMovesAtPosition.length === 0}
 							onclick={() => state.handleCandidateSelect(move.moveSan)}
-							title="{pct.winPct.toFixed(1)}% W / {pct.drawPct.toFixed(
-								1
-							)}% D / {pct.lossPct.toFixed(1)}% L"
+							title={wdlTitle(pct)}
 						>
 							<div class="candidate-main">
 								<span class="move-san">{move.moveSan}</span>
@@ -113,9 +128,7 @@
 							<button
 								class="move-row wdl-row"
 								onclick={() => state.clickOpponentMove(move.moveSan, move.resultingFen)}
-								title="{pct.winPct.toFixed(1)}% W / {pct.drawPct.toFixed(
-									1
-								)}% D / {pct.lossPct.toFixed(1)}% L"
+								title={wdlTitle(pct)}
 							>
 								<div class="candidate-main">
 									<GapIndicator status={gapStatus} />
@@ -140,6 +153,7 @@
 									state.excludeMove(move.positionFen, move.moveSan);
 								}}
 								title="Hide this move from prep"
+								aria-label="Hide {move.moveSan} from prep"
 							>
 								&times;
 							</button>

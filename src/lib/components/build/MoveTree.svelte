@@ -4,6 +4,7 @@
 	import MoveTreeLine from './MoveTreeLine.svelte';
 	import type { RepertoireMove } from './buildState.svelte';
 	import { buildMoveTree, buildNodeIndex, fenKey } from './moveTreeBuilder';
+	import { scrollBehavior } from '$lib/motion';
 
 	interface Props {
 		moves: RepertoireMove[];
@@ -65,7 +66,7 @@
 			if (!treeContainer) return;
 			const current = treeContainer.querySelector('.is-current');
 			if (current) {
-				current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+				current.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
 			}
 		});
 	});

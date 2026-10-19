@@ -37,18 +37,19 @@ const defaultInstance = fsrs(
 	})
 );
 
-// Cache for non-default FSRS instances, keyed by "retention|maxInterval|relearningMin".
+// Cache for non-default FSRS instances, keyed by "retention|maxInterval|relearningMin|fuzz".
 const instanceCache = new Map<string, FSRS>();
 
 // Build an FSRS instance from per-user config. Reuses the default instance
 // when all values match defaults (the common case), and caches non-default
 // instances so repeated calls with the same config don't re-instantiate.
-function getFsrsInstance(config?: FSRSUserConfig): FSRS {
+function getFsrsInstance(config?: FSRSUserConfig, fuzz = true): FSRS {
 	const retention = config?.requestRetention ?? DEFAULT_RETENTION;
 	const maxInterval = config?.maximumInterval ?? DEFAULT_MAX_INTERVAL;
 	const relearningMin = config?.relearningMinutes ?? DEFAULT_RELEARNING_MINUTES;
 
 	if (
+		fuzz &&
 		retention === DEFAULT_RETENTION &&
 		maxInterval === DEFAULT_MAX_INTERVAL &&
 		relearningMin === DEFAULT_RELEARNING_MINUTES
@@ -56,13 +57,13 @@ function getFsrsInstance(config?: FSRSUserConfig): FSRS {
 		return defaultInstance;
 	}
 
-	const key = `${retention}|${maxInterval}|${relearningMin}`;
+	const key = `${retention}|${maxInterval}|${relearningMin}|${fuzz}`;
 	let instance = instanceCache.get(key);
 	if (instance) return instance;
 
 	instance = fsrs(
 		generatorParameters({
-			enable_fuzz: true,
+			enable_fuzz: fuzz,
 			request_retention: retention,
 			maximum_interval: maxInterval,
 			relearning_steps: [`${relearningMin}m`]
@@ -243,7 +244,9 @@ export function intervalLabels(
 	config?: FSRSUserConfig
 ): { forgot: string; unsure: string; easy: string } {
 	const card = dbRowToCard(row);
-	const f = getFsrsInstance(config);
+	// Without fuzz: the labels are display only, computed once at page load,
+	// and fuzz seeded at that moment can put them a day off the real grade.
+	const f = getFsrsInstance(config, false);
 	const scheduling = f.repeat(card, now);
 	return {
 		forgot: formatInterval(scheduling[Rating.Again as Grade].card.due, now),

@@ -20,15 +20,16 @@ export interface EvaluateOptions {
 }
 
 // The engine's score for `fen`, or null when there is none (no legal moves,
-// engine unavailable, cancelled).
+// engine unavailable, cancelled). `depth` is how deep the search got, which is
+// less than asked for when it ran out of time.
 export async function evaluatePosition(
 	engine: Analyser,
 	fen: string,
 	options: EvaluateOptions
-): Promise<PositionScore | null> {
+): Promise<(PositionScore & { depth: number }) | null> {
 	const result = await engine.analyse({ fen, numMoves: 1, ...options });
 	const [best] = toCandidates(fen, result.moves);
-	return best ? { evalCp: best.evalCp, evalMate: best.evalMate } : null;
+	return best ? { evalCp: best.evalCp, evalMate: best.evalMate, depth: result.depth } : null;
 }
 
 // Whole-game evaluation is only used to sort moves into a few accuracy

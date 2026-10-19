@@ -4,6 +4,7 @@
 <script lang="ts">
 	import DrillFeedback from './DrillFeedback.svelte';
 	import DrillNote from './DrillNote.svelte';
+	import GradeError from './GradeError.svelte';
 	import NextButton from './NextButton.svelte';
 	import RevealedMove from './RevealedMove.svelte';
 	import type { DrillState } from './drillState.svelte';
@@ -22,8 +23,11 @@
 	<DrillNote text={drill.currentMoveNote} />
 {/if}
 
-<p class="auto-advance-hint">Will be graded as Forgot</p>
-<NextButton onclick={drill.handleNext} />
+<p class="auto-advance-hint">
+	{drill.currentIsPractice ? 'Practice: not due yet, so not graded' : 'Will be graded as Forgot'}
+</p>
+<NextButton onclick={drill.handleNext} disabled={drill.grading} />
+<GradeError {drill} />
 
 <style>
 	.auto-advance-hint {

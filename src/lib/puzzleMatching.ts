@@ -10,8 +10,10 @@
 // The normalizeOpening() function strips formatting differences so both
 // produce: "sicilian defense najdorf variation".
 //
-// IMPORTANT: This must produce identical output to normalize_opening()
-// in scripts/puzzle-import.py. If you change one, change the other.
+// The puzzle table's opening_family column was normalised the same way when
+// the puzzle dump (seeded on first boot, see src/lib/db/seed-data.ts) was
+// built. The script that built it is no longer in this repository, so a
+// change here has to match the values already in that dump.
 
 import { fenKey } from '$lib/fen';
 
@@ -20,8 +22,7 @@ import { fenKey } from '$lib/fen';
  * Lichess puzzle opening tags.
  *
  * Strips underscores, commas, colons, apostrophes, lowercases, and
- * collapses whitespace. The same function exists in Python in
- * scripts/puzzle-import.py — keep them in sync.
+ * collapses whitespace.
  */
 export function normalizeOpening(name: string): string {
 	let s = name.replace(/_/g, ' ');
@@ -116,4 +117,27 @@ export function getDeepestEcoNames(
 
 	dfs(fenKey(rootFen), null);
 	return result;
+}
+
+/**
+ * The puzzle families to use for a repertoire's deepest opening names.
+ *
+ * A deepest name can be more specific than any puzzle family (e.g. "scotch
+ * game classical variation intermezzo variation"), so each one is cut back a
+ * word at a time until it names a known family. Parents of another result
+ * are then dropped, as in removeParentNames().
+ */
+export function resolvePuzzleFamilies(
+	normalizedNames: Iterable<string>,
+	knownFamilies: { has(family: string): boolean }
+): string[] {
+	const resolved = new Set<string>();
+	for (const name of normalizedNames) {
+		let candidate = name;
+		while (!knownFamilies.has(candidate) && candidate.includes(' ')) {
+			candidate = candidate.substring(0, candidate.lastIndexOf(' '));
+		}
+		if (knownFamilies.has(candidate)) resolved.add(candidate);
+	}
+	return removeParentNames([...resolved]);
 }

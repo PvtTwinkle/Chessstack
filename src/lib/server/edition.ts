@@ -31,7 +31,9 @@ export const CLOUD_ONLY_ROUTES = [
 	'/sitemap.xml',
 	'/llms.txt',
 	'/terms',
-	'/privacy'
+	'/privacy',
+	'/chess-repertoire-builder',
+	'/chess-opening-trainer'
 ];
 
 export function isCloudOnlyRoute(pathname: string): boolean {

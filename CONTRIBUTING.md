@@ -20,7 +20,7 @@ a development environment, the code style expected, and how to submit changes.
 
 ### Requirements
 
-- [Node.js](https://nodejs.org/) 24 (the version used in CI and Docker; 22.12+ also works)
+- [Node.js](https://nodejs.org/) 24 or later (the version used in CI and Docker; Node 22 cannot install the dependencies)
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose (for PostgreSQL)
 - A code editor — [VS Code](https://code.visualstudio.com/) is recommended
 
@@ -64,7 +64,7 @@ page need the reference datasets, which are only baked into the Docker image.
 To load them into a dev database, download the dumps from this repository's
 [`data-v1.0` release](https://github.com/pvttwinkle/chessstack/releases/tag/data-v1.0)
 into a folder, check them by running `sha256sum -c <repo>/seed-checksums/data-v1.0.sha256` in that
-folder, and set `SEED_DATA_DIR` to its **absolute** path. They load on the next start (this
+folder, and set `SEED_DATA_DIR` to its path. They load in the background on the next start (this
 takes several minutes and needs `psql` and `gunzip` on your machine).
 
 ### Option B — Full stack with Docker
@@ -108,6 +108,9 @@ npm run test:coverage
 # Database integration tests — needs a DISPOSABLE PostgreSQL database
 # (migrations run automatically; tables are truncated between tests)
 DATABASE_URL=postgresql://chessstack:chessstack@localhost:5432/chessstack_test npm run test:db
+
+# Unit and database tests together with the coverage floor CI enforces
+DATABASE_URL=postgresql://chessstack:chessstack@localhost:5432/chessstack_test npm run test:ci
 
 # End-to-end smoke test — builds on `npm run build`, starts the app and
 # drives it in Chromium (register → build a line → drill it)
@@ -159,6 +162,19 @@ migration that has already been deployed: add a new one instead.
 
 Prettier and ESLint are configured in the repo. Run `npm run format` before
 committing. The CI check will fail if formatting is off.
+
+### Dependency overrides
+
+`package.json` pins two transitive packages through `overrides`, because the
+packages that depend on them still ask for versions with known advisories:
+
+- `cookie` under `@sveltejs/kit`: kit 2 asks for `cookie ^0.6.0`. Remove the
+  override once kit asks for 0.7.2 or later (SvelteKit 3 does).
+- `esbuild` under `@esbuild-kit/core-utils`, which `drizzle-kit` pulls in and
+  which asks for `esbuild ~0.18.20`. Remove it once `drizzle-kit` no longer
+  depends on `@esbuild-kit`.
+
+Check with `npm ls cookie esbuild` after removing either one.
 
 ---
 

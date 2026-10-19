@@ -20,21 +20,35 @@
 		orientation: 'white' | 'black';
 		onResize: (size: number) => void;
 	} = $props();
+
+	// What a screen reader hears: the right/wrong result, and in blindfold mode
+	// each auto-played move (the point of blindfold is not seeing the board).
+	// The live region stays mounted so changes to its text are announced.
+	const announcement = $derived.by(() => {
+		if (drill.phase === 'correct') return drill.hintUsed ? 'Correct, hint used' : 'Correct';
+		if (drill.phase === 'incorrect') {
+			return drill.revealedSan ? `Incorrect. The move was ${drill.revealedSan}` : 'Incorrect';
+		}
+		if (drill.revealedSan) return `Incorrect. The move was ${drill.revealedSan}`;
+		// Line mode stays on the board after a right move; the flash marks it.
+		if (drill.flashColor === 'green') return 'Correct';
+		return drill.blindfoldEnabled ? (drill.blindfoldAnnouncement ?? '') : '';
+	});
 </script>
+
+<div class="sr-only" role="status" aria-live="polite">{announcement}</div>
 
 <ResizableBoard {boardSize} {onResize}>
 	<div class="board-wrap" class:blindfold={drill.blindfoldEnabled}>
-		{#key drill.boardKey}
-			<ChessBoard
-				fen={drill.currentFen}
-				{orientation}
-				{boardTheme}
-				interactive={drill.phase === 'waiting'}
-				lastMove={drill.blindfoldEnabled ? undefined : drill.lastMove}
-				autoShapes={drill.boardShapes}
-				onMove={drill.handleMove}
-			/>
-		{/key}
+		<ChessBoard
+			fen={drill.currentFen}
+			{orientation}
+			{boardTheme}
+			interactive={drill.interactive}
+			lastMove={drill.blindfoldEnabled ? undefined : drill.lastMove}
+			autoShapes={drill.boardShapes}
+			onMove={drill.handleMove}
+		/>
 
 		<!-- Green/red flash overlay on correct/incorrect -->
 		{#if drill.flashColor}
@@ -47,7 +61,7 @@
 
 		<!-- Blindfold move announcement -->
 		{#if drill.blindfoldAnnouncement}
-			<div class="blindfold-announce">{drill.blindfoldAnnouncement}</div>
+			<div class="blindfold-announce" aria-hidden="true">{drill.blindfoldAnnouncement}</div>
 		{/if}
 
 		<!-- Auto-play indicator -->
@@ -58,6 +72,18 @@
 </ResizableBoard>
 
 <style>
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
+	}
+
 	.board-wrap {
 		position: relative; /* needed for overlays */
 		width: 100%;

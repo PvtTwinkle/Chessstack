@@ -11,6 +11,8 @@ import { requireAdmin } from '$lib/server/api-helpers';
 import { parseBody } from '$lib/server/validation';
 import { createUserSchema } from '$lib/server/schemas/admin';
 import { IS_CLOUD } from '$lib/server/edition';
+import { usernameMatches } from '$lib/auth/username';
+import { isUniqueViolation } from '$lib/server/db-errors';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
 	const admin = requireAdmin(locals);
@@ -21,11 +23,12 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		throw error(400, 'Username, email, and password are required.');
 	}
 
-	// Check uniqueness
+	// Usernames are unique regardless of case (usernameMatches); the unique
+	// indexes behind the insert catch a race between these checks and it.
 	const [existingUsername] = await db
 		.select({ id: user.id })
 		.from(user)
-		.where(eq(user.username, username));
+		.where(usernameMatches(username));
 	if (existingUsername) {
 		throw error(409, 'That username is already taken.');
 	}
@@ -38,31 +41,41 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	}
 
 	const passwordHash = await bcrypt.hash(password, 10);
-	const [newUser] = await db
-		.insert(user)
-		.values({
-			username,
-			email,
-			passwordHash,
-			role: 'user',
-			enabled: true,
-			createdAt: new Date()
-		})
-		.returning({
-			id: user.id,
-			username: user.username,
-			role: user.role,
-			enabled: user.enabled,
-			createdAt: user.createdAt
+	let newUser;
+	try {
+		newUser = await db.transaction(async (tx) => {
+			const [created] = await tx
+				.insert(user)
+				.values({
+					username,
+					email,
+					passwordHash,
+					role: 'user',
+					enabled: true,
+					createdAt: new Date()
+				})
+				.returning({
+					id: user.id,
+					username: user.username,
+					role: user.role,
+					enabled: user.enabled,
+					createdAt: user.createdAt
+				});
+			await tx.insert(auditLog).values({
+				adminUserId: admin.id,
+				action: 'create_user',
+				targetUserId: created.id,
+				details: `Created user "${username}"`,
+				createdAt: new Date()
+			});
+			return created;
 		});
-
-	await db.insert(auditLog).values({
-		adminUserId: admin.id,
-		action: 'create_user',
-		targetUserId: newUser.id,
-		details: `Created user "${username}"`,
-		createdAt: new Date()
-	});
+	} catch (err) {
+		if (isUniqueViolation(err)) {
+			throw error(409, 'That username or email address is already in use.');
+		}
+		throw err;
+	}
 
 	return json(newUser, { status: 201 });
 };

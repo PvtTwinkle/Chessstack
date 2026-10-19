@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Seo from '$lib/components/Seo.svelte';
+	import SupportContact from '$lib/components/SupportContact.svelte';
 	import type { ActionData, PageData } from './$types';
 	import { base } from '$app/paths';
 	import { PASSWORD_HINT } from '$lib/auth/password';
@@ -32,7 +33,7 @@
 			<a class="action-link" href="{base}/forgot-password">Request new reset link</a>
 			<p class="help-text">
 				Still having trouble? Contact
-				<a href="mailto:support@chessstack.app" class="support-link">support@chessstack.app</a>
+				<SupportContact />
 			</p>
 		{:else}
 			<form method="POST">
@@ -213,15 +214,6 @@
 		color: var(--color-text-muted);
 		margin-top: var(--space-4);
 		line-height: 1.5;
-	}
-
-	.support-link {
-		color: var(--color-accent);
-		text-decoration: none;
-	}
-
-	.support-link:hover {
-		text-decoration: underline;
 	}
 
 	.action-link {

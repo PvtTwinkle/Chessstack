@@ -10,6 +10,7 @@
 -->
 
 <script lang="ts">
+	import { saveBoardSize } from '$lib/settings-client';
 	import ChessBoard from '$lib/components/ChessBoard.svelte';
 	import ResizableBoard from '$lib/components/ResizableBoard.svelte';
 	import OpeningName from '$lib/components/OpeningName.svelte';
@@ -53,16 +54,6 @@
 		}
 	});
 
-	// ── Board resize ────────────────────────────────────────────────────────────
-
-	function handleBoardResize(size: number) {
-		fetch('/api/settings', {
-			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ boardSize: size })
-		});
-	}
-
 	// ── Sound ───────────────────────────────────────────────────────────────────
 
 	onMount(() => {
@@ -78,10 +69,14 @@
 	}
 </script>
 
+<svelte:head>
+	<title>Train | Chessstack</title>
+</svelte:head>
+
 <div class="page train-ui">
 	<!-- ── Board column ──────────────────────────────────────────────────────── -->
 	<div class="board-col">
-		<ResizableBoard boardSize={data.settings?.boardSize ?? 0} onResize={handleBoardResize}>
+		<ResizableBoard boardSize={data.settings?.boardSize ?? 0} onResize={saveBoardSize}>
 			<div class="board-wrap">
 				{#key s.boardKey}
 					<ChessBoard

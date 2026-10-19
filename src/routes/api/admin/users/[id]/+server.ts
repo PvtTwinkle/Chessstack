@@ -9,23 +9,12 @@ import { requireAdmin, parseIntParam } from '$lib/server/api-helpers';
 import { parseBody } from '$lib/server/validation';
 import { updateUserSchema } from '$lib/server/schemas/admin';
 import { db } from '$lib/db';
-import {
-	user,
-	session,
-	userSettings,
-	repertoire,
-	userMove,
-	userRepertoireMove,
-	reviewedGame,
-	drillSession,
-	puzzleAttempt,
-	importedGame,
-	subscription,
-	passwordResetToken,
-	auditLog
-} from '$lib/db/schema';
-import { eq, and, count } from 'drizzle-orm';
-import { getStripe } from '$lib/stripe/client';
+import { user, session, auditLog } from '$lib/db/schema';
+import { eq, and, count, ne } from 'drizzle-orm';
+import { deleteUserAccount, SubscriptionNotCancelledError } from '$lib/server/delete-account';
+import { usernameMatches } from '$lib/auth/username';
+import { isUniqueViolation } from '$lib/server/db-errors';
+import { log } from '$lib/server/log';
 
 export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 	const admin = requireAdmin(locals);
@@ -40,22 +29,13 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 		.where(eq(user.id, targetId));
 	if (!target) throw error(404, 'User not found');
 
-	// Toggle enabled
-	if (body.enabled !== undefined) {
-		// Cannot disable yourself
-		if (targetId === admin.id) {
-			throw error(400, 'You cannot disable your own account.');
-		}
-
-		await db.update(user).set({ enabled: body.enabled }).where(eq(user.id, targetId));
-
-		// When disabling, immediately invalidate all their sessions
-		if (!body.enabled) {
-			await db.delete(session).where(eq(session.userId, targetId));
-		}
+	// Every rule is checked before anything is written, and the writes and
+	// their audit entry then go in one transaction, so a refused change never
+	// leaves an earlier one half-applied.
+	if (body.enabled !== undefined && targetId === admin.id) {
+		throw error(400, 'You cannot disable your own account.');
 	}
 
-	// Change role
 	if (body.role !== undefined) {
 		// Cannot demote yourself
 		if (targetId === admin.id && body.role !== 'admin') {
@@ -72,30 +52,26 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 				throw error(400, 'Cannot remove the last admin. Promote another user first.');
 			}
 		}
-
-		await db.update(user).set({ role: body.role }).where(eq(user.id, targetId));
 	}
 
-	// Change username
-	if (body.username !== undefined) {
-		const newUsername = body.username;
-		// Check uniqueness (skip if unchanged)
-		if (newUsername !== target.username) {
-			const [existing] = await db
-				.select({ id: user.id })
-				.from(user)
-				.where(eq(user.username, newUsername));
-			if (existing) {
-				throw error(409, 'That username is already taken.');
-			}
-			await db.update(user).set({ username: newUsername }).where(eq(user.id, targetId));
+	// A new username must not match another user's, ignoring case.
+	const newUsername =
+		body.username !== undefined && body.username !== target.username ? body.username : undefined;
+	if (newUsername !== undefined) {
+		const [existing] = await db
+			.select({ id: user.id })
+			.from(user)
+			.where(and(usernameMatches(newUsername), ne(user.id, targetId)));
+		if (existing) {
+			throw error(409, 'That username is already taken.');
 		}
 	}
 
-	// Toggle emailVerified
-	if (body.emailVerified !== undefined) {
-		await db.update(user).set({ emailVerified: body.emailVerified }).where(eq(user.id, targetId));
-	}
+	const updates: Partial<typeof user.$inferInsert> = {};
+	if (body.enabled !== undefined) updates.enabled = body.enabled;
+	if (body.role !== undefined) updates.role = body.role;
+	if (newUsername !== undefined) updates.username = newUsername;
+	if (body.emailVerified !== undefined) updates.emailVerified = body.emailVerified;
 
 	// Audit log — record what changed.
 	const changes: string[] = [];
@@ -103,14 +79,30 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 	if (body.role !== undefined) changes.push(`role=${body.role}`);
 	if (body.username !== undefined) changes.push(`username="${body.username}"`);
 	if (body.emailVerified !== undefined) changes.push(`emailVerified=${body.emailVerified}`);
-	if (changes.length > 0) {
-		await db.insert(auditLog).values({
-			adminUserId: admin.id,
-			action: 'update_user',
-			targetUserId: targetId,
-			details: changes.join(', '),
-			createdAt: new Date()
+
+	try {
+		await db.transaction(async (tx) => {
+			if (Object.keys(updates).length > 0) {
+				await tx.update(user).set(updates).where(eq(user.id, targetId));
+			}
+			// When disabling, immediately invalidate all their sessions.
+			if (body.enabled === false) {
+				await tx.delete(session).where(eq(session.userId, targetId));
+			}
+			if (changes.length > 0) {
+				await tx.insert(auditLog).values({
+					adminUserId: admin.id,
+					action: 'update_user',
+					targetUserId: targetId,
+					details: changes.join(', '),
+					createdAt: new Date()
+				});
+			}
 		});
+	} catch (e) {
+		// Another request took the username since the check above.
+		if (isUniqueViolation(e)) throw error(409, 'That username is already taken.');
+		throw e;
 	}
 
 	// Return updated user
@@ -156,47 +148,26 @@ export const DELETE: RequestHandler = async ({ locals, params }) => {
 		}
 	}
 
-	// Audit log — record before deletion (the target row will be gone after).
-	await db.insert(auditLog).values({
-		adminUserId: admin.id,
-		action: 'delete_user',
-		targetUserId: targetId,
-		details: `Deleted user id=${targetId}`,
-		createdAt: new Date()
-	});
-
-	// Cancel Stripe subscription if one exists.
-	const [sub] = await db
-		.select({ stripeSubscriptionId: subscription.stripeSubscriptionId })
-		.from(subscription)
-		.where(eq(subscription.userId, targetId));
-
-	if (sub?.stripeSubscriptionId) {
-		const stripe = getStripe();
-		if (stripe) {
-			try {
-				await stripe.subscriptions.cancel(sub.stripeSubscriptionId);
-			} catch {
-				// Subscription may already be cancelled or invalid in Stripe — proceed anyway.
-			}
-		}
+	// The audit entry is written in the same transaction as the deletion, so
+	// a deletion that fails (or a Stripe cancel that fails first) logs nothing.
+	try {
+		await deleteUserAccount(targetId, async (tx) => {
+			await tx.insert(auditLog).values({
+				adminUserId: admin.id,
+				action: 'delete_user',
+				targetUserId: targetId,
+				details: `Deleted user id=${targetId}`,
+				createdAt: new Date()
+			});
+		});
+	} catch (err) {
+		if (!(err instanceof SubscriptionNotCancelledError)) throw err;
+		log.error('Stripe cancel failed; user not deleted', { targetUserId: targetId, err: err.cause });
+		throw error(
+			502,
+			"Couldn't cancel this user's Stripe subscription, so they were not deleted. Try again, or cancel it in the Stripe dashboard first."
+		);
 	}
-
-	// Cascade-delete all user data in FK-safe order (children before parents).
-	await db.transaction(async (tx) => {
-		await tx.delete(passwordResetToken).where(eq(passwordResetToken.userId, targetId));
-		await tx.delete(subscription).where(eq(subscription.userId, targetId));
-		await tx.delete(session).where(eq(session.userId, targetId));
-		await tx.delete(puzzleAttempt).where(eq(puzzleAttempt.userId, targetId));
-		await tx.delete(drillSession).where(eq(drillSession.userId, targetId));
-		await tx.delete(importedGame).where(eq(importedGame.userId, targetId));
-		await tx.delete(reviewedGame).where(eq(reviewedGame.userId, targetId));
-		await tx.delete(userRepertoireMove).where(eq(userRepertoireMove.userId, targetId));
-		await tx.delete(userMove).where(eq(userMove.userId, targetId));
-		await tx.delete(repertoire).where(eq(repertoire.userId, targetId));
-		await tx.delete(userSettings).where(eq(userSettings.userId, targetId));
-		await tx.delete(user).where(eq(user.id, targetId));
-	});
 
 	return json({ success: true });
 };

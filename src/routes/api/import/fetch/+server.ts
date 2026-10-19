@@ -2,21 +2,24 @@
 //
 // Fetches new games for the authenticated user from the specified platform,
 // inserts them into imported_game with status='pending', and updates the
-// watermark timestamp so the next import only fetches newer games.
+// watermark timestamp so the next import only fetches newer games. The work
+// is in $lib/server/game-import, shared with the auto-import scheduler.
 //
 // Body: { source: 'LICHESS' | 'CHESSCOM' }
-// Returns: { imported, skipped, total } or { rateLimited: true } on 429.
+// Returns: { imported, skipped, total, more } or { rateLimited: true } on 429.
+// more is true when the batch came back full, so the platform may have newer
+// games still to fetch; the Import tab keeps asking until it is false.
 
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { userSettings, importedGame } from '$lib/db/schema';
+import { userSettings } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { fetchLichessGames, LichessApiError } from '$lib/lichess';
-import { fetchChesscomGames, ChesscomApiError } from '$lib/chesscom';
-import { isRateLimited } from '$lib/auth/rate-limit';
+import { LichessApiError } from '$lib/lichess';
+import { ChesscomApiError } from '$lib/chesscom';
+import { IMPORT_MAX_GAMES, fetchNewGames, saveImportedGames } from '$lib/server/game-import';
 import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
-import { requireAuth } from '$lib/server/api-helpers';
+import { requireAuth, rateLimitResponse } from '$lib/server/api-helpers';
 import { parseBody } from '$lib/server/validation';
 import { fetchImportSchema } from '$lib/server/schemas/import';
 
@@ -24,9 +27,8 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	const user = requireAuth(locals);
 	const userId = user.id;
 
-	if (await isRateLimited(String(userId), RATE_LIMITS.importFetch)) {
-		return json({ error: 'Too many requests. Please try again later.' }, { status: 429 });
-	}
+	const limited = await rateLimitResponse(userId, RATE_LIMITS.importFetch);
+	if (limited) return limited;
 
 	const { source } = await parseBody(request, fetchImportSchema);
 
@@ -45,27 +47,17 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	const watermark =
 		source === 'LICHESS' ? settings?.lastLichessImport : settings?.lastChesscomImport;
 
-	// Fetch games from the platform.
 	let games;
 	try {
-		if (source === 'LICHESS') {
-			games = await fetchLichessGames(username, {
-				since: watermark ? watermark.getTime() + 1 : undefined,
-				max: 50
-			});
-		} else {
-			games = await fetchChesscomGames(username, {
-				since: watermark ?? undefined,
-				max: 50
-			});
-		}
+		games = await fetchNewGames(source, username, watermark ?? null);
 	} catch (e) {
 		if (e instanceof LichessApiError || e instanceof ChesscomApiError) {
 			if (e.status === 429) {
 				return json({ imported: 0, skipped: 0, total: 0, rateLimited: true }, { status: 429 });
 			}
-			if (e.status === 404) {
-				throw error(404, e.message);
+			// 504: the platform didn't answer in time; the message says so.
+			if (e.status === 404 || e.status === 504) {
+				throw error(e.status, e.message);
 			}
 		}
 		throw error(
@@ -74,79 +66,22 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		);
 	}
 
-	// Insert all games and update the watermark in a single transaction so
-	// a crash mid-loop can't leave the watermark out of sync with the data.
-	let imported = 0;
-	let skipped = 0;
-	let latestPlayedAt: Date | null = watermark ?? null;
-
-	await db.transaction(async (tx) => {
-		for (const game of games) {
-			try {
-				const rows = await tx
-					.insert(importedGame)
-					.values({
-						userId: userId,
-						pgn: game.pgn,
-						source,
-						externalGameId: game.id,
-						playerColor: game.playerColor,
-						opponentName: game.opponentName,
-						opponentRating: game.opponentRating,
-						playerRating: game.playerRating,
-						timeControl: game.timeControl,
-						result: game.result,
-						playedAt: game.playedAt,
-						importedAt: new Date(),
-						status: 'pending'
-					})
-					.onConflictDoNothing()
-					.returning({ id: importedGame.id });
-
-				if (rows.length > 0) {
-					imported++;
-				} else {
-					skipped++;
-				}
-
-				if (game.playedAt && (!latestPlayedAt || game.playedAt > latestPlayedAt)) {
-					latestPlayedAt = game.playedAt;
-				}
-			} catch {
-				skipped++;
-			}
-		}
-
-		// Update the watermark so the next import only fetches newer games.
-		if (latestPlayedAt) {
-			const watermarkField =
-				source === 'LICHESS'
-					? { lastLichessImport: latestPlayedAt }
-					: { lastChesscomImport: latestPlayedAt };
-
-			if (settings) {
-				await tx
-					.update(userSettings)
-					.set({ ...watermarkField, updatedAt: new Date() })
-					.where(eq(userSettings.userId, userId));
-			} else {
-				// No settings row yet — create one with the watermark.
-				await tx.insert(userSettings).values({
-					userId: userId,
-					updatedAt: new Date(),
-					...watermarkField
-				});
-			}
-		}
-	});
+	const { imported, skipped, total } = await saveImportedGames(
+		userId,
+		source,
+		username,
+		watermark ?? null,
+		games
+	);
 
 	// Provide a reason when no games were imported so the UI can explain why.
 	let reason: string | undefined;
-	if (games.length === 0 && imported === 0) {
+	if (total === 0 && imported === 0) {
 		reason = watermark ? 'no_new_games' : 'no_games';
-	} else if (games.length > 0 && imported === 0) {
+	} else if (total > 0 && imported === 0) {
 		reason = 'all_skipped';
 	}
 
-	return json({ imported, skipped, total: games.length, ...(reason && { reason }) });
+	const more = total >= IMPORT_MAX_GAMES;
+	return json({ imported, skipped, total, more, ...(reason && { reason }) });
 };

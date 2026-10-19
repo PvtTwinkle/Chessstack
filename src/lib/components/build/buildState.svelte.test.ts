@@ -191,12 +191,11 @@ describe('handleMove', () => {
 	it("refuses a second move on the user's turn and snaps the piece back", async () => {
 		const { s } = setup();
 		s.syncFromData(movesFor(['e4']));
-		const key = s.boardKey;
 		await play(s, 'd4');
 
 		expect(fetchMock).not.toHaveBeenCalled();
 		expect(s.conflictSan).toBe('e4');
-		expect(s.boardKey).toBe(key + 1);
+		// The position stays where it was, which is what puts the piece back.
 		expect(s.currentFen).toBe(STARTING_FEN);
 	});
 
@@ -224,10 +223,8 @@ describe('handleMove', () => {
 		const { s } = setup();
 		s.syncFromData([]);
 		fetchMock.mockResolvedValue(jsonResponse({}, 500));
-		const key = s.boardKey;
 		await play(s, 'd4');
 		expect(s.errorMsg).toBe('Failed to save move. Please try again.');
-		expect(s.boardKey).toBe(key + 1);
 		expect(s.currentFen).toBe(STARTING_FEN);
 	});
 
@@ -366,6 +363,33 @@ describe('deleting moves', () => {
 		expect(s.moves.map((m) => m.san)).toEqual(['e4', 'd4']);
 		expect(s.navHistory.map((e) => e.san)).toEqual(['e4']);
 		expect(fenKey(s.currentFen)).toBe(fenKey(fenAfter('e4')));
+	});
+
+	it("stops where a line cycles back to the deleted move's position", async () => {
+		const { s } = setup();
+		// 3...Ng8 returns to the position after 1...e5, which also has 2.Bc4.
+		const moves = movesFor(['e4', 'e5', 'Nf3', 'Nf6', 'Ng1', 'Ng8'], ['e4', 'e5', 'Bc4']);
+		s.syncFromData(moves);
+
+		s.confirmDelete(moves[2]); // Nf3
+		expect(s.pendingDeleteSubtreeCount).toBe(3);
+		await s.executePendingDelete();
+
+		expect(s.moves.map((m) => m.san)).toEqual(['e4', 'e5', 'Bc4']);
+	});
+
+	it('keeps the moves of a position another line transposes into', async () => {
+		const { s } = setup();
+		// 1.Nf3 d5 2.d4 and 1.d4 d5 2.Nf3 reach the same position, which has 2...Nf6.
+		const moves = movesFor(['Nf3', 'd5', 'd4', 'Nf6'], ['d4', 'd5', 'Nf3']);
+		s.syncFromData(moves, 'Nf3,d5,d4,Nf6');
+
+		s.confirmDelete(moves[0]); // 1.Nf3
+		expect(s.pendingDeleteSubtreeCount).toBe(2);
+		await s.executePendingDelete();
+
+		expect(s.moves.map((m) => m.san)).toEqual(['Nf6', 'd4', 'd5', 'Nf3']);
+		expect(s.navHistory).toHaveLength(0);
 	});
 
 	it('keeps everything when the delete fails', async () => {

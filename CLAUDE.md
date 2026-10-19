@@ -64,7 +64,8 @@ Docker image use.
   without any third-party account. Document every new variable in `.env.example` and the README.
 - Server code logs with `log` from `src/lib/server/log.ts` (one JSON line, tagged with the request
   id), not `console`. Passing an Error as `err` to `log.error` also reports it to Sentry; pass a
-  plain `reason` string for expected failures such as a third-party outage.
+  plain `reason` string for expected failures such as a Lichess or Chess.com outage. A failed
+  email send is reported (pass `err`), since it can lock a user out of their account.
 - Comment the why, not the what. Match the comment density of the surrounding code.
 - Record user-visible changes under `## [Unreleased]` in `CHANGELOG.md`.
 

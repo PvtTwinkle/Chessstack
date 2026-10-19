@@ -9,7 +9,8 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
 	import { enhance } from '$app/forms';
-	import { manageRepertoiresOpen } from '$lib/stores/manageRepertoires';
+	import { manageRepertoires } from '$lib/stores/manageRepertoires.svelte';
+	import { importInBatches } from './importBatches';
 	import type { PageData } from '../../../routes/review/$types';
 
 	let {
@@ -17,6 +18,7 @@
 		repertoireColor,
 		importSettings,
 		importedGames,
+		importHistoryHasMore,
 		recentGames,
 		prefilledGame,
 		analysisError = $bindable(),
@@ -28,6 +30,8 @@
 		repertoireColor: string;
 		importSettings: PageData['importSettings'];
 		importedGames: PageData['importedGames'];
+		/** More reviewed or skipped games exist than the page loaded. */
+		importHistoryHasMore: boolean;
 		recentGames: PageData['recentGames'];
 		prefilledGame: PageData['prefilledGame'];
 		/** Error from the last analysis attempt (set by the page from the form result). */
@@ -64,7 +68,10 @@
 		skipped: number;
 		source: string;
 		reason?: string;
+		more?: boolean;
 	} | null>(null);
+	// Games imported so far by the running import, which can take several batches.
+	let importProgress = $state(0);
 	let importError = $state<string | null>(null);
 
 	// Import list filter
@@ -78,44 +85,87 @@
 	let repPickerLoading = $state(false);
 	let repPickerGameId = $state<number | null>(null);
 
+	// Reviewed and skipped games fetched with "Load more", on top of the page
+	// data. The page data wins for a game in both, since it is fresher.
+	type ImportedGame = PageData['importedGames'][number];
+	let olderGames = $state<ImportedGame[]>([]);
+	let loadedMoreHasMore = $state<boolean | null>(null);
+	let loadingMore = $state(false);
+	const historyHasMore = $derived(loadedMoreHasMore ?? importHistoryHasMore);
+
+	const allImportedGames = $derived.by(() => {
+		const games = importedGames ?? [];
+		const ids = new Set(games.map((g) => g.id));
+		return [...games, ...olderGames.filter((g) => !ids.has(g.id))].sort(
+			(a, b) =>
+				(b.playedAt ? new Date(b.playedAt).getTime() : 0) -
+					(a.playedAt ? new Date(a.playedAt).getTime() : 0) || b.id - a.id
+		);
+	});
+
 	// Filtered imported games
 	const filteredImportedGames = $derived(
-		(importedGames ?? []).filter((g) => importFilter === 'all' || g.status === importFilter)
+		allImportedGames.filter((g) => importFilter === 'all' || g.status === importFilter)
 	);
+
+	async function loadMoreImported() {
+		loadingMore = true;
+		importError = null;
+		try {
+			const offset = allImportedGames.filter((g) => g.status !== 'pending').length;
+			const res = await fetch(`/api/import?offset=${offset}`);
+			if (!res.ok) {
+				importError = 'Could not load more games.';
+				return;
+			}
+			const page: { games: ImportedGame[]; hasMore: boolean } = await res.json();
+			olderGames = [...olderGames, ...page.games];
+			loadedMoreHasMore = page.hasMore;
+		} catch {
+			importError = 'Network error. Check your connection.';
+		} finally {
+			loadingMore = false;
+		}
+	}
 
 	// Import functions
 	async function triggerImport(source: 'LICHESS' | 'CHESSCOM') {
 		importResult = null;
 		importError = null;
+		importProgress = 0;
 
 		if (source === 'LICHESS') importingLichess = true;
 		else importingChesscom = true;
 
+		const sourceName = source === 'LICHESS' ? 'Lichess' : 'Chess.com';
 		try {
-			const res = await fetch('/api/import/fetch', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ source })
-			});
+			const totals = await importInBatches(
+				async () => {
+					const res = await fetch('/api/import/fetch', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ source })
+					});
+					return { status: res.status, body: await res.json() };
+				},
+				(imported) => (importProgress = imported)
+			);
 
-			const result = await res.json();
-
-			if (res.status === 429 && result.rateLimited) {
-				importError = `Rate limited by ${source === 'LICHESS' ? 'Lichess' : 'Chess.com'}. Try again in a minute.`;
-				return;
+			if (totals.error) {
+				importError = totals.error.rateLimited
+					? `Rate limited by ${sourceName}. Try again in a minute.`
+					: totals.error.message;
 			}
-
-			if (!res.ok) {
-				importError = result.message ?? `Import failed (${res.status})`;
-				return;
+			// A later batch failing still leaves the earlier ones imported.
+			if (!totals.error || totals.imported > 0) {
+				importResult = {
+					imported: totals.imported,
+					skipped: totals.skipped,
+					source: sourceName,
+					reason: totals.reason,
+					more: totals.more
+				};
 			}
-
-			importResult = {
-				imported: result.imported,
-				skipped: result.skipped,
-				source: source === 'LICHESS' ? 'Lichess' : 'Chess.com',
-				reason: result.reason
-			};
 
 			// Refresh the imported games list
 			const { invalidateAll } = await import('$app/navigation');
@@ -321,7 +371,7 @@
 							<button
 								type="button"
 								class="create-rep-link"
-								onclick={() => manageRepertoiresOpen.set(true)}>Create a repertoire</button
+								onclick={() => (manageRepertoires.open = true)}>Create a repertoire</button
 							>
 						{/if}
 					</div>
@@ -341,7 +391,9 @@
 	{:else}
 		<div class="input-card">
 			<h2 class="input-title">Import Games</h2>
-			<p class="input-subtitle">Fetch recent games from Lichess or Chess.com.</p>
+			<p class="input-subtitle">
+				Fetch your games from Lichess or Chess.com. The first import reaches back three months.
+			</p>
 
 			<!-- Import buttons -->
 			<div class="import-buttons">
@@ -351,7 +403,7 @@
 					disabled={importingLichess || !importSettings?.lichessUsername}
 				>
 					{#if importingLichess}
-						Importing…
+						{importProgress > 0 ? `Importing… ${importProgress} games so far` : 'Importing…'}
 					{:else if !importSettings?.lichessUsername}
 						Lichess (set username in Settings)
 					{:else}
@@ -364,7 +416,7 @@
 					disabled={importingChesscom || !importSettings?.chesscomUsername}
 				>
 					{#if importingChesscom}
-						Importing…
+						{importProgress > 0 ? `Importing… ${importProgress} games so far` : 'Importing…'}
 					{:else if !importSettings?.chesscomUsername}
 						Chess.com (set username in Settings)
 					{:else}
@@ -392,6 +444,9 @@
 						{#if importResult.skipped > 0}
 							{importResult.skipped} already imported.
 						{/if}
+						{#if importResult.more}
+							There are more games to fetch: import again to bring them in.
+						{/if}
 					{/if}
 				</div>
 			{/if}
@@ -402,7 +457,7 @@
 						<button
 							type="button"
 							class="create-rep-link"
-							onclick={() => manageRepertoiresOpen.set(true)}>Create a repertoire</button
+							onclick={() => (manageRepertoires.open = true)}>Create a repertoire</button
 						>
 					{/if}
 				</div>
@@ -487,6 +542,15 @@
 					{/each}
 				</div>
 			{/if}
+			{#if historyHasMore && importFilter !== 'pending'}
+				<button
+					class="btn btn--secondary btn--full load-more"
+					onclick={loadMoreImported}
+					disabled={loadingMore}
+				>
+					{loadingMore ? 'Loading…' : 'Load more'}
+				</button>
+			{/if}
 		</div>
 	{/if}
 
@@ -531,7 +595,7 @@
 					<button
 						class="rep-picker-item"
 						onclick={() => {
-							const game = importedGames?.find((g) => g.id === repPickerGameId);
+							const game = allImportedGames.find((g) => g.id === repPickerGameId);
 							if (game) {
 								loadImportedGameForReview(game.id, game.pgn, game.playerColor, a.repertoireId);
 							}
@@ -760,6 +824,10 @@
 		border-color: var(--color-accent);
 		color: var(--color-accent);
 		background: var(--color-accent-glow);
+	}
+
+	.load-more {
+		margin-top: var(--space-3);
 	}
 
 	.import-empty {

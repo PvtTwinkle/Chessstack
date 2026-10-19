@@ -3,8 +3,11 @@ import {
 	createSettingsState,
 	formatMaxInterval,
 	SAVE_DEBOUNCE_MS,
+	SAVE_FAILED,
+	SAVED,
 	STATUS_CLEAR_MS
 } from './settingsState.svelte';
+import { tutorial } from '$lib/stores/tutorial.svelte';
 
 // A fetch stub that records requests and answers with the given status.
 function stubFetch(status = 200, body: unknown = {}) {
@@ -27,8 +30,9 @@ function sentBody(fetchMock: ReturnType<typeof stubFetch>, n = 0) {
 function setup() {
 	const invalidateAll = vi.fn(async () => {});
 	const goToBuild = vi.fn(async () => {});
-	const s = createSettingsState({ invalidateAll, goToBuild });
-	return { s, invalidateAll, goToBuild };
+	const goToVerifyEmail = vi.fn(async () => {});
+	const s = createSettingsState({ invalidateAll, goToBuild, goToVerifyEmail });
+	return { s, invalidateAll, goToBuild, goToVerifyEmail };
 }
 
 // A range input event carrying the given value.
@@ -131,13 +135,23 @@ describe('app theme', () => {
 		expect(invalidateAll).toHaveBeenCalledOnce();
 	});
 
-	it('reverts to the other theme when the save fails', async () => {
+	it('reverts to the previous theme and reports an error when the save fails', async () => {
 		stubFetch(500);
 		const { s, invalidateAll } = setup();
 		await s.setAppTheme('light');
 		expect(s.appTheme).toBe('dark');
 		expect(document.documentElement.dataset.theme).toBe('dark');
+		expect(s.appThemeStatus).toEqual(SAVE_FAILED);
 		expect(invalidateAll).not.toHaveBeenCalled();
+	});
+
+	it('keeps the current theme when re-choosing it fails', async () => {
+		stubFetch(500);
+		const { s } = setup();
+		s.sync({ appTheme: 'light' }, null);
+		await s.setAppTheme('light');
+		expect(s.appTheme).toBe('light');
+		expect(document.documentElement.dataset.theme).toBe('light');
 	});
 });
 
@@ -148,9 +162,9 @@ describe('board theme', () => {
 		await s.setBoardTheme('purple');
 		expect(s.boardTheme).toBe('purple');
 		expect(sentBody(fetchMock)).toEqual({ boardTheme: 'purple' });
-		expect(s.boardThemeStatus).toBe('Saved');
+		expect(s.boardThemeStatus).toEqual(SAVED);
 		vi.advanceTimersByTime(STATUS_CLEAR_MS);
-		expect(s.boardThemeStatus).toBe('');
+		expect(s.boardThemeStatus).toBeNull();
 	});
 
 	it('keeps the chosen theme but reports an error when the save fails', async () => {
@@ -158,7 +172,8 @@ describe('board theme', () => {
 		const { s } = setup();
 		await s.setBoardTheme('purple');
 		expect(s.boardTheme).toBe('purple');
-		expect(s.boardThemeStatus).toBe('Error saving');
+		expect(s.boardThemeStatus).toEqual(SAVE_FAILED);
+		expect(s.boardThemeStatus?.ok).toBe(false);
 	});
 });
 
@@ -176,7 +191,7 @@ describe('toggles', () => {
 		expect(invalidateAll).toHaveBeenCalledTimes(2);
 	});
 
-	it('flips back on a network error', async () => {
+	it('flips back and reports an error on a network error', async () => {
 		vi.stubGlobal(
 			'fetch',
 			vi.fn(async () => {
@@ -187,15 +202,16 @@ describe('toggles', () => {
 		s.sync(null, null);
 		await s.sound.toggle();
 		expect(s.sound.value).toBe(true);
+		expect(s.sound.status).toEqual(SAVE_FAILED);
 	});
 
-	it('keeps the new value when the server answers with an error status', async () => {
-		// Matches the original page: toggles only revert when the request throws.
+	it('flips back when the server answers with an error status', async () => {
 		stubFetch(500);
 		const { s } = setup();
 		s.sync(null, null);
 		await s.tempo.toggle();
-		expect(s.tempo.value).toBe(true);
+		expect(s.tempo.value).toBe(false);
+		expect(s.tempo.status).toEqual(SAVE_FAILED);
 	});
 });
 
@@ -212,10 +228,10 @@ describe('sliders', () => {
 		expect(fetchMock).toHaveBeenCalledOnce();
 		expect(sentBody(fetchMock)).toEqual({ stockfishDepth: 21 });
 		expect(invalidateAll).toHaveBeenCalledOnce();
-		expect(s.stockfishDepth.status).toBe('Saved');
+		expect(s.stockfishDepth.status).toEqual(SAVED);
 
 		await vi.advanceTimersByTimeAsync(STATUS_CLEAR_MS);
-		expect(s.stockfishDepth.status).toBe('');
+		expect(s.stockfishDepth.status).toBeNull();
 	});
 
 	it('sends each slider under its own settings key', async () => {
@@ -241,7 +257,7 @@ describe('sliders', () => {
 		s.playbackSpeed.handleInput(inputEvent('300'));
 		await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS);
 		expect(s.playbackSpeed.value).toBe(300);
-		expect(s.playbackSpeed.status).toBe('Error saving');
+		expect(s.playbackSpeed.status).toEqual(SAVE_FAILED);
 	});
 
 	it('drops a pending save when the page is destroyed', async () => {
@@ -260,7 +276,7 @@ describe('trainer rating', () => {
 		const { s } = setup();
 		s.trainerRatingInput = input;
 		await s.saveTrainerRating();
-		expect(s.trainerRatingStatus).toBe('Must be 100-3000');
+		expect(s.trainerRatingStatus).toEqual({ text: 'Must be 100-3000', ok: false });
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
@@ -273,7 +289,7 @@ describe('trainer rating', () => {
 		await saving;
 		expect(sentBody(fetchMock)).toEqual({ trainerRating: 1600 });
 		expect(s.savingTrainerRating).toBe(false);
-		expect(s.trainerRatingStatus).toBe('Saved');
+		expect(s.trainerRatingStatus).toEqual(SAVED);
 	});
 
 	it('reports an error when the save fails', async () => {
@@ -281,7 +297,7 @@ describe('trainer rating', () => {
 		const { s } = setup();
 		s.trainerRatingInput = '1600';
 		await s.saveTrainerRating();
-		expect(s.trainerRatingStatus).toBe('Error saving');
+		expect(s.trainerRatingStatus).toEqual(SAVE_FAILED);
 		expect(s.savingTrainerRating).toBe(false);
 	});
 });
@@ -293,7 +309,7 @@ describe('game import usernames', () => {
 		s.lichessUsername.value = 'magnus';
 		await s.lichessUsername.save();
 		expect(sentBody(fetchMock)).toEqual({ lichessUsername: 'magnus' });
-		expect(s.lichessUsername.status).toBe('Saved');
+		expect(s.lichessUsername.status).toEqual(SAVED);
 		expect(s.lichessUsername.saving).toBe(false);
 	});
 
@@ -310,7 +326,16 @@ describe('game import usernames', () => {
 		const { s } = setup();
 		s.chesscomUsername.value = 'hikaru';
 		await s.chesscomUsername.save();
-		expect(s.chesscomUsername.status).toBe('Error saving');
+		expect(s.chesscomUsername.status).toEqual(SAVE_FAILED);
+	});
+
+	it('saves the trimmed username and shows it', async () => {
+		const fetchMock = stubFetch();
+		const { s } = setup();
+		s.lichessUsername.value = '  magnus ';
+		await s.lichessUsername.save();
+		expect(sentBody(fetchMock)).toEqual({ lichessUsername: 'magnus' });
+		expect(s.lichessUsername.value).toBe('magnus');
 	});
 });
 
@@ -324,22 +349,45 @@ describe('email', () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
-	it('sends the trimmed email and reports success', async () => {
+	it('asks for the current password before sending anything', async () => {
 		const fetchMock = stubFetch();
-		const { s, invalidateAll } = setup();
+		const { s } = setup();
+		s.email = 'me@example.com';
+		await s.saveEmail();
+		expect(s.emailError).toBe('Enter your current password to change your email');
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('sends the trimmed email with the password and reports success', async () => {
+		const fetchMock = stubFetch(200, { updated: true, verificationRequired: false });
+		const { s, invalidateAll, goToVerifyEmail } = setup();
 		s.email = '  me@example.com ';
+		s.emailPassword = 'my password';
 		await s.saveEmail();
 		expect(fetchMock.mock.calls[0][0]).toBe('/api/account/email');
-		expect(sentBody(fetchMock)).toEqual({ email: 'me@example.com' });
-		expect(s.emailStatus).toBe('Email updated successfully');
+		expect(sentBody(fetchMock)).toEqual({ email: 'me@example.com', password: 'my password' });
+		expect(s.emailStatus).toBe('Email updated');
 		expect(s.emailError).toBe('');
+		expect(s.emailPassword).toBe('');
 		expect(invalidateAll).toHaveBeenCalledOnce();
+		expect(goToVerifyEmail).not.toHaveBeenCalled();
+	});
+
+	it('goes to /verify-email when the new address needs verifying', async () => {
+		stubFetch(200, { updated: true, verificationRequired: true });
+		const { s, invalidateAll, goToVerifyEmail } = setup();
+		s.email = 'new@example.com';
+		s.emailPassword = 'my password';
+		await s.saveEmail();
+		expect(goToVerifyEmail).toHaveBeenCalledOnce();
+		expect(invalidateAll).not.toHaveBeenCalled();
 	});
 
 	it("shows the server's error message", async () => {
 		stubFetch(409, { message: 'Email already in use' });
 		const { s } = setup();
 		s.email = 'taken@example.com';
+		s.emailPassword = 'my password';
 		await s.saveEmail();
 		expect(s.emailError).toBe('Email already in use');
 		expect(s.savingEmail).toBe(false);
@@ -401,7 +449,25 @@ describe('password change', () => {
 	});
 });
 
+describe('unsaved edits', () => {
+	it('survive another setting saving', async () => {
+		stubFetch();
+		const { s, invalidateAll } = setup();
+		s.sync({ lichessUsername: 'old' }, 'me@example.com');
+		s.lichessUsername.value = 'typed-but-not-saved';
+		s.email = 'new@example.com';
+		s.trainerRatingInput = '1777';
+		await s.sound.toggle();
+		expect(invalidateAll).toHaveBeenCalledOnce();
+		expect(s.lichessUsername.value).toBe('typed-but-not-saved');
+		expect(s.email).toBe('new@example.com');
+		expect(s.trainerRatingInput).toBe('1777');
+	});
+});
+
 describe('tutorial', () => {
+	afterEach(() => tutorial.sync(null));
+
 	it('resets the tutorial step and goes to Build, once', async () => {
 		const fetchMock = stubFetch();
 		const { s, goToBuild } = setup();
@@ -412,5 +478,15 @@ describe('tutorial', () => {
 		expect(sentBody(fetchMock)).toEqual({ tutorialStep: 1 });
 		expect(goToBuild).toHaveBeenCalledOnce();
 		expect(s.restartingTutorial).toBe(true);
+	});
+
+	it('reports a failed restart and lets the user try again', async () => {
+		stubFetch(500);
+		const { s, goToBuild } = setup();
+		await s.restartTutorial();
+		expect(goToBuild).not.toHaveBeenCalled();
+		expect(s.restartingTutorial).toBe(false);
+		expect(s.tutorialStatus?.ok).toBe(false);
+		expect(tutorial.step).toBeNull();
 	});
 });

@@ -20,18 +20,16 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
 import { lookupEco } from '$lib/eco';
-import { isRateLimited } from '$lib/auth/rate-limit';
 import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
-import { requireAuth } from '$lib/server/api-helpers';
+import { requireAuth, rateLimitResponse } from '$lib/server/api-helpers';
 import { parseBody } from '$lib/server/validation';
 import { ecoLookupSchema } from '$lib/server/schemas/engine';
 
 export const POST: RequestHandler = async ({ request, locals }) => {
 	const user = requireAuth(locals);
 
-	if (await isRateLimited(String(user.id), RATE_LIMITS.eco)) {
-		return json({ error: 'Too many requests. Please try again later.' }, { status: 429 });
-	}
+	const limited = await rateLimitResponse(user.id, RATE_LIMITS.eco);
+	if (limited) return limited;
 
 	// The schema drops entries that don't look like FENs and keeps at most 50.
 	const { fens } = await parseBody(request, ecoLookupSchema);

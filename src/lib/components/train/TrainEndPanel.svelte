@@ -50,6 +50,11 @@
 					</span>
 				</span>
 			</div>
+		{:else if s.ratingSkipped}
+			<div class="eval-row">
+				<span class="eval-label">Rating</span>
+				<span class="eval-value eval-unrated">Unchanged: the engine ran out of time</span>
+			</div>
 		{:else if !s.rated}
 			<div class="eval-row">
 				<span class="eval-label">Rating</span>

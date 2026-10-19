@@ -1,7 +1,7 @@
 // Build mode: the board keeps the user's position when the page data reloads,
 // and deleting a move removes it with everything after it.
 
-import { expect, test, type Request } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import {
 	buildLine,
 	createFirstRepertoire,
@@ -10,44 +10,23 @@ import {
 	trackErrors
 } from './helpers';
 
-test('a page data reload right after a move keeps the current line', async ({ page }) => {
+test('a page data reload keeps the current line', async ({ page }) => {
 	const errors = trackErrors(page);
 	await registerUser(page, 'reload');
-	await page.getByPlaceholder('e.g. White — e4 lines').fill('Reload White');
-	await page.getByRole('button', { name: 'Create Repertoire' }).click();
-	await expect(page).toHaveURL(/\/build$/);
-
-	// Skipping the tutorial saves the setting and then reloads the page data
-	// (invalidateAll). Delay that reload so it lands after the moves below, as
-	// it can on a slow connection. Hold it until the first move is saved rather
-	// than for a fixed time: on a slow CI runner the save could otherwise reach
-	// the server after the reload, which then has no move to keep.
-	const firstMoveSaved = page.waitForResponse(
-		(r) => r.url().endsWith('/api/moves') && r.request().method() === 'POST'
-	);
-	const reloadUrl = /\/build\/__data\.json\?x-sveltekit-invalidated=11/;
-	await page.route(reloadUrl, async (route) => {
-		await firstMoveSaved;
-		await new Promise((resolve) => setTimeout(resolve, 300));
-		await route.continue();
-	});
-	// The reload can also be cancelled by the page (the request then fails),
-	// so wait for it to settle either way rather than for a response.
-	const reloaded = new Promise<void>((resolve) => {
-		const settled = (request: Request) => {
-			if (reloadUrl.test(request.url())) resolve();
-		};
-		page.on('requestfinished', settled);
-		page.on('requestfailed', settled);
-	});
-
-	// Don't wait for the overlay to close: it closes only once the reload lands.
-	await page.getByRole('button', { name: 'Skip Tutorial' }).click();
+	await createFirstRepertoire(page, 'Reload White');
 	await buildLine(page, [/^e4\b/, /^e5\b/, /^Nf3\b/]);
 
-	await reloaded;
-	// Give the page a moment to apply the reloaded data before checking it.
-	await page.waitForTimeout(500);
+	// Finishing a PGN import reloads the page data (invalidateAll). The PGN adds
+	// Black's reply to the line the user is on, so the reply showing up at the
+	// current position means the reload has landed.
+	await page.getByRole('button', { name: 'More actions' }).click();
+	await page.getByRole('button', { name: 'Import PGN' }).click();
+	await page.getByPlaceholder('1. d4 Nf6 2. Nc3 d5 3. Bf4 ...').fill('1. e4 e5 2. Nf3 Nc6 *');
+	await page.getByRole('button', { name: 'Parse & Preview' }).click();
+	await page.getByRole('button', { name: /^Import \d+ moves?$/ }).click();
+	await expect(page.getByRole('heading', { name: 'Import complete' })).toBeVisible();
+	await page.getByRole('button', { name: 'Done' }).click();
+	await expect(page.locator('.position-move-item', { hasText: 'Nc6' })).toBeVisible();
 
 	const line = page.locator('.move-list .move-san');
 	await expect(line).toHaveText(['e4', 'e5', 'Nf3']);
@@ -66,12 +45,13 @@ test('deleting a move removes it and everything after it', async ({ page }) => {
 	await page.getByRole('button', { name: /Undo/ }).click();
 	const nf3 = page.locator('.position-move-item', { hasText: 'Nf3' });
 	await nf3.getByTitle('Remove this move and all moves after it').click();
-	await expect(page.locator('.modal-title')).toContainText('Delete Nf3?');
+	const dialog = page.getByRole('dialog', { name: 'Delete Nf3?' });
+	await expect(dialog).toBeVisible();
 
 	const deleted = page.waitForResponse(
 		(r) => /\/api\/moves\/\d+$/.test(r.url()) && r.request().method() === 'DELETE'
 	);
-	await page.locator('.modal-btn--danger').click();
+	await dialog.locator('.modal-btn--danger').click();
 	expect((await deleted).ok()).toBe(true);
 	await expect(nf3).toHaveCount(0);
 
@@ -83,10 +63,19 @@ test('deleting a move removes it and everything after it', async ({ page }) => {
 	expect(errors).toEqual([]);
 });
 
+// The threaded build is skipped when it would get only one search thread, which
+// it would on a two-core CI runner.
+async function pretendManyCores(page: Page) {
+	await page.addInitScript(() =>
+		Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 })
+	);
+}
+
 test('the Engine tab runs Stockfish in the browser', async ({ page }) => {
 	const errors = trackErrors(page);
 	const workers: string[] = [];
 	page.on('worker', (worker) => workers.push(worker.url()));
+	await pretendManyCores(page);
 
 	await registerUser(page, 'engine');
 	await createFirstRepertoire(page, 'Analysis White');
@@ -106,6 +95,7 @@ test('the Engine tab falls back to one thread when the threaded build fails', as
 	const errors = trackErrors(page);
 	const workers: string[] = [];
 	page.on('worker', (worker) => workers.push(worker.url()));
+	await pretendManyCores(page);
 	// Stand-in for a browser (Firefox) that is cross-origin isolated but can't
 	// start the threaded build: its worker dies on startup.
 	await page.route('**/engine/stockfish-19-lite.js', (route) =>
@@ -122,7 +112,9 @@ test('the Engine tab falls back to one thread when the threaded build fails', as
 	await page.locator('button.tab', { hasText: 'Engine' }).click();
 	await expect(page.locator('.candidate-row')).toHaveCount(3, { timeout: 30_000 });
 	expect(workers.some((url) => url.endsWith('/engine/stockfish-19-lite-single.js'))).toBe(true);
-	expect(await page.evaluate(() => localStorage.getItem('engine-threads-failed'))).toBe('1');
+	expect(await page.evaluate(() => localStorage.getItem('engine-threads-failed'))).toBe(
+		'/engine/stockfish-19-lite.js'
+	);
 
 	expect(errors).toEqual([]);
 });

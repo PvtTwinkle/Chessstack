@@ -12,6 +12,7 @@
 // theme to have fully independent light and dark square colors.
 
 import { writeFileSync } from 'fs';
+import { format, resolveConfig } from 'prettier';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -174,5 +175,8 @@ ${sections.join('\n\n')}
 ${SHARED_INTERACTIVE}
 `;
 
-writeFileSync(OUTPUT, css, 'utf-8');
+// Formatted like the rest of the repo, so re-running the script on an
+// unchanged theme list leaves the committed file as it is.
+const formatted = await format(css, { ...(await resolveConfig(OUTPUT)), filepath: OUTPUT });
+writeFileSync(OUTPUT, formatted, 'utf-8');
 console.log(`Wrote ${THEMES.length} board themes to ${OUTPUT}`);

@@ -2,7 +2,10 @@
 	import type { PageData } from './$types';
 	import { goto } from '$app/navigation';
 	import { base, resolveRoute } from '$app/paths';
-	import type { WorkerParseMessage, WorkerOutboundMessage, AggregatedMove } from '$lib/prep/types';
+	import { onDestroy } from 'svelte';
+	import { SvelteSet } from 'svelte/reactivity';
+	import PrepDialog from '$lib/components/prep/PrepDialog.svelte';
+	import { fetchErrorMessage, parseInWorker, postJson, uploadPrepMoves } from '$lib/prep/pipeline';
 
 	let { data }: { data: PageData } = $props();
 
@@ -20,8 +23,14 @@
 	let progressTotal = $state(0);
 	let errorMessage = $state('');
 
+	// Stops a parse still running in the worker when the page is left.
+	const leaving = new AbortController();
+	onDestroy(() => leaving.abort());
+
 	// ── Delete confirmation ──────────────────────────────────────────────
 	let deletingId = $state<number | null>(null);
+	const deletedIds = new SvelteSet<number>();
+	const preps = $derived(data.preps.filter((p) => !deletedIds.has(p.id)));
 
 	function resetForm() {
 		showForm = false;
@@ -55,10 +64,7 @@
 				})
 			});
 
-			if (!fetchRes.ok) {
-				const err = await fetchRes.json().catch(() => null);
-				throw new Error(err?.message || `Fetch failed (${fetchRes.status})`);
-			}
+			if (!fetchRes.ok) throw new Error(await fetchErrorMessage(fetchRes));
 
 			const { pgns, gameCount, hasMore } = await fetchRes.json();
 
@@ -73,55 +79,39 @@
 			statusMessage = `Downloaded ${gameCount} games${moreNote}. Parsing...`;
 
 			// Step 2: Parse PGNs in Web Worker
-			const result = await parseInWorker(pgns, opponentUsername.trim());
+			const result = await parseInWorker(
+				pgns,
+				opponentUsername.trim(),
+				(completed, total) => {
+					progressCompleted = completed;
+					progressTotal = total;
+					statusMessage = `Parsing games... ${completed}/${total}`;
+				},
+				leaving.signal
+			);
 
 			statusMessage = 'Saving prep...';
 
-			// Step 3: Create prep row (without moves — those are sent in chunks)
-			const createRes = await fetch(`${base}/api/prep`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
+			// Step 3: Create the prep as a pending upload, then send its moves
+			// and publish it in one step
+			const prep = await postJson<{ id: number }>(
+				`${base}/api/prep`,
+				{
 					opponentName: opponentUsername.trim(),
 					platform,
 					platformUsername: opponentUsername.trim(),
 					timeWindow,
 					gamesAsWhite: result.gamesAsWhite,
-					gamesAsBlack: result.gamesAsBlack,
-					moves: []
-				})
+					gamesAsBlack: result.gamesAsBlack
+				},
+				'Save failed'
+			);
+			const prepId = await uploadPrepMoves(base, prep.id, result, timeWindow, (batch, total) => {
+				statusMessage = `Saving moves... ${batch}/${total}`;
 			});
 
-			if (!createRes.ok) {
-				const err = await createRes.json().catch(() => null);
-				throw new Error(err?.message || `Save failed (${createRes.status})`);
-			}
-
-			const prep = await createRes.json();
-
-			// Step 4: Send moves in chunks of 1000
-			const CHUNK_SIZE = 1000;
-			const allMoves = result.moves;
-			const totalChunks = Math.ceil(allMoves.length / CHUNK_SIZE);
-
-			for (let i = 0; i < allMoves.length; i += CHUNK_SIZE) {
-				const chunk = allMoves.slice(i, i + CHUNK_SIZE);
-				const chunkNum = Math.floor(i / CHUNK_SIZE) + 1;
-				statusMessage = `Saving moves... ${chunkNum}/${totalChunks}`;
-
-				const batchRes = await fetch(`${base}/api/prep/${prep.id}/refresh`, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ mode: 'merge-batch', moves: chunk })
-				});
-				if (!batchRes.ok) {
-					const err = await batchRes.json().catch(() => null);
-					throw new Error(err?.message || `Save batch ${chunkNum} failed (${batchRes.status})`);
-				}
-			}
-
 			// Step 4: Navigate to the new prep
-			await goto(resolveRoute('/prep/[id]', { id: String(prep.id) }));
+			await goto(resolveRoute('/prep/[id]', { id: String(prepId) }));
 		} catch (e) {
 			errorMessage = e instanceof Error ? e.message : String(e);
 			loading = false;
@@ -129,47 +119,12 @@
 		}
 	}
 
-	function parseInWorker(
-		pgns: string[],
-		username: string
-	): Promise<{ moves: AggregatedMove[]; gamesAsWhite: number; gamesAsBlack: number }> {
-		return new Promise((resolve, reject) => {
-			const worker = new Worker(
-				new URL('../../lib/workers/prepParser.worker.ts', import.meta.url),
-				{ type: 'module' }
-			);
-
-			worker.onmessage = (event: MessageEvent<WorkerOutboundMessage>) => {
-				const msg = event.data;
-				if (msg.type === 'progress') {
-					progressCompleted = msg.completed;
-					progressTotal = msg.total;
-					statusMessage = `Parsing games... ${msg.completed}/${msg.total}`;
-				} else if (msg.type === 'result') {
-					worker.terminate();
-					resolve(msg);
-				} else if (msg.type === 'error') {
-					worker.terminate();
-					reject(new Error(msg.message));
-				}
-			};
-
-			worker.onerror = (e) => {
-				worker.terminate();
-				reject(new Error(e.message || 'Worker error'));
-			};
-
-			const message: WorkerParseMessage = { type: 'parse', pgns, opponentUsername: username };
-			worker.postMessage(message);
-		});
-	}
-
 	async function deletePrep(id: number) {
 		try {
 			const res = await fetch(`${base}/api/prep/${id}`, { method: 'DELETE' });
 			if (!res.ok) throw new Error('Delete failed');
-			// Remove from local data to avoid full page reload
-			data.preps = data.preps.filter((p) => p.id !== id);
+			// Hide it here rather than reload the page (or write to the data prop).
+			deletedIds.add(id);
 			deletingId = null;
 		} catch (e) {
 			errorMessage = e instanceof Error ? e.message : String(e);
@@ -189,6 +144,10 @@
 		return p === 'LICHESS' ? 'Lichess' : 'Chess.com';
 	}
 </script>
+
+<svelte:head>
+	<title>Prep | Chessstack</title>
+</svelte:head>
 
 <div class="prep-page">
 	<header class="prep-header">
@@ -255,7 +214,7 @@
 
 				{#if loading}
 					<div class="progress-section">
-						<p class="status-text">{statusMessage}</p>
+						<p class="status-text" role="status">{statusMessage}</p>
 						{#if progressTotal > 0}
 							<div class="progress-bar">
 								<div
@@ -268,7 +227,7 @@
 				{/if}
 
 				{#if errorMessage}
-					<p class="error-text">{errorMessage}</p>
+					<p class="error-text" role="alert">{errorMessage}</p>
 				{/if}
 
 				<div class="form-actions">
@@ -283,7 +242,7 @@
 		</div>
 	{/if}
 
-	{#if data.preps.length === 0 && !showForm}
+	{#if preps.length === 0 && !showForm}
 		<div class="empty-state">
 			<p>No opponent preps yet.</p>
 			<p class="empty-hint">
@@ -292,7 +251,7 @@
 		</div>
 	{:else}
 		<div class="prep-grid">
-			{#each data.preps as prep (prep.id)}
+			{#each preps as prep (prep.id)}
 				<a class="prep-card" href="{base}/prep/{prep.id}">
 					<div class="prep-card-header">
 						<span class="opponent-name">{prep.opponentName}</span>
@@ -315,6 +274,7 @@
 								deletingId = prep.id;
 							}}
 							title="Delete prep"
+							aria-label="Delete prep against {prep.opponentName}"
 						>
 							&times;
 						</button>
@@ -325,11 +285,8 @@
 	{/if}
 
 	{#if deletingId !== null}
-		<div class="modal-backdrop" onclick={() => (deletingId = null)} role="presentation">
-			<!-- svelte-ignore a11y_click_events_have_key_events -->
-			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<div class="modal" onclick={(e) => e.stopPropagation()}>
-				<h3>Delete Prep</h3>
+		<PrepDialog title="Delete Prep" onClose={() => (deletingId = null)}>
+			<div class="modal-content">
 				<p>Delete this opponent prep and all associated moves? This cannot be undone.</p>
 				<div class="modal-actions">
 					<button class="delete-confirm-btn" onclick={() => deletePrep(deletingId!)}>
@@ -338,7 +295,7 @@
 					<button class="cancel-btn" onclick={() => (deletingId = null)}>Cancel</button>
 				</div>
 			</div>
-		</div>
+		</PrepDialog>
 	{/if}
 </div>
 
@@ -621,32 +578,7 @@
 
 	/* ── Delete modal ─────────────────────────────────────────────────── */
 
-	.modal-backdrop {
-		position: fixed;
-		inset: 0;
-		background: rgba(0, 0, 0, 0.6);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 1000;
-	}
-
-	.modal {
-		background: var(--color-surface);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-lg);
-		padding: var(--space-4);
-		max-width: 400px;
-		width: 90%;
-	}
-
-	.modal h3 {
-		margin: 0 0 var(--space-2) 0;
-		font-size: 1rem;
-		color: var(--color-text-primary);
-	}
-
-	.modal p {
+	.modal-content p {
 		font-size: 0.85rem;
 		color: var(--color-text-secondary);
 		margin: 0 0 var(--space-3) 0;

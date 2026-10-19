@@ -7,6 +7,9 @@
 import { log } from '$lib/server/log';
 
 const LICHESS_API_BASE = 'https://lichess.org';
+// A hung upstream would otherwise hold the user's request open, or stall the
+// whole auto-import cycle, indefinitely. Covers reading the body too.
+export const LICHESS_TIMEOUT_MS = 15_000;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -66,15 +69,28 @@ interface LichessNdjsonGame {
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
+ * Every Lichess perf type that is standard chess. Lichess's game export mixes
+ * in Chess960, King of the Hill and the other variants unless told otherwise.
+ */
+export const STANDARD_PERF_TYPES = 'ultraBullet,bullet,blitz,rapid,classical,correspondence';
+
+/**
  * Fetch recent games for a Lichess user.
  *
  * @param username - Lichess username (case-insensitive)
  * @param options.since - Only fetch games played after this Unix timestamp (ms)
  * @param options.max - Maximum number of games to return (default 50)
+ * @param options.perfType - Comma-separated Lichess perf types to keep, e.g.
+ *   STANDARD_PERF_TYPES to leave out variant games
  */
 export async function fetchLichessGames(
 	username: string,
-	options: { since?: number; max?: number; sort?: 'dateAsc' | 'dateDesc' } = {}
+	options: {
+		since?: number;
+		max?: number;
+		sort?: 'dateAsc' | 'dateDesc';
+		perfType?: string;
+	} = {}
 ): Promise<LichessGame[]> {
 	const max = options.max ?? 50;
 
@@ -92,29 +108,41 @@ export async function fetchLichessGames(
 	if (options.since !== undefined) {
 		params.set('since', String(options.since));
 	}
+	if (options.perfType) {
+		params.set('perfType', options.perfType);
+	}
 
 	const url = `${LICHESS_API_BASE}/api/games/user/${encodeURIComponent(username)}?${params}`;
 
-	const res = await fetch(url, {
-		headers: {
-			Accept: 'application/x-ndjson'
+	let body: string;
+	try {
+		const res = await fetch(url, {
+			headers: {
+				Accept: 'application/x-ndjson'
+			},
+			signal: AbortSignal.timeout(LICHESS_TIMEOUT_MS)
+		});
+
+		if (res.status === 404) {
+			throw new LichessApiError(`Lichess user "${username}" not found`, 404);
 		}
-	});
 
-	if (res.status === 404) {
-		throw new LichessApiError(`Lichess user "${username}" not found`, 404);
+		if (res.status === 429) {
+			const retryAfter = parseInt(res.headers.get('Retry-After') ?? '60');
+			throw new LichessApiError('Lichess rate limit exceeded. Try again later.', 429, retryAfter);
+		}
+
+		if (!res.ok) {
+			throw new LichessApiError(`Lichess API error: ${res.status} ${res.statusText}`, res.status);
+		}
+
+		body = await res.text();
+	} catch (e) {
+		if (isTimeout(e)) {
+			throw new LichessApiError('Lichess did not respond in time. Try again later.', 504);
+		}
+		throw e;
 	}
-
-	if (res.status === 429) {
-		const retryAfter = parseInt(res.headers.get('Retry-After') ?? '60');
-		throw new LichessApiError('Lichess rate limit exceeded. Try again later.', 429, retryAfter);
-	}
-
-	if (!res.ok) {
-		throw new LichessApiError(`Lichess API error: ${res.status} ${res.statusText}`, res.status);
-	}
-
-	const body = await res.text();
 	if (!body.trim()) return [];
 
 	// NDJSON: one JSON object per line, separated by newlines.
@@ -135,6 +163,12 @@ export async function fetchLichessGames(
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
+
+/** True for the error fetch throws when an AbortSignal.timeout fires. */
+export function isTimeout(e: unknown): boolean {
+	const name = typeof e === 'object' && e !== null && 'name' in e ? e.name : null;
+	return name === 'TimeoutError' || name === 'AbortError';
+}
 
 function parseLichessGame(raw: LichessNdjsonGame, username: string): LichessGame {
 	// Determine which color the user played (case-insensitive match).

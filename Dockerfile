@@ -8,7 +8,9 @@
 #                        Railway, local) is self-sufficient.
 #
 #   Stage 1 (builder) — installs all dependencies and runs `vite build`.
-#                        Uses Alpine for fast installs.
+#                        Same Debian base as the runner, so any native
+#                        package in node_modules is built for the libc
+#                        it runs on.
 #
 #   Stage 2 (runner)  — copies only what is needed to run the app: the
 #                        compiled build output, the production node_modules,
@@ -48,7 +50,9 @@ RUN for f in chessmont-moves-dump.sql.gz puzzles-dump.sql.gz celebrity-moves-dum
 
 
 # ── Stage 1: Build ────────────────────────────────────────────────────────────
-FROM node:24-alpine AS builder
+# Debian, like the runner: the runner copies this stage's node_modules, and an
+# Alpine (musl) build of a native package would not load on Debian (glibc).
+FROM node:24-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -81,6 +85,10 @@ RUN npm run build
 # Remove devDependencies in-place so we can copy a leaner node_modules to the
 # runner stage. Production deps only (postgres, drizzle-orm, bcryptjs, etc.).
 RUN npm prune --omit=dev
+# npm still keeps the peer dependencies of @sveltejs/kit and Sentry (Vite,
+# Rolldown, TypeScript and friends, about 110 MB) that the built server never
+# loads. Drop everything the runtime dependencies don't actually reach.
+RUN node scripts/prune-runtime-deps.mjs
 
 
 
@@ -131,6 +139,11 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 # Tell Node.js and SvelteKit this is a production environment.
 ENV NODE_ENV=production
+
+# Largest request body adapter-node accepts (its default is 512 KB). PGN
+# imports are capped at 1 MB and sent with some JSON around them, so 2 MB
+# leaves room; bigger bodies get a 413.
+ENV BODY_SIZE_LIMIT=2M
 
 # Document the port — does not actually publish it (docker-compose does that).
 EXPOSE 3000

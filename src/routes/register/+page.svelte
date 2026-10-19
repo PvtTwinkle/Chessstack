@@ -269,19 +269,16 @@
 		color: var(--color-text-secondary);
 	}
 
+	/* Underlined: colour alone doesn't set a link apart from the sentence. */
 	.signin-link a {
 		color: var(--color-accent);
-		text-decoration: none;
-	}
-
-	.signin-link a:hover {
-		text-decoration: underline;
+		text-underline-offset: 2px;
 	}
 
 	.label-optional {
 		font-weight: 400;
 		font-size: 10px;
-		opacity: 0.6;
+		color: var(--color-text-muted);
 		text-transform: none;
 		letter-spacing: 0;
 		margin-left: var(--space-1);

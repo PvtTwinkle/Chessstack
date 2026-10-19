@@ -1,13 +1,12 @@
 <script lang="ts">
 	import type { PageData } from './$types';
-	import OnboardingWelcome from '$lib/components/OnboardingWelcome.svelte';
-	import Dashboard from '$lib/components/Dashboard.svelte';
-	import Landing from '$lib/components/landing/Landing.svelte';
 	import type { LandingData } from '$lib/landing/landing.server';
 
 	let { data }: { data: PageData } = $props();
 	// Only the logged-out branch of the load returns the landing data.
 	let landing = $derived(data as PageData & Partial<LandingData>);
+	// +page.ts loads only the component this visit needs.
+	let view = $derived(data.view);
 </script>
 
 <svelte:head>
@@ -16,17 +15,17 @@
 	{/if}
 </svelte:head>
 
-{#if !data.user}
+{#if view.kind === 'landing'}
 	<!-- ── Landing page (unauthenticated, cloud edition only) ─────────── -->
-	<Landing
-		guides={landing.guides ?? []}
+	<view.component
+		posts={landing.posts ?? []}
 		openings={landing.openings ?? []}
 		registrationMode={data.registrationMode}
 	/>
-{:else if data.repertoires.length === 0}
+{:else if view.kind === 'onboarding'}
 	<!-- ── Onboarding (authenticated, no repertoires yet) ──────────────── -->
-	<OnboardingWelcome />
+	<view.component />
 {:else}
 	<!-- ── Dashboard (authenticated) ──────────────────────────────────── -->
-	<Dashboard {data} />
+	<view.component {data} />
 {/if}

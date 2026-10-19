@@ -98,7 +98,6 @@
 		font-weight: 400;
 		text-transform: none;
 		letter-spacing: normal;
-		opacity: 0.7;
 	}
 
 	/* ── Banners (conflict / error / info) ──────────────────────────────────── */

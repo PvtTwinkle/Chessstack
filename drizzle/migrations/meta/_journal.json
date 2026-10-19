@@ -253,6 +253,48 @@
 			"when": 1791486765962,
 			"tag": "0035_review_log",
 			"breakpoints": true
+		},
+		{
+			"idx": 36,
+			"version": "7",
+			"when": 1791781463565,
+			"tag": "0036_endgame_attempt",
+			"breakpoints": true
+		},
+		{
+			"idx": 37,
+			"version": "7",
+			"when": 1791847764745,
+			"tag": "0037_gift_tier_from_stripe",
+			"breakpoints": true
+		},
+		{
+			"idx": 38,
+			"version": "7",
+			"when": 1791851688869,
+			"tag": "0038_prep_upload",
+			"breakpoints": true
+		},
+		{
+			"idx": 39,
+			"version": "7",
+			"when": 1791864145169,
+			"tag": "0039_unique_moves_cards_settings",
+			"breakpoints": true
+		},
+		{
+			"idx": 40,
+			"version": "7",
+			"when": 1791956139815,
+			"tag": "0040_session_hash_and_indexes",
+			"breakpoints": true
+		},
+		{
+			"idx": 41,
+			"version": "7",
+			"when": 1792364556682,
+			"tag": "0041_drop_endgame_attempt",
+			"breakpoints": true
 		}
 	]
 }

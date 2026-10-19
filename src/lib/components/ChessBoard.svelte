@@ -1,12 +1,14 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
-	import { SvelteMap } from 'svelte/reactivity';
+	import { onMount, tick, untrack } from 'svelte';
 	import { Chessground } from '@lichess-org/chessground';
 	import { Chess } from 'chess.js';
 	import type { Square } from 'chess.js';
 	import type { Api } from '@lichess-org/chessground/api';
 	import type { Key } from '@lichess-org/chessground/types';
 	import type { DrawShape } from '@lichess-org/chessground/draw';
+	import type { BoardMoveHandler } from '$lib/board/types';
+	import { describePositionChange } from '$lib/board/describe';
+	import { prefersReducedMotion } from '$lib/motion';
 
 	// Chessground base CSS (layout + positioning) is always needed.
 	// Board square colors come from our generated theme CSS (class-scoped),
@@ -37,11 +39,10 @@
 		 */
 		lastMove?: [string, string];
 		/**
-		 * Called after the user makes a legal move.
-		 * Receives the origin square, destination square, the SAN notation (e.g. "Nf3"),
-		 * the new FEN after the move, and whether a piece was captured (for sound selection).
+		 * Called after the user makes a legal move (see BoardMoveHandler). To
+		 * reject it, leave `fen` unchanged and the piece goes back.
 		 */
-		onMove?: (from: string, to: string, san: string, newFen: string, isCapture: boolean) => void;
+		onMove?: BoardMoveHandler;
 		/**
 		 * Programmatic arrows/dots to draw on the board (e.g. repertoire move arrows
 		 * in build mode). Uses Chessground's autoShapes — these are distinct from
@@ -77,6 +78,17 @@
 	// The $effect below watches this so it knows when it is safe to call cg.set().
 	let initialized = $state(false);
 
+	// A pawn dropped on the last rank, waiting for the user to pick a piece.
+	let pendingPromotion = $state<{ orig: Key; dest: Key; color: 'white' | 'black' } | null>(null);
+	let promotionPicker = $state<HTMLElement>();
+
+	// The last FEN the board was synced to, so a re-sync for autoShapes or
+	// `interactive` alone doesn't throw away a promotion being picked.
+	let syncedFen: string | null = null;
+
+	// What the visually hidden live region reads out after the position changes.
+	let announcement = $state('');
+
 	// ---------------------------------------------------------------------------
 	// Helper functions
 	// ---------------------------------------------------------------------------
@@ -94,7 +106,9 @@
 	 * so Chessground only sees one destination per square.
 	 */
 	function buildDests(chess: Chess): Map<Key, Key[]> {
-		const dests = new SvelteMap<Key, Key[]>();
+		// A plain Map: it is handed to Chessground and never read reactively.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
+		const dests = new Map<Key, Key[]>();
 		for (const move of chess.moves({ verbose: true })) {
 			const from = move.from as Key;
 			const to = move.to as Key;
@@ -116,44 +130,76 @@
 	// ---------------------------------------------------------------------------
 
 	/**
+	 * Puts the board back to the props: the position, whose turn it is, the
+	 * legal moves and the highlights. Undoes a move the parent rejected.
+	 */
+	function syncBoard(): void {
+		if (!cg) return;
+		const chess = new Chess(fen);
+		cg.set({
+			fen,
+			orientation,
+			turnColor: toColor(chess),
+			movable: {
+				color: interactive ? toColor(chess) : undefined,
+				dests: interactive ? buildDests(chess) : new Map()
+			},
+			lastMove: lastMove as [Key, Key] | undefined,
+			drawable: {
+				autoShapes
+			}
+		});
+	}
+
+	/**
 	 * Called by Chessground after the user drags or clicks a piece to a new square.
 	 *
-	 * At this point Chessground has already moved the piece visually.  Our job is to:
-	 *   1. Validate the move through Chess.js (to get the SAN string and new FEN).
-	 *   2. Update Chessground's legal-move map for the next turn.
-	 *   3. Notify the parent component via the onMove callback.
-	 *
-	 * Note: reading `fen`, `interactive`, `onMove` here always gives the *current*
-	 * values because they are Svelte 5 reactive props ($props), not stale closures.
+	 * At this point Chessground has already moved the piece visually. A pawn
+	 * reaching the last rank first asks which piece to promote to; every other
+	 * move goes straight to completeMove().
 	 */
 	function handleAfterMove(orig: Key, dest: Key): void {
 		const chess = new Chess(fen);
 		// Cast to Square: Chessground's Key includes the sentinel 'a0', but after()
 		// is only ever called with real board squares, so this cast is safe.
 		const piece = chess.get(orig as Square);
-
-		// Detect pawn promotion: pawn on the 7th rank moving to the 8th (white)
-		// or pawn on 2nd rank moving to 1st (black).
-		// We auto-promote to queen for now — a promotion dialog comes in a later step.
 		const isPromotion =
 			piece?.type === 'p' &&
 			((piece.color === 'w' && dest[1] === '8') || (piece.color === 'b' && dest[1] === '1'));
 
-		const result = chess.move({
-			from: orig as Square,
-			to: dest as Square,
-			promotion: isPromotion ? 'q' : undefined
-		});
+		if (isPromotion) {
+			pendingPromotion = { orig, dest, color: piece.color === 'w' ? 'white' : 'black' };
+			// Nothing else moves until a piece is picked or the choice is cancelled.
+			cg?.set({ movable: { color: undefined } });
+			tick().then(() => promotionPicker?.querySelector('button')?.focus());
+			return;
+		}
+		completeMove(orig, dest);
+	}
 
+	/**
+	 * Validates the move through Chess.js (for the SAN and new FEN), updates
+	 * Chessground's legal moves for the next ply and tells the parent.
+	 */
+	function completeMove(orig: Key, dest: Key, promotion?: string): void {
+		const before = fen;
+		const chess = new Chess(fen);
+		let result;
+		try {
+			result = chess.move({ from: orig as Square, to: dest as Square, promotion });
+		} catch {
+			result = null;
+		}
 		if (!result) {
-			// Should not happen because we pre-computed dests from Chess.js,
-			// but snap the board back to the last known-good FEN just in case.
-			cg?.set({ fen });
+			// Should not happen because dests come from Chess.js, but snap back.
+			syncBoard();
 			return;
 		}
 
 		// Update the board's turn colour and legal-move map for the next ply.
+		// The FEN too, so a promoted pawn shows as the piece that was picked.
 		cg?.set({
+			fen: chess.fen(),
 			turnColor: toColor(chess),
 			movable: {
 				color: interactive ? toColor(chess) : undefined,
@@ -163,8 +209,54 @@
 
 		// Tell the parent what happened. `result.captured` is set when a piece
 		// was taken — pass it as a boolean so the parent can pick the right sound.
-		onMove?.(orig, dest, result.san, chess.fen(), !!result.captured);
+		const outcome = onMove?.(orig, dest, result.san, chess.fen(), !!result.captured, promotion);
+		void settleMove(before, outcome);
 	}
+
+	/**
+	 * Once the parent has handled a move (waiting for it if it saves first),
+	 * puts the piece back when the parent left `fen` where it was. That's how a
+	 * parent rejects a move, so it never has to remount the board.
+	 */
+	async function settleMove(before: string, outcome: void | Promise<unknown>): Promise<void> {
+		try {
+			await outcome;
+		} catch {
+			// A failed handler rejected the move as surely as one that said no.
+		}
+		await tick();
+		if (fen === before) syncBoard();
+	}
+
+	function choosePromotion(piece: 'q' | 'r' | 'b' | 'n'): void {
+		if (!pendingPromotion) return;
+		const { orig, dest } = pendingPromotion;
+		pendingPromotion = null;
+		completeMove(orig, dest, piece);
+	}
+
+	function cancelPromotion(): void {
+		if (!pendingPromotion) return;
+		pendingPromotion = null;
+		syncBoard();
+	}
+
+	const PROMOTION_PIECES = [
+		{ piece: 'q', role: 'queen' },
+		{ piece: 'n', role: 'knight' },
+		{ piece: 'r', role: 'rook' },
+		{ piece: 'b', role: 'bishop' }
+	] as const;
+
+	// Where the picker goes: on the promotion square's file, starting at the
+	// board edge and running toward the middle, like Lichess.
+	const promotionLayout = $derived.by(() => {
+		if (!pendingPromotion) return null;
+		const file = pendingPromotion.dest.charCodeAt(0) - 'a'.charCodeAt(0);
+		const column = orientation === 'white' ? file : 7 - file;
+		const atTop = (pendingPromotion.dest[1] === '8') === (orientation === 'white');
+		return { column, atTop };
+	});
 
 	// ---------------------------------------------------------------------------
 	// Lifecycle
@@ -192,7 +284,9 @@
 				check: true // red tint on the king when in check
 			},
 			animation: {
-				enabled: true,
+				// Chessground animates from script, which the global reduced-motion
+				// CSS rule can't reach.
+				enabled: !prefersReducedMotion(),
 				duration: 200 // milliseconds for piece movement animation
 			},
 			lastMove: lastMove as [Key, Key] | undefined
@@ -222,20 +316,23 @@
 	$effect(() => {
 		if (!initialized || !cg) return;
 
-		const chess = new Chess(fen);
-		cg.set({
-			fen,
-			orientation,
-			turnColor: toColor(chess),
-			movable: {
-				color: interactive ? toColor(chess) : undefined,
-				dests: interactive ? buildDests(chess) : new Map()
-			},
-			lastMove: lastMove as [Key, Key] | undefined,
-			drawable: {
-				autoShapes
-			}
-		});
+		syncBoard();
+		if (fen !== syncedFen) {
+			// A new position from the parent ends any promotion being picked.
+			untrack(() => (pendingPromotion = null));
+			syncedFen = fen;
+		}
+	});
+
+	// Announce each new position: the move that led to it, when one did, and
+	// whose turn it is. The first position isn't announced, as nothing changed.
+	let announcedFen: string | null = null;
+	$effect(() => {
+		const current = fen;
+		if (announcedFen !== null && current !== announcedFen) {
+			announcement = describePositionChange(announcedFen, current);
+		}
+		announcedFen = current;
 	});
 </script>
 
@@ -247,7 +344,47 @@
 	The width is controlled by the parent — set a width on the parent element
 	and the board will fill it.  Height is kept equal to width via aspect-ratio.
 -->
-<div bind:this={boardEl} class="board-wrap board-theme-{boardTheme}"></div>
+<div class="board-outer" role="group" aria-label="Chess board">
+	<div bind:this={boardEl} class="board-wrap board-theme-{boardTheme}"></div>
+
+	{#if pendingPromotion && promotionLayout}
+		<!-- The picker sits over the board. Its own class is cg-wrap so the
+		     piece set's images (scoped to .cg-wrap piece) apply to it. Clicking
+		     beside it or pressing Escape cancels the move. -->
+		<div
+			class="promotion cg-wrap"
+			role="presentation"
+			onclick={cancelPromotion}
+			onkeydown={(e) => e.key === 'Escape' && cancelPromotion()}
+		>
+			<div
+				bind:this={promotionPicker}
+				class="promotion-choices"
+				role="group"
+				aria-label="Promote to"
+				style:left="{promotionLayout.column * 12.5}%"
+				style:top={promotionLayout.atTop ? '0' : '50%'}
+				style:flex-direction={promotionLayout.atTop ? 'column' : 'column-reverse'}
+			>
+				{#each PROMOTION_PIECES as { piece, role } (piece)}
+					<button
+						type="button"
+						class="promotion-choice"
+						aria-label="Promote to {role}"
+						onclick={(e) => {
+							e.stopPropagation();
+							choosePromotion(piece);
+						}}
+					>
+						<piece class="{role} {pendingPromotion.color}"></piece>
+					</button>
+				{/each}
+			</div>
+		</div>
+	{/if}
+
+	<p class="visually-hidden" aria-live="polite">{announcement}</p>
+</div>
 
 <style>
 	/*
@@ -259,12 +396,72 @@
 		wrapper must have explicit pixel dimensions — percentage heights alone
 		would not work without this trick.
 	*/
+	.board-outer {
+		position: relative;
+		width: 100%;
+	}
+
 	.board-wrap {
 		width: 100%;
 		aspect-ratio: 1 / 1;
 		/* Prevent browser from hijacking touch events for scroll/zoom —
 		   Chessground handles its own touch events internally. */
 		touch-action: none;
+	}
+
+	/* ── Promotion picker ────────────────────────────────────────────────── */
+
+	.promotion.cg-wrap {
+		position: absolute;
+		inset: 0;
+		z-index: 20;
+		background: rgba(0, 0, 0, 0.35);
+	}
+
+	.promotion-choices {
+		position: absolute;
+		width: 12.5%;
+		height: 50%;
+		display: flex;
+	}
+
+	.promotion-choice {
+		flex: 1;
+		padding: 0;
+		border: none;
+		border-radius: 50%;
+		background: var(--color-surface-alt);
+		cursor: pointer;
+	}
+
+	.promotion-choice:hover,
+	.promotion-choice:focus-visible {
+		background: var(--color-accent);
+	}
+
+	.promotion-choice:focus-visible {
+		outline: 2px solid var(--color-text-primary);
+		outline-offset: -2px;
+	}
+
+	.promotion-choice piece {
+		position: static;
+		display: block;
+		width: 100%;
+		height: 100%;
+		pointer-events: none;
+	}
+
+	.visually-hidden {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		margin: -1px;
+		padding: 0;
+		overflow: hidden;
+		clip-path: inset(50%);
+		white-space: nowrap;
+		border: 0;
 	}
 
 	/* Shrink coordinate labels on small phones — --bp-sm */

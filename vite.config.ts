@@ -47,9 +47,9 @@ export default defineConfig({
 	test: {
 		// Unit-test coverage, written to coverage/ by `npm run test:coverage` (CI shows
 		// the totals in the job summary and uploads the HTML report). Every source file
-		// is listed, tested or not, so gaps show up. Code covered only by the database
-		// tests counts as uncovered here. No threshold yet: this shows where unit tests
-		// are thin rather than gating merges.
+		// is listed, tested or not, so gaps show up. `npm run test:coverage` counts the
+		// unit tests only; CI runs `npm run test:ci`, which adds the database tests and
+		// fails below the floor set in that script.
 		coverage: {
 			provider: 'v8',
 			include: ['src/**/*.ts'],

@@ -12,8 +12,9 @@ import { z } from 'zod';
 
 /**
  * Reads the request body as JSON and validates it against `schema`.
- * Throws 400 'Invalid JSON body' when the body is not JSON, or 400 with the
- * first validation problem when it does not match the schema.
+ * Throws 413 when the body is over the server's BODY_SIZE_LIMIT, 400
+ * 'Invalid JSON body' when it is not JSON, or 400 with the first validation
+ * problem when it does not match the schema.
  */
 export async function parseBody<T extends z.ZodType>(
 	request: Request,
@@ -22,12 +23,35 @@ export async function parseBody<T extends z.ZodType>(
 	let raw: unknown;
 	try {
 		raw = await request.json();
-	} catch {
+	} catch (err) {
+		// adapter-node errors the body stream with a 413 SvelteKitError when the
+		// body is over the limit; reporting that as bad JSON hid the real cause.
+		if (isPayloadTooLarge(err)) throw error(413, 'Request body is too large');
 		throw error(400, 'Invalid JSON body');
 	}
 	const result = validate(schema, raw);
 	if (!result.success) throw error(400, result.message);
 	return result.data;
+}
+
+/**
+ * Validates a URL's query string against `schema`, the counterpart of
+ * parseBody for GET routes. Each parameter is passed as a string (the first
+ * value if repeated), so schemas use z.coerce for numbers. Throws 400 with the
+ * first validation problem.
+ */
+export function parseQuery<T extends z.ZodType>(url: URL, schema: T): z.output<T> {
+	const raw: Record<string, string> = {};
+	for (const key of url.searchParams.keys()) {
+		raw[key] ??= url.searchParams.get(key) ?? '';
+	}
+	const result = validate(schema, raw);
+	if (!result.success) throw error(400, result.message);
+	return result.data;
+}
+
+function isPayloadTooLarge(err: unknown): boolean {
+	return typeof err === 'object' && err !== null && 'status' in err && err.status === 413;
 }
 
 /**

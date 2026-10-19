@@ -19,6 +19,7 @@
 	import { invalidateAll, goto } from '$app/navigation';
 	import { resolveRoute } from '$app/paths';
 	import logoIcon from '$lib/assets/logo-icon.svg';
+	import { tutorial } from '$lib/stores/tutorial.svelte';
 
 	// ── Form state ──────────────────────────────────────────────────────────────
 	let name = $state('');
@@ -32,38 +33,45 @@
 		busy = true;
 		errorMsg = '';
 
-		// Step 1: Create the repertoire
-		const res = await fetch('/api/repertoires', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ name: name.trim(), color })
-		});
+		try {
+			// Step 1: Create the repertoire
+			const res = await fetch('/api/repertoires', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ name: name.trim(), color })
+			});
 
-		if (!res.ok) {
-			errorMsg = 'Something went wrong. Please try again.';
+			if (!res.ok) {
+				const body = await res.json().catch(() => null);
+				errorMsg = body?.message ?? 'Something went wrong. Please try again.';
+				return;
+			}
+
+			const created = await res.json();
+
+			// From here on the repertoire exists, so a failure must not leave the
+			// user on this form: trying again would create a second one. Without
+			// the next two steps they land on the dashboard instead of the
+			// tutorial, which they can still start from Settings.
+
+			// Step 2: Set it as the active repertoire so you land on it immediately
+			const activeRes = await fetch('/api/repertoires/active', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ id: created.id })
+			}).catch(() => null);
+
+			// Step 3: Start the tutorial at its first step
+			const started = activeRes?.ok === true && (await tutorial.goTo('build-first-moves'));
+
+			// Step 4: Re-run all load functions, then go to Build Mode for the tutorial
+			await invalidateAll();
+			if (started) await goto(resolveRoute('/build'));
+		} catch {
+			errorMsg = 'Network error. Please check your connection and try again.';
+		} finally {
 			busy = false;
-			return;
 		}
-
-		const created = await res.json();
-
-		// Step 2: Set it as the active repertoire so you land on it immediately
-		await fetch('/api/repertoires/active', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ id: created.id })
-		});
-
-		// Step 3: Start the tutorial by setting tutorial_step = 1
-		await fetch('/api/settings', {
-			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ tutorialStep: 1 })
-		});
-
-		// Step 4: Re-run all load functions, then redirect to Build Mode
-		await invalidateAll();
-		await goto(resolveRoute('/build'));
 	}
 </script>
 
@@ -118,7 +126,7 @@
 			</div>
 
 			{#if errorMsg}
-				<p class="error-msg">{errorMsg}</p>
+				<p class="error-msg" role="alert">{errorMsg}</p>
 			{/if}
 
 			<button class="btn-create" onclick={createRepertoire} disabled={!name.trim() || busy}>

@@ -13,30 +13,21 @@ import { bookMove, ecoOpening } from '$lib/db/schema';
 import { eq, inArray } from 'drizzle-orm';
 import { Chess } from 'chess.js';
 import { fenKey } from '$lib/fen';
-import { isRateLimited } from '$lib/auth/rate-limit';
 import { RATE_LIMITS } from '$lib/auth/rate-limit-config';
-import { requireAuth } from '$lib/server/api-helpers';
+import { requireAuth, rateLimitResponse } from '$lib/server/api-helpers';
 import { parseBody } from '$lib/server/validation';
 import { bookLookupSchema } from '$lib/server/schemas/engine';
+import type { Candidate } from '$lib/api-types';
 
-// Shape of each book move returned to the browser. evalCp and evalMate are
-// always null; they keep the shape of the Engine tab's candidates.
-export interface Candidate {
-	san: string; // move in Standard Algebraic Notation, e.g. "e4", "Nf3"
-	uci: string; // UCI notation, e.g. "e2e4"
-	evalCp: null;
-	evalMate: null;
-	isBook: true;
-	annotation: string | null; // curator note, e.g. "main line"
-	openingName: string | null; // ECO opening name for the position this move leads to
-}
+// Book moves carry no engine evaluation: evalCp and evalMate are always null,
+// keeping the shape of the Engine tab's candidates.
+type BookCandidate = Candidate & { evalCp: null; evalMate: null; isBook: true };
 
 export const POST: RequestHandler = async ({ request, locals }) => {
 	const user = requireAuth(locals);
 
-	if (await isRateLimited(String(user.id), RATE_LIMITS.book)) {
-		return json({ error: 'Too many requests. Please try again later.' }, { status: 429 });
-	}
+	const limited = await rateLimitResponse(user.id, RATE_LIMITS.book);
+	if (limited) return limited;
 
 	const { fen } = await parseBody(request, bookLookupSchema);
 
@@ -54,7 +45,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 			: [];
 	const fenToOpeningName = new Map(openingRows.map((r) => [r.fen, r.name]));
 
-	const candidates: Candidate[] = [];
+	const candidates: BookCandidate[] = [];
 	for (const bm of bookMoves) {
 		// chess.js throws on an illegal move; skip one if the book ever has it.
 		let result;

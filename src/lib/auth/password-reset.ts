@@ -13,9 +13,9 @@ import { passwordResetToken } from '$lib/db/schema';
 import { eq, and, isNull, gt } from 'drizzle-orm';
 import { hashToken } from '$lib/auth/token-hash';
 import { sendPasswordResetEmail } from '$lib/loops';
+import { ORIGIN } from '$lib/server/origin';
 
 const TOKEN_EXPIRY_HOURS = 1;
-const ORIGIN = process.env.ORIGIN ?? 'http://localhost:3000';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // createAndSendPasswordReset(userId, email)

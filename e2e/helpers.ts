@@ -44,20 +44,31 @@ export async function signIn(page: Page, username: string, password = PASSWORD):
 
 /** From the welcome screen: creates a White repertoire and lands in Build mode. */
 export async function createFirstRepertoire(page: Page, name = 'Smoke White'): Promise<void> {
-	await page.getByPlaceholder('e.g. White — e4 lines').fill(name);
-	await page.getByRole('button', { name: 'Create Repertoire' }).click();
+	const nameInput = page.getByPlaceholder('e.g. White — e4 lines');
+	const create = page.getByRole('button', { name: 'Create Repertoire' });
+	// Text typed before the page hydrates never reaches the bound name, which
+	// leaves the button disabled, so fill again until the page has picked it up.
+	await expect(async () => {
+		await nameInput.fill(name);
+		await expect(create).toBeEnabled({ timeout: 1000 });
+	}).toPass();
+	await create.click();
 	await expect(page).toHaveURL(/\/build$/);
 	await skipTutorial(page);
 }
 
 /**
- * Dismisses the tutorial overlay and waits for the page data to reload.
- * Skipping saves the setting and then reloads the page data; the overlay
- * closes once that reload lands.
+ * Dismisses the tutorial overlay and waits for the setting to save. The overlay
+ * closes at once and the save runs in the background, so a test that reloads
+ * the page straight after could otherwise see the tutorial again.
  */
 export async function skipTutorial(page: Page): Promise<void> {
+	const saved = page.waitForResponse(
+		(r) => r.url().endsWith('/api/settings') && r.request().method() === 'PATCH'
+	);
 	const skip = page.getByRole('button', { name: 'Skip Tutorial' });
 	await skip.click();
+	expect((await saved).ok()).toBe(true);
 	await expect(skip).toBeHidden();
 }
 

@@ -1,8 +1,9 @@
 // PATCH /api/admin/users/[id]/subscription — Gift or revoke a paid subscription.
 //
 // Allows admins to gift paid-tier access for a set duration (1 month, 1 year,
-// or lifetime) independently of Stripe. While the gift is active, Stripe
-// webhooks will not downgrade the user's tier.
+// or lifetime) independently of Stripe. Only giftExpiry changes: `tier` keeps
+// tracking Stripe, so access returns to whatever the user pays for once the
+// gift expires or is revoked (see effectiveTier in $lib/stripe/tiers).
 //
 // Access is guarded by hooks.server.ts (admin role required).
 
@@ -45,12 +46,7 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 
 	// Check for an existing subscription row
 	const [existing] = await db
-		.select({
-			id: subscription.id,
-			tier: subscription.tier,
-			status: subscription.status,
-			stripeSubscriptionId: subscription.stripeSubscriptionId
-		})
+		.select({ id: subscription.id })
 		.from(subscription)
 		.where(eq(subscription.userId, targetId));
 
@@ -63,12 +59,12 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 		if (existing) {
 			await db
 				.update(subscription)
-				.set({ giftExpiry, tier: 'paid', updatedAt: now })
+				.set({ giftExpiry, updatedAt: now })
 				.where(eq(subscription.userId, targetId));
 		} else {
 			await db.insert(subscription).values({
 				userId: targetId,
-				tier: 'paid',
+				tier: 'free',
 				status: 'active',
 				giftExpiry,
 				createdAt: now,
@@ -79,18 +75,9 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
 	} else {
 		// Revoke gift
 		if (existing) {
-			// Derive the correct tier from the Stripe-side status.
-			let revertTier: 'free' | 'paid' = 'free';
-			if (
-				existing.stripeSubscriptionId &&
-				(existing.status === 'active' || existing.status === 'past_due')
-			) {
-				revertTier = 'paid';
-			}
-
 			await db
 				.update(subscription)
-				.set({ giftExpiry: null, tier: revertTier, updatedAt: now })
+				.set({ giftExpiry: null, updatedAt: now })
 				.where(eq(subscription.userId, targetId));
 		}
 		auditDetails = 'gift=revoked';

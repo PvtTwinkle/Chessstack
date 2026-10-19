@@ -9,21 +9,41 @@
 //   - Card State Breakdown (New/Learning/Review/Relearning)
 //   - Accuracy Trend (last 14 completed sessions)
 //   - Trouble Spots (cards with lapses >= 3)
+//   - Opening Report tile ("Fix this next" and retention)
+//
+// The queries don't depend on each other (except the gaps, which need the
+// moves), so they run in parallel. The maths lives in $lib/dashboard/stats,
+// which the page shares.
 
 import type { PageServerLoad } from './$types';
 import { db } from '$lib/db';
 import { userMove, userRepertoireMove, drillSession, puzzleAttempt } from '$lib/db/schema';
-import { eq, and, gt, gte, desc, count } from 'drizzle-orm';
+import { eq, and, gt, gte, desc, countDistinct, sql } from 'drizzle-orm';
 import { fenKey, loadGapData } from '$lib/gaps';
 import type { Gap } from '$lib/gaps';
-import { getEffectiveStartFens, buildInScopeFens } from '$lib/repertoire';
+import { getEffectiveStartFens, buildInScopeFens, reconstructPath } from '$lib/repertoire';
+import { STARTING_FEN } from '$lib/fen';
 import { loadLanding } from '$lib/landing/landing.server';
+import { log } from '$lib/server/log';
+import { loadReportSummary, sameColorRepertoires, type ReportSummary } from '$lib/server/report';
+import {
+	STREAK_LOOKBACK_DAYS,
+	TIME_ZONE_COOKIE,
+	computeStreak,
+	dayInZone,
+	goalPeriodStart,
+	healthScore as computeHealthScore,
+	validTimeZone,
+	type GoalFrequency
+} from '$lib/dashboard/stats';
 
 /** Shape of a trouble-spot card returned to the page. */
 export interface TroubleSpot {
 	fromFen: string;
 	san: string;
 	lapses: number;
+	/** SAN moves to the position plus the move itself, for Build's ?line=; null if unreachable. */
+	line: string | null;
 }
 
 /** Shape of a recent drill session for the accuracy trend. */
@@ -33,13 +53,54 @@ export interface SessionSummary {
 	completedAt: number; // unix timestamp (seconds)
 }
 
-export const load: PageServerLoad = async ({ parent, locals }) => {
-	const { repertoires, activeRepertoireId, settings } = await parent();
+/**
+ * The calendar days, in the player's zone, with a completed drill session over
+ * the streak's look-back window. One row per day, however many sessions.
+ */
+async function loadSessionDays(userId: number, timeZone: string, now: Date): Promise<string[]> {
+	const since = new Date(now.getTime() - STREAK_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+	const query = (zone: string) =>
+		db
+			.selectDistinct({
+				// completed_at is stored as UTC without a zone.
+				day: sql<string>`to_char((${drillSession.completedAt} AT TIME ZONE 'UTC') AT TIME ZONE ${zone}::text, 'YYYY-MM-DD')`
+			})
+			.from(drillSession)
+			.where(and(eq(drillSession.userId, userId), gte(drillSession.completedAt, since)));
+	try {
+		return (await query(timeZone)).map((r) => r.day);
+	} catch (err) {
+		// The browser and Postgres keep separate zone lists; count in UTC when
+		// Postgres doesn't know this one rather than failing the dashboard.
+		if (timeZone === 'UTC') throw err;
+		log.warn('dashboard_time_zone_unknown', { timeZone, reason: String(err) });
+		return (await query('UTC')).map((r) => r.day);
+	}
+}
+
+/** Distinct puzzles solved since the start of the goal's period. */
+async function loadPuzzlesSolved(userId: number, since: Date): Promise<number> {
+	const [result] = await db
+		.select({ solved: countDistinct(puzzleAttempt.puzzleId) })
+		.from(puzzleAttempt)
+		.where(
+			and(
+				eq(puzzleAttempt.userId, userId),
+				eq(puzzleAttempt.solved, true),
+				gte(puzzleAttempt.attemptedAt, since)
+			)
+		);
+	return Number(result.solved);
+}
+
+export const load: PageServerLoad = async ({ parent, locals, cookies }) => {
+	const { repertoires, activeRepertoireId, lockedRepertoireIds, settings } = await parent();
 
 	// Defaults when there's nothing to show.
 	const emptyStats = {
 		repertoires,
 		gaps: [] as Gap[],
+		moveCount: 0,
 		dueCount: 0,
 		masteredCount: 0,
 		totalCards: 0,
@@ -49,7 +110,8 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 		recentSessions: [] as SessionSummary[],
 		troubleSpots: [] as TroubleSpot[],
 		puzzleGoal: null as { count: number; frequency: string; solved: number } | null,
-		healthScore: 0
+		healthScore: 0,
+		report: null as ReportSummary | null
 	};
 
 	// Logged-out visitors see the landing page (cloud edition only; self-hosted
@@ -68,43 +130,73 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 	}
 
 	const userId = locals.user.id;
+	const color = activeRep.color as 'WHITE' | 'BLACK';
+	const now = new Date();
+	const timeZone = validTimeZone(cookies.get(TIME_ZONE_COOKIE));
 
-	// ── User moves (needed for gap finder + scope filtering) ────────────
-	const moves = await db
-		.select()
-		.from(userMove)
-		.where(and(eq(userMove.repertoireId, activeRepertoireId), eq(userMove.userId, userId)));
+	const goalFrequency = settings?.puzzleGoalCount
+		? (settings.puzzleGoalFrequency as GoalFrequency | null)
+		: null;
 
-	// ── Gap Finder (masters-first, book fallback) ─────────────────────
-	const gaps = await loadGapData(
-		db,
-		moves,
-		activeRep.color as 'WHITE' | 'BLACK',
-		activeRep.startFen ?? null,
-		settings?.gapMinGames ?? 10000
-	);
-
-	// ── SR cards for active repertoire ──────────────────────────────────
-	const allCards = await db
-		.select()
-		.from(userRepertoireMove)
-		.where(
-			and(
-				eq(userRepertoireMove.userId, userId),
-				eq(userRepertoireMove.repertoireId, activeRepertoireId)
+	const [{ moves, gaps }, allCards, sessionDays, recentSessionRows, puzzlesSolved, report] =
+		await Promise.all([
+			// ── User moves, then the Gap Finder (masters-first, book fallback) ──
+			db
+				.select()
+				.from(userMove)
+				.where(and(eq(userMove.repertoireId, activeRepertoireId), eq(userMove.userId, userId)))
+				.then(async (moves) => ({
+					moves,
+					gaps: await loadGapData(
+						db,
+						moves,
+						color,
+						activeRep.startFen ?? null,
+						settings?.gapMinGames ?? 10000
+					)
+				})),
+			// ── SR cards for active repertoire ──────────────────────────────
+			db
+				.select()
+				.from(userRepertoireMove)
+				.where(
+					and(
+						eq(userRepertoireMove.userId, userId),
+						eq(userRepertoireMove.repertoireId, activeRepertoireId)
+					)
+				),
+			// ── Days with a completed drill session, for the streak ─────────
+			loadSessionDays(userId, timeZone, now),
+			// ── Accuracy Trend (last 14 completed sessions, all repertoires) ─
+			db
+				.select({
+					cardsReviewed: drillSession.cardsReviewed,
+					cardsCorrect: drillSession.cardsCorrect,
+					completedAt: drillSession.completedAt
+				})
+				.from(drillSession)
+				.where(and(eq(drillSession.userId, userId), gt(drillSession.completedAt, new Date(0))))
+				.orderBy(desc(drillSession.completedAt))
+				.limit(14),
+			// ── Puzzle Goal (distinct puzzles solved in the current period) ──
+			goalFrequency
+				? loadPuzzlesSolved(userId, goalPeriodStart(now, goalFrequency, timeZone))
+				: Promise.resolve(0),
+			// ── Opening Report tile (the report's default filters) ──────────
+			loadReportSummary(
+				userId,
+				activeRepertoireId,
+				color,
+				sameColorRepertoires(repertoires, color, lockedRepertoireIds),
+				now
 			)
-		);
+		]);
 
 	// Scope-filter: only cards whose fromFen is reachable from start position.
-	const startFens = getEffectiveStartFens(
-		activeRep.startFen ?? null,
-		moves,
-		activeRep.color as 'WHITE' | 'BLACK'
-	);
+	const startFens = getEffectiveStartFens(activeRep.startFen ?? null, moves, color);
 	const inScope = buildInScopeFens(startFens, moves);
 	const scopedCards = allCards.filter((c) => inScope.has(fenKey(c.fromFen)));
 
-	const now = new Date();
 	const totalCards = scopedCards.length;
 
 	// ── Due Now ─────────────────────────────────────────────────────────
@@ -133,51 +225,8 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 	}
 
 	// ── Streak (consecutive days with a completed drill session) ────────
-	// Query all distinct dates the user completed a session, most recent first.
-	// We count backwards from today. A streak doesn't break until a full day
-	// is missed (i.e., if today has no session yet, but yesterday does, we
-	// start counting from yesterday).
-	const completedSessions = await db
-		.select({ completedAt: drillSession.completedAt })
-		.from(drillSession)
-		.where(and(eq(drillSession.userId, userId), gt(drillSession.completedAt, new Date(0))));
+	const streak = computeStreak(sessionDays, dayInZone(now, timeZone));
 
-	// Build a set of YYYY-MM-DD date strings (in local time / UTC).
-	const sessionDays = new Set<string>();
-	for (const s of completedSessions) {
-		if (s.completedAt) {
-			sessionDays.add(s.completedAt.toISOString().slice(0, 10));
-		}
-	}
-
-	let streak = 0;
-	const day = new Date(now);
-	// Start from today.
-	day.setUTCHours(0, 0, 0, 0);
-	const todayStr = day.toISOString().slice(0, 10);
-
-	// If today doesn't have a session, check yesterday as the starting point.
-	if (!sessionDays.has(todayStr)) {
-		day.setUTCDate(day.getUTCDate() - 1);
-	}
-
-	// Count consecutive days backwards.
-	while (sessionDays.has(day.toISOString().slice(0, 10))) {
-		streak++;
-		day.setUTCDate(day.getUTCDate() - 1);
-	}
-
-	// ── Accuracy Trend (last 14 completed sessions, across all repertoires) ─
-	const recentSessionRows = await db
-		.select({
-			cardsReviewed: drillSession.cardsReviewed,
-			cardsCorrect: drillSession.cardsCorrect,
-			completedAt: drillSession.completedAt
-		})
-		.from(drillSession)
-		.where(and(eq(drillSession.userId, userId), gt(drillSession.completedAt, new Date(0))))
-		.orderBy(desc(drillSession.completedAt))
-		.limit(14);
 	const recentSessions: SessionSummary[] = recentSessionRows
 		.filter((s) => s.completedAt !== null && s.cardsReviewed > 0)
 		.map((s) => ({
@@ -188,63 +237,42 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 		.reverse(); // oldest first for left-to-right display
 
 	// ── Trouble Spots (cards with lapses >= 3, top 5 by most lapses) ────
-	const troubleSpots: TroubleSpot[] = scopedCards
-		.filter((c) => (c.lapses ?? 0) >= 3)
+	const troubleCards = scopedCards.filter((c) => (c.lapses ?? 0) >= 3);
+	const troubleSpots: TroubleSpot[] = [...troubleCards]
 		.sort((a, b) => (b.lapses ?? 0) - (a.lapses ?? 0))
 		.slice(0, 5)
-		.map((c) => ({
-			fromFen: c.fromFen,
-			san: c.san,
-			lapses: c.lapses ?? 0
-		}));
+		.map((c) => {
+			// reconstructPath() answers [] both for the start position and for a
+			// position it can't reach; only the first has a line.
+			const path = reconstructPath(moves, c.fromFen);
+			const reachable = path.length > 0 || fenKey(c.fromFen) === fenKey(STARTING_FEN);
+			return {
+				fromFen: c.fromFen,
+				san: c.san,
+				lapses: c.lapses ?? 0,
+				line: reachable ? [...path, c.san].join(',') : null
+			};
+		});
 
 	// ── Health Score (composite 0–100) ──────────────────────────────────
-	const troubleCount = scopedCards.filter((c) => (c.lapses ?? 0) >= 3).length;
-	let healthScore = 0;
-	if (totalCards > 0) {
-		const coverage = Math.max(0, 100 - gaps.length * 5);
-		const mastery = Math.round((masteredCount / totalCards) * 100);
-		const freshness = Math.round((1 - dueCount / totalCards) * 100);
-		const stability = Math.round((1 - troubleCount / totalCards) * 100);
-		healthScore = Math.round((coverage + mastery + freshness + stability) / 4);
-	}
+	const troubleCount = troubleCards.length;
+	const healthScore = computeHealthScore({
+		totalCards,
+		gapCount: gaps.length,
+		masteredCount,
+		dueCount,
+		troubleCount
+	});
 
-	// ── Puzzle Goal (solved count within current period) ────────────────
-	let puzzleGoal: { count: number; frequency: string; solved: number } | null = null;
-
-	if (settings?.puzzleGoalCount && settings?.puzzleGoalFrequency) {
-		const periodStart = new Date(now);
-		periodStart.setUTCHours(0, 0, 0, 0);
-
-		if (settings.puzzleGoalFrequency === 'weekly') {
-			// Week starts Monday: getUTCDay() 0=Sun,1=Mon,...,6=Sat
-			const dow = periodStart.getUTCDay();
-			periodStart.setUTCDate(periodStart.getUTCDate() - (dow === 0 ? 6 : dow - 1));
-		} else if (settings.puzzleGoalFrequency === 'monthly') {
-			periodStart.setUTCDate(1);
-		}
-
-		const [result] = await db
-			.select({ solved: count() })
-			.from(puzzleAttempt)
-			.where(
-				and(
-					eq(puzzleAttempt.userId, userId),
-					eq(puzzleAttempt.solved, true),
-					gte(puzzleAttempt.attemptedAt, periodStart)
-				)
-			);
-
-		puzzleGoal = {
-			count: settings.puzzleGoalCount,
-			frequency: settings.puzzleGoalFrequency,
-			solved: Number(result.solved)
-		};
-	}
+	const puzzleGoal =
+		settings?.puzzleGoalCount && goalFrequency
+			? { count: settings.puzzleGoalCount, frequency: goalFrequency, solved: puzzlesSolved }
+			: null;
 
 	return {
 		repertoires,
 		gaps,
+		moveCount: moves.length,
 		dueCount,
 		masteredCount,
 		totalCards,
@@ -255,6 +283,7 @@ export const load: PageServerLoad = async ({ parent, locals }) => {
 		troubleSpots,
 		puzzleGoal,
 		healthScore,
-		troubleCount
+		troubleCount,
+		report
 	};
 };

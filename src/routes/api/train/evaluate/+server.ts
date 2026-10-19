@@ -8,15 +8,16 @@
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db';
-import { userSettings, trainerSession } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { repertoire, userSettings, trainerSession } from '$lib/db/schema';
+import { and, eq } from 'drizzle-orm';
 import { evalToScore, computeRatingChange, bracketMidpoint } from '$lib/trainer';
 import type { TrainerEvalResult } from '$lib/trainer';
 import { parseBody } from '$lib/server/validation';
 import { trainerEvaluateSchema } from '$lib/server/schemas/train';
+import { requireAuth } from '$lib/server/api-helpers';
 
 export const POST: RequestHandler = async ({ request, locals }) => {
-	if (!locals.user) throw error(401, 'Not authenticated');
+	const user = requireAuth(locals);
 
 	const {
 		evalCp,
@@ -31,8 +32,15 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 		ratingBracket
 	} = await parseBody(request, trainerEvaluateSchema);
 
-	const userId = locals.user.id;
+	const userId = user.id;
 	const isRated = rated === true;
+
+	// The session row belongs to the repertoire, so it must be the user's own.
+	const [rep] = await db
+		.select({ id: repertoire.id })
+		.from(repertoire)
+		.where(and(eq(repertoire.id, repertoireId), eq(repertoire.userId, userId)));
+	if (!rep) throw error(404, 'Repertoire not found');
 
 	// Load the user's current trainer rating
 	const [settings] = await db
@@ -68,12 +76,6 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 			result.ratingBefore = currentRating;
 			result.ratingAfter = Math.max(100, currentRating + ratingChange);
 			result.ratingChange = result.ratingAfter - result.ratingBefore;
-
-			// Update the user's trainer rating
-			await db
-				.update(userSettings)
-				.set({ trainerRating: result.ratingAfter, updatedAt: new Date() })
-				.where(eq(userSettings.userId, userId));
 		}
 	}
 
@@ -86,19 +88,30 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 		else storedEvalCp = Math.round(result.evalCp);
 	}
 
-	await db.insert(trainerSession).values({
-		userId,
-		repertoireId,
-		startFen,
-		pgn,
-		movesPlayed,
-		finalEvalCp: storedEvalCp,
-		rated: isRated,
-		ratingBefore: result.ratingBefore,
-		ratingAfter: result.ratingAfter,
-		moveSource,
-		completedAt: new Date()
+	// The rating and the session that explains it are written together.
+	await db.transaction(async (tx) => {
+		if (result.ratingAfter != null) {
+			await tx
+				.update(userSettings)
+				.set({ trainerRating: result.ratingAfter, updatedAt: new Date() })
+				.where(eq(userSettings.userId, userId));
+		}
+		await tx.insert(trainerSession).values({
+			userId,
+			repertoireId,
+			startFen,
+			pgn,
+			movesPlayed,
+			finalEvalCp: storedEvalCp,
+			rated: isRated,
+			ratingBefore: result.ratingBefore,
+			ratingAfter: result.ratingAfter,
+			moveSource,
+			completedAt: new Date()
+		});
 	});
 
-	return json(result);
+	// JSON has no Infinity (it would arrive as null), so a mate goes back as
+	// the same ±99999 sentinel that is stored, which the trainer shows as mate.
+	return json({ ...result, evalCp: storedEvalCp });
 };

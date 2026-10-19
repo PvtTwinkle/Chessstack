@@ -15,7 +15,7 @@
 	<title>Chessstack</title>
 </svelte:head>
 
-<main class="landing">
+<main id="main" tabindex="-1" class="landing">
 	<div class="card">
 		<div class="logo">
 			<img src={logoIcon} alt="" class="logo-icon" />

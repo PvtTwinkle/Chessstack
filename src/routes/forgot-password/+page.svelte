@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Seo from '$lib/components/Seo.svelte';
+	import SupportContact from '$lib/components/SupportContact.svelte';
 	import type { ActionData } from './$types';
 	import { base } from '$app/paths';
 	import logoIcon from '$lib/assets/logo-icon.svg';
@@ -27,7 +28,7 @@
 			</p>
 			<p class="help-text">
 				Didn't receive it? Check your spam folder or contact
-				<a href="mailto:support@chessstack.app" class="support-link">support@chessstack.app</a>
+				<SupportContact />
 			</p>
 			<a class="back-link" href="{base}/login">Back to sign in</a>
 		{:else}
@@ -196,15 +197,6 @@
 		color: var(--color-text-muted);
 		margin-bottom: var(--space-4);
 		line-height: 1.5;
-	}
-
-	.support-link {
-		color: var(--color-accent);
-		text-decoration: none;
-	}
-
-	.support-link:hover {
-		text-decoration: underline;
 	}
 
 	.back-link {

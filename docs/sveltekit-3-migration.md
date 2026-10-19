@@ -62,7 +62,8 @@ variable: secure-cookie detection (`src/lib/auth/index.ts`), email links
 | `$lib` → `#lib` (+ `imports` in package.json, explicit extensions)  | 135 files (codemod)                                           |
 | `resolveRoute` removed → `resolve` (paths lose the leading `/`)     | 6 uses in 3 files                                             |
 | `invalidateAll` deprecated → `refreshAll`                           | 76 uses in 13 files                                           |
-| `$app/stores` removed → `$app/state`                                | 5 files                                                       |
+| `$app/stores` removed → `$app/state`                                | done (no uses left)                                           |
+| `base` links deprecated → `resolve()` from `$app/paths`             | 90 `{base}` uses in 24 files                                  |
 | `json()` deprecated (still works)                                   | 140 calls; can be migrated later                              |
 | `error(status, {…})` object form removed                            | check during migration                                        |
 | `handleError` now receives expected errors too                      | `hooks.server.ts` logs every error; filter 4xx to avoid noise |

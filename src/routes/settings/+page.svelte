@@ -2,8 +2,8 @@
 	import type { PageData } from './$types';
 	import { invalidateAll, goto } from '$app/navigation';
 	import { resolveRoute } from '$app/paths';
-	import { onDestroy } from 'svelte';
-	import { tutorialStep } from '$lib/stores/tutorial';
+	import { onDestroy, untrack } from 'svelte';
+	import { tutorial } from '$lib/stores/tutorial.svelte';
 	import { createSettingsState } from '$lib/components/settings/settingsState.svelte';
 	import SettingsSection from '$lib/components/settings/SettingsSection.svelte';
 	import AppearanceSection from '$lib/components/settings/AppearanceSection.svelte';
@@ -22,17 +22,21 @@
 	// All settings state and save actions live in settingsState.svelte.ts.
 	const settings = createSettingsState({
 		invalidateAll,
-		goToBuild: () => goto(resolveRoute('/build'))
+		goToBuild: () => goto(resolveRoute('/build')),
+		goToVerifyEmail: () => goto(resolveRoute('/verify-email'))
 	});
 
-	// The controls save optimistically but follow the server: re-sync them
-	// whenever the page data changes (including after each invalidateAll()).
-	$effect(() => {
-		settings.sync(data.settings, data.user?.email);
-	});
+	// Fill the controls from the server once. Saves refresh the page data, but
+	// re-syncing then would wipe whatever the user is typing in another field;
+	// each control already holds the value it saved.
+	untrack(() => settings.sync(data.settings, data.user?.email));
 
 	onDestroy(() => settings.destroy());
 </script>
+
+<svelte:head>
+	<title>Settings | Chessstack</title>
+</svelte:head>
 
 <div class="settings-page">
 	<h1>Settings</h1>
@@ -51,7 +55,7 @@
 		<!-- Self-hosted instances have no plans or referrals. -->
 		{#if data.edition === 'cloud'}
 			<SubscriptionSection
-				tier={data.tier ?? 'free'}
+				tier={data.tier}
 				billingEnabled={data.billingEnabled}
 				subscription={data.subscription}
 				stripePriceIdAnnual={data.stripePriceIdAnnual ?? ''}
@@ -67,20 +71,23 @@
 			/>
 		{/if}
 
-		{#if $tutorialStep === null}
+		{#if tutorial.step === null}
 			<TutorialSection {settings} />
 		{/if}
 
 		<AccountSection {settings} />
 
-		<SettingsSection title="Support">
-			<div class="setting-row">
-				<p class="setting-hint">
-					Need help or have a question? Contact us at
-					<a href="mailto:support@chessstack.app">support@chessstack.app</a>
-				</p>
-			</div>
-		</SettingsSection>
+		<!-- The support address is chessstack.app's; a self-hosted instance has its own admin. -->
+		{#if data.edition === 'cloud'}
+			<SettingsSection title="Support">
+				<div class="setting-row">
+					<p class="setting-hint">
+						Need help or have a question? Contact us at
+						<a href="mailto:support@chessstack.app">support@chessstack.app</a>
+					</p>
+				</div>
+			</SettingsSection>
+		{/if}
 
 		<DangerZoneSection />
 	</div>

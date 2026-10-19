@@ -42,7 +42,13 @@
 	<div class="setting-row">
 		<span class="setting-label">Your referral code</span>
 		<div class="username-input-row">
-			<input class="username-input referral-code" type="text" readonly value={referralCode} />
+			<input
+				class="username-input referral-code"
+				type="text"
+				readonly
+				aria-label="Your referral code"
+				value={referralCode}
+			/>
 			<button class="btn-save" onclick={copyReferralCode}>{copyLabel}</button>
 		</div>
 		<p class="setting-hint">

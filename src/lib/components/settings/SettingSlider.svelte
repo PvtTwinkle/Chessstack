@@ -6,6 +6,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import type { SliderSetting } from './settingsState.svelte';
+	import StatusMessage from './StatusMessage.svelte';
 
 	let {
 		id,
@@ -51,9 +52,7 @@
 		<span class="slider-label">{maxLabel}</span>
 	</div>
 	{@render children?.()}
-	{#if setting.status}
-		<span class="status-msg">{setting.status}</span>
-	{/if}
+	<StatusMessage status={setting.status} />
 </div>
 
 <style>

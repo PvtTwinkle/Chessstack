@@ -17,13 +17,15 @@
 // (the database module runs migrations as soon as it is imported).
 import '$lib/server/sentry';
 import * as Sentry from '@sentry/sveltekit';
-import { error, isHttpError, isRedirect, redirect } from '@sveltejs/kit';
+import { error, isHttpError, isRedirect, json } from '@sveltejs/kit';
 import type { Handle, HandleServerError } from '@sveltejs/kit';
 import { sequence } from '@sveltejs/kit/hooks';
 import {
 	validateSession,
+	setSessionCookie,
 	deleteSession,
 	cleanExpiredSessions,
+	cleanExpiredTokens,
 	SESSION_COOKIE_NAME,
 	SECURE_COOKIE
 } from '$lib/auth';
@@ -34,10 +36,14 @@ import { startImportScheduler } from '$lib/server/import-scheduler';
 import { isEmailVerificationEnabled } from '$lib/loops';
 import { log, runWithRequestContext, serializeError } from '$lib/server/log';
 import { sentryIngestOrigin } from '$lib/sentry';
+import { securityHeaders, withKitScriptSrc } from '$lib/server/security-headers';
 import { CLOUD_ONLY_ROUTES, IS_CLOUD, isCloudOnlyRoute } from '$lib/server/edition';
+import { effectiveTier } from '$lib/stripe/tiers';
+import { pruneRateLimits } from '$lib/auth/rate-limit';
+import { ORIGIN } from '$lib/server/origin';
 
-// How often to sweep the sessions table for expired rows (6 hours).
-const SESSION_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+// How often to sweep expired sessions, tokens and rate-limit counters (6 hours).
+const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 // Who can register: 'open' = anyone, 'invite' = admin only (default).
 const REGISTRATION_MODE = process.env.REGISTRATION_MODE ?? 'invite';
@@ -47,7 +53,7 @@ const REGISTRATION_MODE = process.env.REGISTRATION_MODE ?? 'invite';
 const PUBLIC_ROUTES = [
 	// The marketing site: the landing page at / (also the dashboard when logged
 	// in), /landing (legacy URL, redirects to /), the blog, the opening guides,
-	// the sitemap, llms.txt and the legal pages. Cloud only.
+	// the feature pages, the sitemap, llms.txt and the legal pages. Cloud only.
 	...(IS_CLOUD ? ['/', ...CLOUD_ONLY_ROUTES] : []),
 	'/login', // the login form itself
 	'/engine', // in-browser Stockfish files; the worker's requests mustn't depend on the session cookie
@@ -66,20 +72,22 @@ await dbReady;
 // Start the background import scheduler (no-op if GAME_IMPORT_INTERVAL_MINUTES=0).
 startImportScheduler();
 
-// Periodically clean expired sessions (every 6 hours).
+// Periodically delete rows nothing will read again, so these tables don't grow
+// without bound.
 setInterval(async () => {
 	try {
-		const count = await cleanExpiredSessions();
-		if (count > 0) {
-			log.info('Cleaned expired sessions', { count });
+		const sessions = await cleanExpiredSessions();
+		const tokens = await cleanExpiredTokens();
+		const rateLimits = await pruneRateLimits();
+		if (sessions + tokens + rateLimits > 0) {
+			log.info('Cleaned expired rows', { sessions, tokens, rateLimits });
 		}
 	} catch (e) {
-		log.error('Session cleanup error', { err: e });
+		log.error('Expired row cleanup error', { err: e });
 	}
-}, SESSION_CLEANUP_INTERVAL_MS);
+}, CLEANUP_INTERVAL_MS);
 
 // Tell the user the actual URL to visit (ORIGIN), not the raw 0.0.0.0 bind address.
-const ORIGIN = process.env.ORIGIN ?? 'http://localhost:3000';
 log.info(`Ready at ${ORIGIN}`);
 
 // Login/registration/password-reset rate limits are keyed on the client IP.
@@ -102,24 +110,20 @@ const CORS_ORIGINS = (process.env.CORS_ORIGINS ?? '')
 	.map((s) => s.trim())
 	.filter(Boolean);
 
-// Browser error reports go straight to Sentry's ingest host, so the CSP has to
-// allow it. Only added when PUBLIC_SENTRY_DSN is set.
-// 'wasm-unsafe-eval' and worker-src let the in-browser Stockfish ($lib/engine)
-// compile its WebAssembly and start its worker threads.
-// Cloudflare Web Analytics is injected by Cloudflare's proxy in front of
-// chessstack.app, so only the cloud edition allows its hosts.
-const SENTRY_CONNECT_SRC = sentryIngestOrigin(process.env.PUBLIC_SENTRY_DSN);
-const ANALYTICS_SCRIPT_SRC = IS_CLOUD ? ' https://static.cloudflareinsights.com' : '';
-const ANALYTICS_CONNECT_SRC = IS_CLOUD
-	? ' https://cloudflareinsights.com https://static.cloudflareinsights.com'
-	: '';
-const CONTENT_SECURITY_POLICY =
-	`default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'${ANALYTICS_SCRIPT_SRC}; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; ` +
-	`connect-src 'self'${ANALYTICS_CONNECT_SRC}${SENTRY_CONNECT_SRC ? ' ' + SENTRY_CONNECT_SRC : ''}; ` +
-	"frame-ancestors 'none'; upgrade-insecure-requests";
+// NOINDEX=true asks search engines not to index anything (staging copies).
+const NOINDEX = process.env.NOINDEX === 'true';
 
-// Paths left out of the request log: the health check is polled every 30s.
-const UNLOGGED_PATHS = new Set(['/api/health']);
+// Same for every response; see $lib/server/security-headers.
+const SECURITY_HEADERS = Object.entries(
+	securityHeaders({
+		origin: ORIGIN,
+		isCloud: IS_CLOUD,
+		sentryConnectSrc: sentryIngestOrigin(process.env.PUBLIC_SENTRY_DSN)
+	})
+);
+
+// Paths left out of the request log: monitors poll the health checks.
+const UNLOGGED_PATHS = new Set(['/api/health', '/api/health/ready']);
 
 // Gives every request an id, logs one line per request, and makes the id
 // available to all logs written while handling it (see $lib/server/log).
@@ -151,7 +155,8 @@ const requestContext: Handle = async ({ event, resolve }) => {
 			logRequest(response.status);
 			return response;
 		} catch (e) {
-			// redirect() and error() thrown from the auth hook below end up here.
+			// error() thrown from the auth hook below (cloud-only routes on a
+			// self-hosted instance) ends up here.
 			logRequest(isRedirect(e) || isHttpError(e) ? e.status : 500);
 			throw e;
 		}
@@ -185,15 +190,20 @@ const authenticate: Handle = async ({ event, resolve }) => {
 	// if we find a valid session cookie.
 	event.locals.user = null;
 
-	// Read the session cookie. This is the random UUID token we set at login.
+	// Read the session cookie: the random token we set at login.
 	const token = event.cookies.get(SESSION_COOKIE_NAME);
+
+	// The user's preferred app theme, injected into the HTML during SSR so the
+	// page doesn't flash the wrong theme on load.
+	let appTheme = 'dark';
 
 	if (token) {
 		// Look up the token in the session table.
 		const sessionData = await validateSession(token);
 
 		if (sessionData) {
-			// Session is valid — fetch the user record so we have the username and role.
+			// Session is valid: fetch the user with their subscription and theme in
+			// one round trip.
 			const [foundUser] = await db
 				.select({
 					id: user.id,
@@ -201,9 +211,14 @@ const authenticate: Handle = async ({ event, resolve }) => {
 					role: user.role,
 					enabled: user.enabled,
 					email: user.email,
-					emailVerified: user.emailVerified
+					emailVerified: user.emailVerified,
+					tier: subscription.tier,
+					giftExpiry: subscription.giftExpiry,
+					appTheme: userSettings.appTheme
 				})
 				.from(user)
+				.leftJoin(subscription, eq(subscription.userId, user.id))
+				.leftJoin(userSettings, eq(userSettings.userId, user.id))
 				.where(eq(user.id, sessionData.userId));
 
 			if (foundUser) {
@@ -212,17 +227,22 @@ const authenticate: Handle = async ({ event, resolve }) => {
 					await deleteSession(token);
 					event.cookies.delete(SESSION_COOKIE_NAME, { path: '/', secure: SECURE_COOKIE });
 				} else {
-					// Look up the user's subscription tier. Default to 'free' if no row exists.
-					// An active gift (giftExpiry in the future) forces paid access regardless of Stripe.
-					const [sub] = await db
-						.select({ tier: subscription.tier, giftExpiry: subscription.giftExpiry })
-						.from(subscription)
-						.where(eq(subscription.userId, foundUser.id));
+					// No subscription row means free. An active gift (giftExpiry in the
+					// future) grants paid access on top of Stripe. Self-hosted instances
+					// have no plans: everyone gets the paid limits.
+					const sub = foundUser.tier
+						? { tier: foundUser.tier, giftExpiry: foundUser.giftExpiry }
+						: null;
+					const tier = IS_CLOUD ? effectiveTier(sub) : 'paid';
 
-					// Self-hosted instances have no plans: everyone gets the paid limits.
-					const giftActive = sub?.giftExpiry != null && sub.giftExpiry > new Date();
-					const effectiveTier: 'free' | 'paid' =
-						!IS_CLOUD || giftActive || sub?.tier === 'paid' ? 'paid' : 'free';
+					// Only known themes reach the HTML attribute below — the settings API
+					// already validates on write, this guards against a bad stored value.
+					if (foundUser.appTheme === 'light' || foundUser.appTheme === 'dark') {
+						appTheme = foundUser.appTheme;
+					}
+
+					// Keep the cookie alive as long as the session it carries.
+					if (sessionData.renewed) setSessionCookie(event.cookies, token);
 
 					// Only the numeric id goes to Sentry, never the email or username.
 					Sentry.setUser({ id: foundUser.id });
@@ -231,7 +251,7 @@ const authenticate: Handle = async ({ event, resolve }) => {
 						id: foundUser.id,
 						username: foundUser.username,
 						role: foundUser.role,
-						tier: effectiveTier,
+						tier,
 						email: foundUser.email ?? null,
 						emailVerified: foundUser.emailVerified
 					};
@@ -260,13 +280,18 @@ const authenticate: Handle = async ({ event, resolve }) => {
 	// null when nothing matched.
 	const routeExists = event.route.id !== null;
 
+	const isApi = pathname.startsWith('/api/');
+
 	// Unauthenticated user trying to access a protected route → send to the
-	// landing page (the login form on self-hosted instances).
+	// landing page (the login form on self-hosted instances). API calls get a
+	// JSON 401 instead: a fetch() would follow the redirect and try to parse
+	// the landing page as JSON.
 	// Unknown URLs are left alone so SvelteKit answers 404: redirecting them to /
 	// made every mistyped or removed URL a "soft 404" that search engines treat
 	// as a copy of the home page (and made /llms.txt return the landing page).
 	if (!event.locals.user && !isPublicRoute && routeExists) {
-		redirect(302, IS_CLOUD ? '/' : '/login');
+		if (isApi) return secured(jsonError(401, 'Not authenticated'));
+		return secured(redirectTo(IS_CLOUD ? '/' : '/login'));
 	}
 
 	// Authenticated user trying to visit /login, /register, or /landing → send to dashboard.
@@ -274,18 +299,24 @@ const authenticate: Handle = async ({ event, resolve }) => {
 		event.locals.user &&
 		(pathname === '/login' || pathname === '/register' || pathname === '/landing')
 	) {
-		redirect(302, '/');
+		return secured(redirectTo('/'));
 	}
 
-	// Admin-only routes — non-admins get redirected to the dashboard.
+	// Admin-only routes — non-admins get redirected to the dashboard (403 for the API).
 	if (pathname.startsWith('/admin') || pathname.startsWith('/api/admin')) {
 		if (!event.locals.user || event.locals.user.role !== 'admin') {
-			redirect(302, '/');
+			if (isApi) {
+				return secured(
+					event.locals.user ? jsonError(403, 'Admin only') : jsonError(401, 'Not authenticated')
+				);
+			}
+			return secured(redirectTo('/'));
 		}
 	}
 
 	// Email verification gate — logged-in users with unverified email are
-	// confined to /verify-email and the verification/logout API routes.
+	// confined to /verify-email and the verification/logout API routes, plus
+	// the email endpoint so a mistyped address can be corrected.
 	// Skipped entirely when Loops is not configured (graceful degradation), and
 	// for accounts without an email (self-hosted sign-ups may leave it out).
 	if (
@@ -297,25 +328,11 @@ const authenticate: Handle = async ({ event, resolve }) => {
 		!pathname.startsWith('/api/auth/verify-email') &&
 		!pathname.startsWith('/api/auth/resend-verification') &&
 		!pathname.startsWith('/api/auth/logout') &&
+		!pathname.startsWith('/api/account/email') &&
 		!pathname.startsWith('/api/health')
 	) {
-		redirect(302, '/verify-email');
-	}
-
-	// Look up the user's preferred app theme so we can inject it into the HTML
-	// during SSR. This prevents a flash of the wrong theme on page load.
-	// Skipped for API requests — they don't render HTML and don't need the theme.
-	let appTheme = 'dark';
-	if (event.locals.user && !pathname.startsWith('/api/')) {
-		const [settings] = await db
-			.select({ appTheme: userSettings.appTheme })
-			.from(userSettings)
-			.where(eq(userSettings.userId, event.locals.user.id));
-		// Only known themes reach the HTML attribute below — the settings API already
-		// validates on write, this guards against any bad value already in the DB.
-		if (settings?.appTheme === 'light' || settings?.appTheme === 'dark') {
-			appTheme = settings.appTheme;
-		}
+		if (isApi) return secured(jsonError(403, 'Verify your email address first'));
+		return secured(redirectTo('/verify-email'));
 	}
 
 	// All checks passed — continue to the actual page or API handler.
@@ -324,30 +341,44 @@ const authenticate: Handle = async ({ event, resolve }) => {
 			html.replace('<html lang="en">', `<html lang="en" data-theme="${appTheme}">`)
 	});
 
-	// Security headers — defence-in-depth for a cloud deployment.
-	response.headers.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
-	response.headers.set('X-Frame-Options', 'SAMEORIGIN');
-	response.headers.set('X-Content-Type-Options', 'nosniff');
-	response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-	response.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-	response.headers.set('Content-Security-Policy', CONTENT_SECURITY_POLICY);
-	// Cross-origin isolation, which the multi-threaded Stockfish build needs
-	// (SharedArrayBuffer). It has to be on every page, not just the analysis
-	// ones, because client-side navigation keeps the first page's headers.
-	// "credentialless" still lets third-party scripts such as Cloudflare's
-	// analytics load (without cookies); browsers that don't support it fall
-	// back to the single-threaded engine.
-	response.headers.set('Cross-Origin-Opener-Policy', 'same-origin');
-	response.headers.set('Cross-Origin-Embedder-Policy', 'credentialless');
+	const secure = secured(response);
 
 	// CORS response headers for API routes when the request origin is allowed.
-	if (isAllowedOrigin && event.url.pathname.startsWith('/api/')) {
-		response.headers.set('Access-Control-Allow-Origin', requestOrigin!);
-		response.headers.set('Access-Control-Allow-Credentials', 'true');
+	if (isAllowedOrigin && isApi) {
+		secure.headers.set('Access-Control-Allow-Origin', requestOrigin!);
+		secure.headers.set('Access-Control-Allow-Credentials', 'true');
 	}
 
-	return response;
+	return secure;
 };
+
+// The auth hook's own redirects and refusals are returned rather than thrown,
+// so they go out with the security headers too (a thrown redirect skips them).
+function redirectTo(location: string): Response {
+	return new Response(null, { status: 302, headers: { location } });
+}
+
+function jsonError(status: number, message: string): Response {
+	return json({ message }, { status });
+}
+
+/** Adds the security headers (and the staging noindex) to a response. */
+function secured(response: Response): Response {
+	// SvelteKit's own CSP header carries the nonce for its inline scripts on
+	// pages; merge it into ours rather than overwrite it (see security-headers).
+	const kitCsp = response.headers.get('Content-Security-Policy');
+	for (const [name, value] of SECURITY_HEADERS) {
+		response.headers.set(
+			name,
+			name === 'Content-Security-Policy' ? withKitScriptSrc(value, kitCsp) : value
+		);
+	}
+
+	// A staging copy serves the same public pages as the live site; keep it out
+	// of search results so it never competes with the live site.
+	if (NOINDEX) response.headers.set('X-Robots-Tag', 'noindex, nofollow');
+	return response;
+}
 
 // sentryHandle reports the request to Sentry (a no-op without SENTRY_DSN);
 // it runs first so errors anywhere in the chain are attributed to the request.

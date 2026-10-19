@@ -11,6 +11,7 @@
 -->
 
 <script lang="ts">
+	import { saveBoardSize } from '$lib/settings-client';
 	import OpeningName from '$lib/components/OpeningName.svelte';
 	import DrillBoard from '$lib/components/drill/DrillBoard.svelte';
 	import DrillHeader from '$lib/components/drill/DrillHeader.svelte';
@@ -45,17 +46,6 @@
 		reload: () => invalidateAll()
 	});
 
-	// ── Board resize ─────────────────────────────────────────────────────────
-	// Fire-and-forget: the ResizableBoard component already shows the new size
-	// via localWidth; no invalidateAll() needed (which would reset drill state).
-	function handleBoardResize(size: number) {
-		fetch('/api/settings', {
-			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ boardSize: size })
-		});
-	}
-
 	// Preload audio files once on mount so sounds play without latency.
 	onMount(() => {
 		initSounds();
@@ -83,19 +73,25 @@
 
 	// ── Sync from server data ──────────────────────────────────────────────────
 
-	// Runs on mount and again whenever the server data changes (e.g. invalidateAll).
+	// Runs on mount and again whenever the server data changes (e.g. invalidateAll);
+	// a reload mid-session for the same repertoire and mode keeps the session.
 	// IMPORTANT: restartFromData() is wrapped in untrack() to prevent it from
 	// adding filteredCards/allMoves/currentCardIdx as reactive dependencies of
 	// this effect. Without untrack, writing allDueCards above invalidates
 	// filteredCards, and then reading filteredCards inside startNextCard() makes
 	// it a dependency — causing this effect to re-run infinitely.
 	$effect(() => {
-		s.syncFromData({
+		const fresh = {
+			scope: `${data.repertoire.id}|${data.drillMode}|${data.fromFen ?? ''}`,
 			moves: data.moves as RepertoireMove[],
 			dueCards: data.dueCards as DueCard[],
 			settings: data.settings
+		};
+		// Untracked too: syncFromData reads the drill phase, which must not
+		// re-run this effect.
+		untrack(() => {
+			if (s.syncFromData(fresh)) s.restartFromData();
 		});
-		untrack(() => s.restartFromData());
 	});
 
 	// Start/stop the tempo timer whenever the drill phase changes.
@@ -121,6 +117,10 @@
 	);
 </script>
 
+<svelte:head>
+	<title>Drill | Chessstack</title>
+</svelte:head>
+
 <div class="drill-ui">
 	<div class="page">
 		<!-- ── Board column ──────────────────────────────────────────────────────── -->
@@ -130,7 +130,7 @@
 				boardSize={data.settings?.boardSize ?? 0}
 				boardTheme={data.settings?.boardTheme ?? 'blue'}
 				{orientation}
-				onResize={handleBoardResize}
+				onResize={saveBoardSize}
 			/>
 		</div>
 
@@ -206,6 +206,7 @@
 					drillType={s.drillType}
 					totalReviewed={s.totalReviewed}
 					correctCount={s.correctCount}
+					practiceCount={s.practiceCount}
 					linesDrilled={s.currentLineIdx}
 					nextDueAt={s.nextDueAt}
 					onRestart={s.restartSession}

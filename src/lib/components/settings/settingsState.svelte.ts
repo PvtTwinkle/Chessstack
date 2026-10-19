@@ -3,17 +3,33 @@
  *
  * All reactive state and save actions for the self-service settings live
  * here; the section components under $lib/components/settings render them.
- * The +page.svelte creates one instance with createSettingsState(), keeps it
- * in sync with the server through sync() in a $effect, and calls destroy()
- * when it unmounts.
+ * The +page.svelte creates one instance with createSettingsState(), fills it
+ * once from the server data with sync(), and calls destroy() when it
+ * unmounts.
  *
  * Most settings save optimistically: the control updates at once, the PATCH
  * goes to /api/settings, and the layout data is refreshed so other pages pick
  * up the change. Sliders debounce the save until the user stops dragging.
+ *
+ * After the first sync each control keeps its own value: the one it just
+ * saved, or what the user is still typing. Re-syncing every control after
+ * each save would wipe unsaved text in one field whenever another saved.
  */
 
 import type { userSettings } from '$lib/db/schema';
 import { validatePassword } from '$lib/auth/password';
+import { patchSettings, type SettingsPatch } from '$lib/settings-client';
+import { tutorial } from '$lib/stores/tutorial.svelte';
+import {
+	DEFAULT_STOCKFISH_DEPTH,
+	FSRS_MAX_INTERVAL_RANGE,
+	FSRS_RELEARNING_RANGE,
+	FSRS_RETENTION_RANGE,
+	PLAYBACK_SPEED_RANGE,
+	STOCKFISH_TIMEOUT_RANGE,
+	TEMPO_SECONDS_RANGE,
+	TRAINER_RATING_RANGE
+} from '$lib/validation-limits';
 
 type UserSettings = typeof userSettings.$inferSelect;
 
@@ -41,6 +57,15 @@ export type SettingsSnapshot = Partial<
 
 type SettingKey = keyof SettingsSnapshot;
 
+/** A save result shown next to a control; ok: false is styled as an error. */
+export interface Status {
+	text: string;
+	ok: boolean;
+}
+
+export const SAVED: Status = { text: 'Saved', ok: true };
+export const SAVE_FAILED: Status = { text: 'Error saving', ok: false };
+
 export const BOARD_THEMES = [
 	{ name: 'brown', label: 'Brown', light: '#f0d9b5', dark: '#b58863' },
 	{ name: 'blue', label: 'Blue', light: '#d0e2f0', dark: '#3a6d9e' },
@@ -65,14 +90,6 @@ export function formatMaxInterval(days: number): string {
 	return `${days} days (~${years} year${years !== 1 ? 's' : ''})`;
 }
 
-function patchSettings(body: Record<string, unknown>): Promise<Response> {
-	return fetch('/api/settings', {
-		method: 'PATCH',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(body)
-	});
-}
-
 // What each setting class needs from its owner.
 interface SettingContext {
 	invalidateAll: () => Promise<void>;
@@ -80,10 +97,17 @@ interface SettingContext {
 	later: (fn: () => void, ms: number) => void;
 }
 
+// Saves one change and refreshes the layout data so other pages see it.
+async function save(ctx: SettingContext, patch: SettingsPatch): Promise<boolean> {
+	if (!(await patchSettings(patch))) return false;
+	await ctx.invalidateAll().catch(() => {});
+	return true;
+}
+
 /** A numeric range input that saves itself once the user stops dragging. */
 export class SliderSetting {
 	value = $state(0);
-	status = $state('');
+	status = $state<Status | null>(null);
 
 	#key: SettingKey;
 	#parse: (raw: string) => number;
@@ -105,15 +129,12 @@ export class SliderSetting {
 	};
 
 	async save(value: number) {
-		this.status = '';
-		try {
-			const res = await patchSettings({ [this.#key]: value });
-			if (!res.ok) throw new Error('Failed to save');
-			await this.#ctx.invalidateAll();
-			this.status = 'Saved';
-			this.#ctx.later(() => (this.status = ''), STATUS_CLEAR_MS);
-		} catch {
-			this.status = 'Error saving';
+		this.status = null;
+		if (await save(this.#ctx, { [this.#key]: value } as SettingsPatch)) {
+			this.status = SAVED;
+			this.#ctx.later(() => (this.status = null), STATUS_CLEAR_MS);
+		} else {
+			this.status = SAVE_FAILED;
 		}
 	}
 
@@ -122,9 +143,10 @@ export class SliderSetting {
 	}
 }
 
-/** An On/Off button. Flips at once and flips back if the request fails. */
+/** An On/Off button. Flips at once and flips back if the save fails. */
 export class ToggleSetting {
 	value = $state(false);
+	status = $state<Status | null>(null);
 
 	#key: SettingKey;
 	#ctx: SettingContext;
@@ -135,13 +157,12 @@ export class ToggleSetting {
 	}
 
 	toggle = async () => {
-		this.value = !this.value;
-		try {
-			await patchSettings({ [this.#key]: this.value });
-			await this.#ctx.invalidateAll();
-		} catch {
-			// Revert on failure
-			this.value = !this.value;
+		const next = !this.value;
+		this.value = next;
+		this.status = null;
+		if (!(await save(this.#ctx, { [this.#key]: next } as SettingsPatch))) {
+			this.value = !next;
+			this.status = SAVE_FAILED;
 		}
 	};
 }
@@ -149,7 +170,7 @@ export class ToggleSetting {
 /** A game-import username with its own Save button. Empty clears it. */
 export class UsernameSetting {
 	value = $state('');
-	status = $state('');
+	status = $state<Status | null>(null);
 	saving = $state(false);
 
 	#key: SettingKey;
@@ -162,15 +183,17 @@ export class UsernameSetting {
 
 	save = async () => {
 		this.saving = true;
-		this.status = '';
+		this.status = null;
+		// The server trims it too; show what it keeps.
+		const value = this.value.trim();
 		try {
-			const res = await patchSettings({ [this.#key]: this.value || null });
-			if (!res.ok) throw new Error('Failed to save');
-			await this.#ctx.invalidateAll();
-			this.status = 'Saved';
-			this.#ctx.later(() => (this.status = ''), STATUS_CLEAR_MS);
-		} catch {
-			this.status = 'Error saving';
+			if (await save(this.#ctx, { [this.#key]: value || null } as SettingsPatch)) {
+				this.value = value;
+				this.status = SAVED;
+				this.#ctx.later(() => (this.status = null), STATUS_CLEAR_MS);
+			} else {
+				this.status = SAVE_FAILED;
+			}
 		} finally {
 			this.saving = false;
 		}
@@ -181,6 +204,8 @@ interface CreateSettingsStateParams {
 	invalidateAll: () => Promise<void>;
 	// Navigate to the Build page, where the tutorial starts.
 	goToBuild: () => Promise<void>;
+	// Navigate to /verify-email after an email change that needs verifying.
+	goToVerifyEmail: () => Promise<void>;
 }
 
 export function createSettingsState(params: CreateSettingsStateParams) {
@@ -201,39 +226,34 @@ export function createSettingsState(params: CreateSettingsStateParams) {
 
 	// ── App Theme (dark / light) ────────────────────────────────────────────
 	let appTheme = $state('dark');
+	let appThemeStatus = $state<Status | null>(null);
 
-	async function setAppTheme(mode: string) {
+	async function setAppTheme(mode: 'dark' | 'light') {
+		const previous = appTheme;
 		appTheme = mode;
+		appThemeStatus = null;
 		// Instant visual feedback — don't wait for the server round-trip
 		document.documentElement.dataset.theme = mode;
-		try {
-			const res = await patchSettings({ appTheme: mode });
-			if (!res.ok) throw new Error('Failed to save');
-			await invalidateAll();
-		} catch {
-			// Revert on failure
-			const prev = mode === 'dark' ? 'light' : 'dark';
-			appTheme = prev;
-			document.documentElement.dataset.theme = prev;
+		if (!(await save(ctx, { appTheme: mode }))) {
+			// Back to the theme the user had, which may be the same one.
+			appTheme = previous;
+			document.documentElement.dataset.theme = previous;
+			appThemeStatus = SAVE_FAILED;
 		}
 	}
 
 	// ── Board Theme ─────────────────────────────────────────────────────────
 	let boardTheme = $state('blue');
-	let boardThemeStatus = $state('');
+	let boardThemeStatus = $state<Status | null>(null);
 
 	async function setBoardTheme(name: string) {
 		boardTheme = name;
-		boardThemeStatus = '';
-		try {
-			const res = await patchSettings({ boardTheme: name });
-			if (!res.ok) throw new Error('Failed to save');
-			// Refresh layout data so other pages pick up the new theme
-			await invalidateAll();
-			boardThemeStatus = 'Saved';
-			later(() => (boardThemeStatus = ''), STATUS_CLEAR_MS);
-		} catch {
-			boardThemeStatus = 'Error saving';
+		boardThemeStatus = null;
+		if (await save(ctx, { boardTheme: name as SettingsPatch['boardTheme'] })) {
+			boardThemeStatus = SAVED;
+			later(() => (boardThemeStatus = null), STATUS_CLEAR_MS);
+		} else {
+			boardThemeStatus = SAVE_FAILED;
 		}
 	}
 
@@ -260,25 +280,25 @@ export function createSettingsState(params: CreateSettingsStateParams) {
 
 	// ── Trainer Rating ─────────────────────────────────────────────────────
 	let trainerRatingInput = $state('');
-	let trainerRatingStatus = $state('');
+	let trainerRatingStatus = $state<Status | null>(null);
 	let savingTrainerRating = $state(false);
 
 	async function saveTrainerRating() {
+		const { min, max } = TRAINER_RATING_RANGE;
 		const parsed = parseInt(trainerRatingInput, 10);
-		if (isNaN(parsed) || parsed < 100 || parsed > 3000) {
-			trainerRatingStatus = 'Must be 100-3000';
+		if (isNaN(parsed) || parsed < min || parsed > max) {
+			trainerRatingStatus = { text: `Must be ${min}-${max}`, ok: false };
 			return;
 		}
 		savingTrainerRating = true;
-		trainerRatingStatus = '';
+		trainerRatingStatus = null;
 		try {
-			const res = await patchSettings({ trainerRating: parsed });
-			if (!res.ok) throw new Error('Failed to save');
-			await invalidateAll();
-			trainerRatingStatus = 'Saved';
-			later(() => (trainerRatingStatus = ''), STATUS_CLEAR_MS);
-		} catch {
-			trainerRatingStatus = 'Error saving';
+			if (await save(ctx, { trainerRating: parsed })) {
+				trainerRatingStatus = SAVED;
+				later(() => (trainerRatingStatus = null), STATUS_CLEAR_MS);
+			} else {
+				trainerRatingStatus = SAVE_FAILED;
+			}
 		} finally {
 			savingTrainerRating = false;
 		}
@@ -290,6 +310,8 @@ export function createSettingsState(params: CreateSettingsStateParams) {
 
 	// ── Email ───────────────────────────────────────────────────────────────
 	let email = $state('');
+	// The current password, which the server requires for an email change.
+	let emailPassword = $state('');
 	let emailStatus = $state('');
 	let emailError = $state('');
 	let savingEmail = $state(false);
@@ -303,13 +325,17 @@ export function createSettingsState(params: CreateSettingsStateParams) {
 			emailError = 'Email is required';
 			return;
 		}
+		if (!emailPassword) {
+			emailError = 'Enter your current password to change your email';
+			return;
+		}
 
 		savingEmail = true;
 		try {
 			const res = await fetch('/api/account/email', {
 				method: 'PATCH',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ email: trimmed })
+				body: JSON.stringify({ email: trimmed, password: emailPassword })
 			});
 
 			if (!res.ok) {
@@ -318,7 +344,15 @@ export function createSettingsState(params: CreateSettingsStateParams) {
 				return;
 			}
 
-			emailStatus = 'Email updated successfully';
+			emailPassword = '';
+			const body = await res.json().catch(() => null);
+			if (body?.verificationRequired) {
+				// The app is closed to this account until the new address is verified.
+				await params.goToVerifyEmail();
+				return;
+			}
+			email = trimmed;
+			emailStatus = body?.updated === false ? 'That is already your email' : 'Email updated';
 			await invalidateAll();
 		} catch {
 			emailError = 'Network error — please try again';
@@ -380,19 +414,33 @@ export function createSettingsState(params: CreateSettingsStateParams) {
 
 	// ── Tutorial ──────────────────────────────────────────────────────────────
 	let restartingTutorial = $state(false);
+	let tutorialStatus = $state<Status | null>(null);
 
 	async function restartTutorial() {
 		if (restartingTutorial) return;
 		restartingTutorial = true;
-		await patchSettings({ tutorialStep: 1 });
-		await invalidateAll();
-		await params.goToBuild();
+		tutorialStatus = null;
+		let started = false;
+		try {
+			started = await tutorial.goTo('build-first-moves');
+			if (!started) {
+				// The step changed on screen; put it back as the server has it.
+				tutorial.sync(null);
+				tutorialStatus = { text: "Couldn't restart the tutorial. Please try again.", ok: false };
+				return;
+			}
+			await invalidateAll();
+			await params.goToBuild();
+		} finally {
+			// On success the page is navigating away; keep the button disabled.
+			if (!started) restartingTutorial = false;
+		}
 	}
 
 	// ── Lifecycle ───────────────────────────────────────────────────────────
 
-	// Reset every server-backed control to the latest server data. The page
-	// calls this from a $effect, so it re-runs after each invalidateAll().
+	// Fill every server-backed control from the server data. The page calls
+	// this once when it mounts; after that each control keeps its own value.
 	function sync(
 		settings: SettingsSnapshot | null | undefined,
 		userEmail: string | null | undefined
@@ -400,14 +448,14 @@ export function createSettingsState(params: CreateSettingsStateParams) {
 		appTheme = settings?.appTheme ?? 'dark';
 		boardTheme = settings?.boardTheme ?? 'blue';
 		sound.value = settings?.soundEnabled ?? true;
-		stockfishDepth.value = settings?.stockfishDepth ?? 15;
-		stockfishTimeout.value = settings?.stockfishTimeout ?? 10;
+		stockfishDepth.value = settings?.stockfishDepth ?? DEFAULT_STOCKFISH_DEPTH;
+		stockfishTimeout.value = settings?.stockfishTimeout ?? STOCKFISH_TIMEOUT_RANGE.default;
 		tempo.value = settings?.tempoEnabled ?? false;
-		tempoSeconds.value = settings?.tempoSeconds ?? 10;
-		playbackSpeed.value = settings?.playbackSpeed ?? 500;
-		fsrsRetention.value = settings?.fsrsDesiredRetention ?? 0.9;
-		fsrsMaxInterval.value = settings?.fsrsMaximumInterval ?? 365;
-		fsrsRelearningMinutes.value = settings?.fsrsRelearningMinutes ?? 10;
+		tempoSeconds.value = settings?.tempoSeconds ?? TEMPO_SECONDS_RANGE.default;
+		playbackSpeed.value = settings?.playbackSpeed ?? PLAYBACK_SPEED_RANGE.default;
+		fsrsRetention.value = settings?.fsrsDesiredRetention ?? FSRS_RETENTION_RANGE.default;
+		fsrsMaxInterval.value = settings?.fsrsMaximumInterval ?? FSRS_MAX_INTERVAL_RANGE.default;
+		fsrsRelearningMinutes.value = settings?.fsrsRelearningMinutes ?? FSRS_RELEARNING_RANGE.default;
 		const rating = settings?.trainerRating ?? null;
 		trainerRatingInput = rating !== null ? String(rating) : '';
 		lichessUsername.value = settings?.lichessUsername ?? '';
@@ -425,6 +473,9 @@ export function createSettingsState(params: CreateSettingsStateParams) {
 		// App and board theme
 		get appTheme() {
 			return appTheme;
+		},
+		get appThemeStatus() {
+			return appThemeStatus;
 		},
 		setAppTheme,
 		get boardTheme() {
@@ -472,6 +523,12 @@ export function createSettingsState(params: CreateSettingsStateParams) {
 		set email(v: string) {
 			email = v;
 		},
+		get emailPassword() {
+			return emailPassword;
+		},
+		set emailPassword(v: string) {
+			emailPassword = v;
+		},
 		get emailStatus() {
 			return emailStatus;
 		},
@@ -516,6 +573,9 @@ export function createSettingsState(params: CreateSettingsStateParams) {
 		// Tutorial
 		get restartingTutorial() {
 			return restartingTutorial;
+		},
+		get tutorialStatus() {
+			return tutorialStatus;
 		},
 		restartTutorial,
 

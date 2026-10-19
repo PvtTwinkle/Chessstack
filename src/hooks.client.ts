@@ -16,7 +16,7 @@ const DSN = env.PUBLIC_SENTRY_DSN;
 
 const sentry = DSN
 	? import('$lib/sentry-client').then((module) => {
-			module.initSentry(DSN);
+			module.initSentry(DSN, env.PUBLIC_SENTRY_ENVIRONMENT);
 			return module;
 		})
 	: null;

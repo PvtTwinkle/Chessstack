@@ -48,12 +48,11 @@ export const bookMove = pgTable(
 		toFen: text('to_fen').notNull(), // position after the move
 		san: text('san').notNull(), // move in Standard Algebraic Notation, e.g. "e4", "Nf3"
 		annotation: text('annotation'), // curator notes, e.g. "main line", "aggressive"
-		contributor: text('contributor') // name of the person who contributed this move
+		contributor: text('contributor') // name of the person who contributed this move (not read by the app)
 	},
 	(table) => ({
-		uniqueFromSan: unique('book_move_new_from_fen_san_key').on(table.fromFen, table.san),
-		// Dedicated single-column index for "all moves from this position" lookups.
-		fromFenIdx: index('idx_book_move_from_fen').on(table.fromFen)
+		// Also serves "all moves from this position" lookups (from_fen leads).
+		uniqueFromSan: unique('book_move_new_from_fen_san_key').on(table.fromFen, table.san)
 	})
 );
 
@@ -181,7 +180,11 @@ export const puzzle = pgTable(
 		openingFamily: text('opening_family').notNull() // most specific tag, pre-normalized for matching
 	},
 	(table) => ({
-		openingFamilyIdx: index('idx_puzzle_opening_family').on(table.openingFamily),
+		// text_pattern_ops lets prefix matches (opening_family LIKE 'Sicilian%')
+		// use the index under any collation; a plain btree index can't.
+		openingFamilyPatternIdx: index('idx_puzzle_opening_family_pattern').on(
+			table.openingFamily.op('text_pattern_ops')
+		),
 		ratingIdx: index('idx_puzzle_rating').on(table.rating)
 	})
 );
@@ -211,8 +214,8 @@ export const user = pgTable(
 	(table) => ({
 		emailIdx: uniqueIndex('idx_user_email').on(table.email),
 		stripeCustomerIdIdx: uniqueIndex('idx_user_stripe_customer_id').on(table.stripeCustomerId),
-		// Redundant with the unique constraint above, but it exists in the database (migration 0033).
-		referralCodeIdx: index('idx_user_referral_code').on(table.referralCode),
+		// Account deletion sets referred_by_user_id to null on everyone the user referred.
+		referredByUserIdIdx: index('idx_user_referred_by_user_id').on(table.referredByUserId),
 		referredByUserIdFk: foreignKey({
 			name: 'user_referred_by_user_id_fkey',
 			columns: [table.referredByUserId],
@@ -229,7 +232,7 @@ export const user = pgTable(
 export const session = pgTable(
 	'session',
 	{
-		id: text('id').primaryKey(), // random UUID — this is what goes in the cookie
+		id: text('id').primaryKey(), // SHA-256 hex of the cookie's token ($lib/auth/token-hash)
 		userId: integer('user_id').notNull(),
 		expiresAt: timestamp('expires_at').notNull() // 14 days from login
 	},
@@ -269,7 +272,7 @@ export const userSettings = pgTable(
 		boardSize: integer('board_size').notNull().default(0), // 0 = auto (fill container), >0 = pixel width (320–800)
 		playersRatingBracket: integer('players_rating_bracket').notNull().default(3), // 0–7 bracket ID for Players tab (3 = 1401–1600)
 		starsPlayerSlug: text('stars_player_slug'), // last-selected player slug for Stars tab (null = first available)
-		tutorialStep: integer('tutorial_step'), // null = done/skipped, 0-10 = active tutorial step
+		tutorialStep: integer('tutorial_step'), // null = done/skipped, otherwise an index into TUTORIAL_STEPS
 		fsrsDesiredRetention: doublePrecision('fsrs_desired_retention').notNull().default(0.9), // target recall probability (0.70–0.97)
 		fsrsMaximumInterval: integer('fsrs_maximum_interval').notNull().default(365), // max days between reviews (30–3650)
 		fsrsRelearningMinutes: integer('fsrs_relearning_minutes').notNull().default(10), // minutes before forgotten card reappears (1–60)
@@ -277,7 +280,8 @@ export const userSettings = pgTable(
 		updatedAt: timestamp('updated_at').notNull()
 	},
 	(table) => ({
-		userIdIdx: index('idx_user_settings_user_id').on(table.userId),
+		// One settings row per user: writers upsert on it.
+		userIdIdx: uniqueIndex('idx_user_settings_user_id').on(table.userId),
 		userIdFk: foreignKey({
 			name: 'user_settings_user_id_fkey',
 			columns: [table.userId],
@@ -319,12 +323,17 @@ export const userMove = pgTable(
 		fromFen: text('from_fen').notNull(), // position before the move
 		toFen: text('to_fen').notNull(), // position after the move
 		san: text('san').notNull(), // move in Standard Algebraic Notation
-		source: text('source').notNull(), // "BOOK" (from shared book), "PERSONAL", "STOCKFISH", or "PGN_IMPORT"
+		source: text('source').notNull(), // how it was added: "PERSONAL" (Build, Review), "PGN_IMPORT" or "PREP_EXPORT"
 		notes: text('notes'), // optional user annotation on this move
 		createdAt: timestamp('created_at').notNull()
 	},
 	(table) => ({
-		repertoireIdIdx: index('idx_user_move_repertoire_id').on(table.repertoireId),
+		// No move is saved twice. Also serves lookups by repertoire, and by position.
+		repertoireFromFenSanIdx: uniqueIndex('idx_user_move_repertoire_from_fen_san').on(
+			table.repertoireId,
+			table.fromFen,
+			table.san
+		),
 		fromFenIdx: index('idx_user_move_from_fen').on(table.fromFen),
 		userIdIdx: index('idx_user_move_user_id').on(table.userId),
 		userIdFk: foreignKey({
@@ -367,10 +376,19 @@ export const userRepertoireMove = pgTable(
 		learningSteps: integer('learning_steps').notNull().default(0) // ts-fsrs v5: which step within learning/relearning phase
 	},
 	(table) => ({
-		repertoireIdIdx: index('idx_user_repertoire_move_repertoire_id').on(table.repertoireId),
+		// One card per position: on the user's turn a position has a single move.
+		repertoireFromFenIdx: uniqueIndex('idx_user_repertoire_move_repertoire_from_fen').on(
+			table.repertoireId,
+			table.fromFen
+		),
 		fromFenIdx: index('idx_user_repertoire_move_from_fen').on(table.fromFen),
 		// due is the primary sort key when the FSRS scheduler fetches cards due for review.
 		dueIdx: index('idx_user_repertoire_move_due').on(table.due),
+		// Drill and the dashboard count and fetch the due cards of one repertoire.
+		repertoireDueIdx: index('idx_user_repertoire_move_repertoire_due').on(
+			table.repertoireId,
+			table.due
+		),
 		userIdIdx: index('idx_user_repertoire_move_user_id').on(table.userId),
 		userIdFk: foreignKey({
 			name: 'user_repertoire_move_user_id_fkey',
@@ -449,7 +467,7 @@ export const reviewedGame = pgTable(
 		repertoireId: integer('repertoire_id').notNull(),
 		pgn: text('pgn').notNull(), // full PGN of the reviewed game
 		source: text('source').notNull(), // "MANUAL" (pasted) or "LICHESS" (imported)
-		lichessGameId: text('lichess_game_id'), // Lichess game ID, used to prevent duplicate imports
+		lichessGameId: text('lichess_game_id'), // Lichess game ID; recorded only (imported_game's unique key prevents duplicates)
 		deviationFen: text('deviation_fen'), // the position where the user went off-book
 		playedAt: timestamp('played_at'), // when the original game was played
 		reviewedAt: timestamp('reviewed_at').notNull(), // when the user reviewed it here
@@ -503,6 +521,8 @@ export const importedGame = pgTable(
 		),
 		userStatusIdx: index('idx_imported_game_user_status').on(table.userId, table.status),
 		userPlayedAtIdx: index('idx_imported_game_user_played_at').on(table.userId, table.playedAt),
+		// Deleting a reviewed game sets reviewed_game_id to null on its import row.
+		reviewedGameIdIdx: index('idx_imported_game_reviewed_game_id').on(table.reviewedGameId),
 		userIdFk: foreignKey({
 			name: 'imported_game_user_id_fkey',
 			columns: [table.userId],
@@ -700,6 +720,8 @@ export const trainerSession = pgTable(
 	},
 	(table) => ({
 		userIdIdx: index('idx_trainer_session_user_id').on(table.userId),
+		// Deleting a repertoire cascades to its trainer sessions.
+		repertoireIdIdx: index('idx_trainer_session_repertoire_id').on(table.repertoireId),
 		userIdFk: foreignKey({
 			name: 'trainer_session_user_id_fkey',
 			columns: [table.userId],
@@ -725,8 +747,8 @@ export const trainerSavedPosition = pgTable(
 		createdAt: timestamp('created_at').notNull()
 	},
 	(table) => ({
+		// Also serves "this user's positions" lookups (user_id leads).
 		uniqueUserFen: unique('trainer_saved_position_user_id_fen_key').on(table.userId, table.fen),
-		userIdIdx: index('idx_trainer_saved_position_user_id').on(table.userId),
 		userIdFk: foreignKey({
 			name: 'trainer_saved_position_user_id_fkey',
 			columns: [table.userId],
@@ -758,7 +780,12 @@ export const opponentPreps = pgTable(
 		lastFetchedAt: timestamp('last_fetched_at').notNull(), // watermark for incremental refresh
 		createdAt: timestamp('created_at').notNull(),
 		minGames: integer('min_games').notNull().default(2), // hide moves played fewer than this many times
-		excludedMoves: text('excluded_moves') // JSON array of "fen|san" strings to hide from prep view
+		excludedMoves: text('excluded_moves'), // JSON array of "fen|san" strings to hide from prep view
+		// Moves are uploaded in batches, so a create or refresh first fills a
+		// pending row and publishes it in one transaction at the end. Pending rows
+		// are hidden; ones left behind by an abandoned upload are deleted later.
+		pendingSince: timestamp('pending_since'), // null once the prep is live
+		replacesPrepId: integer('replaces_prep_id') // a refresh upload: the prep it will replace
 	},
 	(table) => ({
 		userIdIdx: index('idx_opponent_preps_user_id').on(table.userId),
@@ -766,6 +793,11 @@ export const opponentPreps = pgTable(
 			name: 'opponent_preps_user_id_fkey',
 			columns: [table.userId],
 			foreignColumns: [user.id]
+		}).onDelete('cascade'),
+		replacesPrepIdFk: foreignKey({
+			name: 'opponent_preps_replaces_prep_id_fkey',
+			columns: [table.replacesPrepId],
+			foreignColumns: [table.id]
 		}).onDelete('cascade')
 	})
 );
@@ -823,6 +855,8 @@ export const prepMoves = pgTable(
 	},
 	(table) => ({
 		prepFromFenIdx: index('idx_prep_moves_prep_from_fen').on(table.prepId, table.fromFen),
+		// Account deletion cascades to every prep move of the user.
+		userIdIdx: index('idx_prep_moves_user_id').on(table.userId),
 		prepIdFk: foreignKey({
 			name: 'prep_moves_prep_id_fkey',
 			columns: [table.prepId],

@@ -9,20 +9,20 @@
 -->
 
 <script lang="ts">
-	import { goto, invalidateAll } from '$app/navigation';
-	import { page } from '$app/stores';
-	import { tutorialStep } from '$lib/stores/tutorial';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
+	import { tutorial } from '$lib/stores/tutorial.svelte';
 	import { TUTORIAL_STEPS, TOTAL_STEPS } from './tutorialSteps';
 
 	// ── Derived state ────────────────────────────────────────────────────────
-	let step = $derived($tutorialStep);
+	let step = $derived(tutorial.step);
 	let stepDef = $derived(step !== null ? (TUTORIAL_STEPS[step] ?? null) : null);
 	let visible = $derived(stepDef !== null && step !== 0); // step 0 = OnboardingWelcome handles it
 
 	// Check if user is on the correct page for the current step
 	let onCorrectPage = $derived.by(() => {
 		if (!stepDef) return true;
-		const path = $page.url.pathname;
+		const path = page.url.pathname;
 		if (stepDef.page === '/') return path === '/';
 		return path.startsWith(stepDef.page);
 	});
@@ -39,27 +39,11 @@
 
 	// ── Actions ──────────────────────────────────────────────────────────────
 
-	async function patchStep(newStep: number | null) {
-		try {
-			await fetch('/api/settings', {
-				method: 'PATCH',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ tutorialStep: newStep })
-			});
-			await invalidateAll();
-		} catch {
-			// Network error — the tutorial step wasn't saved, but let
-			// invalidateAll run anyway so the UI stays in sync with whatever
-			// the server has.
-			await invalidateAll().catch(() => {});
-		}
-	}
-
 	async function skipTutorial() {
 		if (busy) return;
 		busy = true;
 		try {
-			await patchStep(null);
+			await tutorial.goTo(null);
 		} finally {
 			busy = false;
 		}
@@ -69,9 +53,8 @@
 		if (!stepDef || busy) return;
 		busy = true;
 
-		// Capture reactive values before the await — patchStep calls
-		// invalidateAll() which updates reactive state to the NEW step.
-		// Reading step or stepDef after the await would see the new values.
+		// Capture the step before the await: goTo() moves the shared step on,
+		// so reading step or stepDef afterwards would see the new values.
 		const destination = stepDef.navTo;
 		const currentStep = step;
 
@@ -79,14 +62,15 @@
 			if (destination) {
 				const nextStep =
 					currentStep !== null && currentStep < TOTAL_STEPS - 1 ? currentStep + 1 : null;
-				await patchStep(nextStep);
+				// Saved before navigating, so the next page's data has the new step.
+				await tutorial.goTo(nextStep);
 				// eslint-disable-next-line svelte/no-navigation-without-resolve -- dynamic path from tutorial step definitions
 				await goto(destination);
 			} else if (currentStep === TOTAL_STEPS - 1) {
 				// Last step — finish tutorial
-				await patchStep(null);
+				await tutorial.goTo(null);
 			} else if (currentStep !== null) {
-				await patchStep(currentStep + 1);
+				await tutorial.goTo(currentStep + 1);
 			}
 		} finally {
 			busy = false;
@@ -118,11 +102,11 @@
 				<!-- Wrong page prompt -->
 				<h3 class="tutorial-title">Continue Tutorial</h3>
 				<p class="tutorial-body">
-					Navigate to the {stepDef?.title} page to continue the tutorial.
+					Go to the {stepDef?.pageLabel} page to continue the tutorial.
 				</p>
 				<div class="tutorial-actions">
 					<button class="btn-nav" onclick={navigateToCorrectPage}>
-						Go to {stepDef?.title}
+						Go to {stepDef?.pageLabel}
 					</button>
 					<button class="btn-skip" onclick={skipTutorial} disabled={busy}>Skip Tutorial</button>
 				</div>

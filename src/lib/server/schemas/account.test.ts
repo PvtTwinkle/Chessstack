@@ -6,9 +6,9 @@ const STRONG = 'Correct-Horse-9';
 
 describe('updateEmailSchema', () => {
 	it('trims and lowercases the address', () => {
-		expect(validate(updateEmailSchema, { email: '  Kevin@Example.COM ' })).toEqual({
+		expect(validate(updateEmailSchema, { email: '  Kevin@Example.COM ', password: 'pw' })).toEqual({
 			success: true,
-			data: { email: 'kevin@example.com' }
+			data: { email: 'kevin@example.com', password: 'pw' }
 		});
 	});
 
@@ -16,7 +16,9 @@ describe('updateEmailSchema', () => {
 		[{}, 'Email is required.'],
 		[{ email: '  ' }, 'Email is required.'],
 		[{ email: 'not-an-email' }, 'Please enter a valid email address.'],
-		[{ email: `${'a'.repeat(250)}@x.io` }, 'Please enter a valid email address.']
+		[{ email: `${'a'.repeat(250)}@x.io` }, 'Please enter a valid email address.'],
+		[{ email: 'me@example.com' }, 'Enter your current password to change your email.'],
+		[{ email: 'me@example.com', password: '' }, 'Enter your current password to change your email.']
 	])('rejects %j', (body, message) => {
 		expect(validate(updateEmailSchema, body)).toEqual({ success: false, message });
 	});

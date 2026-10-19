@@ -15,7 +15,9 @@
 //
 // Passing an Error as `err` to log.error also reports it to Sentry (a no-op
 // when Sentry is not configured), so caught-but-unexpected failures such as a
-// failed email send are not only buried in the container logs.
+// failed email send are not only buried in the container logs. Expected
+// failures that would only add noise, such as a chess platform outage, pass a
+// plain `reason` string instead.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { dev } from '$app/environment';

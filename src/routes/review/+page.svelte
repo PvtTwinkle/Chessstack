@@ -21,7 +21,6 @@
 	import ReviewBoard from '$lib/components/review/ReviewBoard.svelte';
 	import ReviewIssueCard from '$lib/components/review/ReviewIssueCard.svelte';
 	import { createReviewState } from '$lib/components/review/reviewState.svelte';
-	import { engineSettings } from '$lib/engine/settings';
 	import '$lib/components/review/review-ui.css';
 	import type { PageData } from './$types';
 	import { initSounds, setSoundEnabled } from '$lib/sounds';
@@ -32,12 +31,13 @@
 		getRepertoireId: () => data.repertoire.id,
 		getMoves: () => data.moves,
 		// Auto-play delay between moves (configurable in Settings → Drill).
-		getPlaybackSpeed: () => data.settings?.playbackSpeed ?? 500,
-		getEngineSettings: () => engineSettings(data.settings)
+		getPlaybackSpeed: () => data.settings?.playbackSpeed ?? 500
 	});
 
 	onMount(() => {
 		initSounds();
+		// Leaving the page stops the engine work it started.
+		return () => s.destroy();
 	});
 
 	// Keep the sounds module in sync with the user's saved preference.
@@ -58,6 +58,10 @@
 	});
 </script>
 
+<svelte:head>
+	<title>Review | Chessstack</title>
+</svelte:head>
+
 <div class="review-ui">
 	<!-- ════════════════════════════════════════════════════════════════════════════
 	     STATE A — Input
@@ -69,6 +73,7 @@
 			repertoireColor={data.repertoire.color}
 			importSettings={data.importSettings}
 			importedGames={data.importedGames}
+			importHistoryHasMore={data.importHistoryHasMore}
 			recentGames={data.recentGames}
 			prefilledGame={data.prefilledGame}
 			bind:analysisError={s.analysisError}

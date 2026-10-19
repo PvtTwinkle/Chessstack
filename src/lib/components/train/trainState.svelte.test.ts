@@ -111,8 +111,8 @@ describe('formatEval', () => {
 	});
 
 	it('shows mate scores in words', () => {
-		expect(formatEval(99999)).toBe('Mate (winning)');
-		expect(formatEval(-99999)).toBe('Mate (losing)');
+		expect(formatEval(99999)).toBe('Mate for White');
+		expect(formatEval(-99999)).toBe('Mate for Black');
 	});
 });
 
@@ -188,6 +188,18 @@ describe('createTrainState', () => {
 			expect(s.showRatingSetup).toBe(true);
 			expect(s.trainerRating).toBeNull();
 		});
+
+		it('keeps the prompt open when the server refuses the save', async () => {
+			vi.stubGlobal(
+				'fetch',
+				vi.fn(async () => ({ ok: false, status: 400, json: async () => ({ message: 'Bad' }) }))
+			);
+			const s = createTrainState(() => makeData());
+			s.syncRating(null);
+			await s.saveInitialRating();
+			expect(s.showRatingSetup).toBe(true);
+			expect(s.trainerRating).toBeNull();
+		});
 	});
 
 	describe('sound', () => {
@@ -204,6 +216,18 @@ describe('createTrainState', () => {
 				url: '/api/settings',
 				body: { soundEnabled: false }
 			});
+		});
+
+		it('swallows a failed save instead of leaving a rejection unhandled', async () => {
+			const fetchMock = vi.fn(() => Promise.reject(new Error('offline')));
+			vi.stubGlobal('fetch', fetchMock);
+			const s = createTrainState(() => makeData());
+			s.syncSound(true);
+			s.toggleSound();
+			// Vitest fails the run on an unhandled rejection; let it surface if any.
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(s.soundEnabled).toBe(false);
 		});
 	});
 
@@ -388,7 +412,6 @@ describe('createTrainState', () => {
 				// Black is to move, so the engine's +0.20 is -20 from White's side.
 				evalCp: -20,
 				evalMate: null,
-				fen: fenAfter('e4', 'e5', 'Nf3'),
 				rated: true,
 				repertoireId: 7,
 				movesPlayed: 2,
@@ -397,6 +420,7 @@ describe('createTrainState', () => {
 				playerColor: 'WHITE',
 				ratingBracket: 3
 			});
+			expect(evaluate?.body).not.toHaveProperty('fen');
 			expect((evaluate?.body as { pgn: string }).pgn).toContain('[Result "*"]');
 			expect(s.evalResult).toEqual(EVAL);
 			expect(s.evalDisplay).toBe('+0.35');
@@ -516,6 +540,36 @@ describe('createTrainState', () => {
 			expect(s.evalResult).toEqual(EVAL);
 		});
 
+		it('does not rate a game whose final eval ran out of time', async () => {
+			analyse.mockResolvedValueOnce({
+				depth: 8,
+				done: true,
+				available: true,
+				moves: [{ uci: 'e2e4', scoreCp: 20, scoreMate: null }]
+			});
+			const calls = stubFetch({ 'POST /api/train/evaluate': () => EVAL });
+			const s = createTrainState(() => makeData());
+			s.syncRating(1200);
+			s.startTraining();
+			s.stopTraining();
+
+			await vi.waitFor(() => expect(s.evaluating).toBe(false));
+			expect(calls[0].body).toMatchObject({ rated: false, evalCp: 20 });
+			expect(s.ratingSkipped).toBe(true);
+		});
+
+		it('rates a game whose final eval reached full depth', async () => {
+			const calls = stubFetch({ 'POST /api/train/evaluate': () => EVAL });
+			const s = createTrainState(() => makeData());
+			s.syncRating(1200);
+			s.startTraining();
+			s.stopTraining();
+
+			await vi.waitFor(() => expect(s.evaluating).toBe(false));
+			expect(calls[0].body).toMatchObject({ rated: true });
+			expect(s.ratingSkipped).toBe(false);
+		});
+
 		it('never sends a rated session before the user has a rating', async () => {
 			const calls = stubFetch({ 'POST /api/train/evaluate': () => EVAL });
 			const s = createTrainState(() => makeData());
@@ -550,6 +604,57 @@ describe('createTrainState', () => {
 			await vi.waitFor(() => expect(s.phase).toBe('ended'));
 			// chess.js throws on an illegal SAN, which lands in the request's catch.
 			expect(s.endReason).toBe('Failed to fetch computer move.');
+		});
+
+		it('drops a computer reply that arrives after Stop and evaluates once', async () => {
+			const calls = stubFetch({
+				'GET /api/train/computer-move': computerReplies('e5'),
+				'POST /api/train/evaluate': () => EVAL
+			});
+			const s = createTrainState(() => makeData({ settings: { playbackSpeed: 50 } }));
+			s.syncRating(1200);
+			s.depthLimit = 1;
+			s.startTraining();
+			userMove(s, 'e4');
+			// The reply is fetched and waiting out its delay when the user stops.
+			await vi.waitFor(() => expect(calls.some((c) => c.method === 'GET')).toBe(true));
+			s.stopTraining();
+			await vi.waitFor(() => expect(s.evaluating).toBe(false));
+			await new Promise((r) => setTimeout(r, 100));
+
+			expect(s.gameMoves.map((m) => m.san)).toEqual(['e4']);
+			expect(s.waitingForComputer).toBe(false);
+			expect(calls.filter((c) => c.url === '/api/train/evaluate')).toHaveLength(1);
+			expect(s.endReason).toBe('Training stopped manually.');
+		});
+
+		it('drops a computer reply from a game the user has left', async () => {
+			stubFetch({
+				'GET /api/train/computer-move': computerReplies('e5'),
+				'POST /api/train/evaluate': () => EVAL
+			});
+			const s = createTrainState(() => makeData({ settings: { playbackSpeed: 50 } }));
+			s.startTraining();
+			userMove(s, 'e4');
+			// Straight into a new game while the first game's reply is pending.
+			s.stopTraining();
+			s.playAgain();
+			s.startTraining();
+			await new Promise((r) => setTimeout(r, 100));
+			expect(s.phase).toBe('playing');
+			expect(s.gameMoves).toEqual([]);
+			expect(fenKey(s.currentFen)).toBe(fenKey(STARTING_FEN));
+		});
+
+		it('shows no evaluation when the evaluate request fails', async () => {
+			const fetchMock = vi.fn(async () => ({ ok: false, json: async () => ({ message: 'Bad' }) }));
+			vi.stubGlobal('fetch', fetchMock);
+			const s = createTrainState(() => makeData());
+			s.startTraining();
+			userMove(s, 'e4');
+			s.stopTraining();
+			await vi.waitFor(() => expect(s.evaluating).toBe(false));
+			expect(s.evalResult).toBeNull();
 		});
 
 		it('hands the game to Review and resets on play again', async () => {

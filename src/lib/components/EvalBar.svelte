@@ -2,11 +2,15 @@
 	EvalBar — vertical evaluation bar for Build Mode.
 
 	Displays a thin vertical bar beside the chessboard showing the engine's
-	position evaluation at a glance. White portion on top (or bottom when
-	board is flipped), with the numerical eval overlaid on the larger half.
+	position evaluation at a glance. White's portion is at the bottom (at the
+	top when the board is flipped, so it always sits on White's side), with the
+	numerical eval overlaid on the larger half. Screen readers get the eval as
+	text with its sign spelled out, since the bar shows it by colour and side.
 -->
 
 <script lang="ts">
+	import { describeEval } from '$lib/board/describe';
+
 	interface Props {
 		evalCp: number | null;
 		evalMate: number | null;
@@ -57,8 +61,9 @@
 	const labelOnTop = $derived(topIsBlack ? !whiteAdvantage : whiteAdvantage);
 </script>
 
-<div class="eval-bar">
+<div class="eval-bar" role="img" aria-label={describeEval(evalCp, evalMate)}>
 	<div
+		aria-hidden="true"
 		class="eval-bar-top"
 		class:is-white={!topIsBlack}
 		class:is-black={topIsBlack}
@@ -70,6 +75,7 @@
 	</div>
 
 	<div
+		aria-hidden="true"
 		class="eval-bar-bottom"
 		class:is-white={topIsBlack}
 		class:is-black={!topIsBlack}

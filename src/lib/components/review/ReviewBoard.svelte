@@ -4,6 +4,7 @@
 	arrow keys step through the game while this column is shown.
 -->
 <script lang="ts">
+	import { saveBoardSize } from '$lib/settings-client';
 	import ChessBoard from '$lib/components/ChessBoard.svelte';
 	import ResizableBoard from '$lib/components/ResizableBoard.svelte';
 	import type { GameAnalysis } from '$lib/pgn';
@@ -22,16 +23,6 @@
 		boardSize: number;
 		boardTheme: string;
 	} = $props();
-
-	// Fire-and-forget: the ResizableBoard component already shows the new size
-	// via localWidth; no invalidateAll() needed (which would reset review state).
-	function handleBoardResize(size: number) {
-		fetch('/api/settings', {
-			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ boardSize: size })
-		});
-	}
 
 	// Keyboard navigation: ← / → step through the game.
 	$effect(() => {
@@ -54,7 +45,7 @@
 </script>
 
 <div class="board-col">
-	<ResizableBoard {boardSize} onResize={handleBoardResize}>
+	<ResizableBoard {boardSize} onResize={saveBoardSize}>
 		<div class="board-wrap">
 			<ChessBoard
 				fen={review.currentFen}
